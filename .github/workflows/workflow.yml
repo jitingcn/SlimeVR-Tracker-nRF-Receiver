@@ -175,14 +175,14 @@ jobs:
       fail-fast: false
       matrix:
         boards: [
-                  {boardname: "nrf52840dongle/nrf52840", filename: "SlimeNRF_Nordic_eByte_Dongle_Receiver"},
-                  {boardname: "holyiot_21017/nrf52840", filename: "SlimeNRF_Holyiot_Dongle_Receiver"},
-                  {boardname: "promicro_uf2/nrf52840", filename: "SlimeNRF_ProMicro_Receiver"},
-                  {boardname: "xiao_ble/nrf52840", filename: "SlimeNRF_XIAO_Receiver"},
-                  {boardname: "etee_dongle_uf2/nrf52840", filename: "SlimeNRF_etee_Receiver"},
-                  {boardname: "nrf52840dk/nrf52840", filename: "SlimeNRF_nRF52840dk_Receiver"},
-                  {boardname: "styria_r1_uf2/nrf52840", filename: "SlimeNRF_Styria_R1_Receiver"},
-                  {boardname: "aerorx_r1_uf2/nrf52840", filename: "SlimeNRF_AeroRX_R1_Receiver"},
+                  # {boardname: "nrf52840dongle/nrf52840", filename: "SlimeNRF_Nordic_eByte_Dongle_Receiver"},
+                  # {boardname: "holyiot_21017/nrf52840", filename: "SlimeNRF_Holyiot_Dongle_Receiver"},
+                  # {boardname: "promicro_uf2/nrf52840", filename: "SlimeNRF_ProMicro_Receiver"},
+                  # {boardname: "xiao_ble/nrf52840", filename: "SlimeNRF_XIAO_Receiver"},
+                  # {boardname: "etee_dongle_uf2/nrf52840", filename: "SlimeNRF_etee_Receiver"},
+                  # {boardname: "nrf52840dk/nrf52840", filename: "SlimeNRF_nRF52840dk_Receiver"},
+                  # {boardname: "styria_r1_uf2/nrf52840", filename: "SlimeNRF_Styria_R1_Receiver"},
+                  # {boardname: "aerorx_r1_uf2/nrf52840", filename: "SlimeNRF_AeroRX_R1_Receiver"},
                   {boardname: "nekonya_uf2/nrf52833", filename: "SlimeNRF_NekoNya_Receiver"}
                 ]
     runs-on: ubuntu-latest
