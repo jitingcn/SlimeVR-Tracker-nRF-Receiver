@@ -41,14 +41,26 @@
         zephyr,ieee802154 = &ieee802154;
     };
 
-    nrf_radio_fem: rfx2401c {
+    nrf_radio_fem: at2401c {
+        /* 声明这是一个使用两个控制引脚的通用 FEM 射频模块 */
         compatible = "generic-fem-two-ctrl-pins";
-        ctx-gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+        
+        /* TXEN (发送使能) -> 硬件接的是 P0.17 */
+        ctx-gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;
         ctx-settle-time-us = <1>;
-        crx-gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;
+        
+        /* RXEN (接收使能) -> 硬件接的是 P0.15 */
+        crx-gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
         crx-settle-time-us = <1>;
+        
+        /* AT2401C 理论增益值（Zephyr 会据此优化内部发射功率） */
         tx-gain-db = <17>;
         rx-gain-db = <12>;
+    };
+
+    /* 确保系统的射频天线绑定了这个放大器 */
+    &radio {
+        fem = <&nrf_radio_fem>;
     };
 
     /* 修复：删除了双重占用的 gpio-leds 节点，只保留 pwmleds */
