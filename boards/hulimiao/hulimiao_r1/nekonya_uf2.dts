@@ -66,6 +66,19 @@
         };
     };
 
+	leds {
+        compatible = "gpio-leds";
+        led0_red: led_red_gpio {
+            gpios = <&gpio0 28 GPIO_ACTIVE_LOW>;
+        };
+        led1_green: led_green_gpio {
+            gpios = <&gpio0 30 GPIO_ACTIVE_LOW>;
+        };
+        led2_blue: led_blue_gpio {
+            gpios = <&gpio0 29 GPIO_ACTIVE_LOW>;
+        };
+    };
+
     buttons {
         compatible = "gpio-keys";
         button0: button_swo {
@@ -77,10 +90,12 @@
 
     aliases {
         sw0 = &button0;
-        /* 更新：让系统默认的 led 别名直接指向 PWM 节点 */
-        led0 = &red_pwm_led;
-        led1 = &green_pwm_led;
-        led2 = &blue_pwm_led;
+        /* 改回指向普通 gpio led，迎合接收器底层代码 */
+        led0 = &led0_red;
+        led1 = &led1_green;
+        led2 = &led2_blue;
+        
+        /* 保持 pwm 别名不变，以防其他模块需要 */
         pwm-led0 = &red_pwm_led;
         pwm-led1 = &green_pwm_led;
         pwm-led2 = &blue_pwm_led;
