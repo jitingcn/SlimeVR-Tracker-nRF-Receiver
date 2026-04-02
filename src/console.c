@@ -505,7 +505,7 @@ static void console_thread(void)
 				printk("  send all dfu         - Enter DFU mode on all trackers\n");
 				printk(
 					"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
-					"reset, ping, tcal, tdma\n"
+					"reset, ping, tcal, tdma, test\n"
 				);
 			} else {
 				// Parse target (id or "all")
@@ -873,6 +873,35 @@ static void console_thread(void)
 							printk("Unknown tdma subcommand: %s (use 'on' or 'off')\n", arg3);
 						}
 						continue;
+					} else if (strcmp(arg2, "test") == 0) {
+						// test mode command - supports "on/off"
+						if (!arg3) {
+							printk("Usage: send <id|all> test <on|off>\n");
+							printk("Example: send 0 test on       - Enable test mode on tracker 0\n");
+							printk("Example: send all test on     - Enable test mode on all trackers\n");
+							continue;
+						}
+
+						if (strcmp(arg3, "on") == 0) {
+							if (target_all) {
+								esb_send_remote_command_all(ESB_PONG_FLAG_TEST_MODE_ON);
+								printk("Test mode enable request sent to all trackers\n");
+							} else {
+								esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TEST_MODE_ON);
+								printk("Test mode enable request sent to tracker %d\n", tracker_id);
+							}
+						} else if (strcmp(arg3, "off") == 0) {
+							if (target_all) {
+								esb_send_remote_command_all(ESB_PONG_FLAG_TEST_MODE_OFF);
+								printk("Test mode disable request sent to all trackers\n");
+							} else {
+								esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TEST_MODE_OFF);
+								printk("Test mode disable request sent to tracker %d\n", tracker_id);
+							}
+						} else {
+							printk("Unknown test subcommand: %s (use 'on' or 'off')\n", arg3);
+						}
+						continue;
 					}
 
 					if (cmd_flag != 0xFF) {
@@ -887,7 +916,7 @@ static void console_thread(void)
 					printk("Unknown command: %s\n", arg2);
 					printk(
 						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, fusion, sens, "
-						"reset, ping, tcal, tdma\n"
+						"reset, ping, tcal, tdma, test\n"
 					);
 				}
 			}

@@ -67,6 +67,8 @@
 #define ESB_PONG_FLAG_TCAL_OFF 0x1C      // Disable T-Cal (temperature calibration)
 #define ESB_PONG_FLAG_TDMA_ON 0x1D       // Enable TDMA scheduling
 #define ESB_PONG_FLAG_TDMA_OFF 0x1E      // Disable TDMA scheduling
+#define ESB_PONG_FLAG_TEST_MODE_ON 0x1F  // Enable battery drain test mode
+#define ESB_PONG_FLAG_TEST_MODE_OFF 0x20 // Disable battery drain test mode
 
 void event_handler(struct esb_evt const *event);
 int clocks_start(void);

@@ -37,16 +37,37 @@ LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 #define PAIRING_TIMEOUT_SECONDS CONFIG_PAIRING_TIMEOUT
 
-// TDMA parameters (must match Tracker's tdma.h)
-#define TDMA_ENABLED 0
-#define TDMA_NUM_TRACKERS 10
-#define TDMA_SLOT_TICKS    20  /* ~610μs at 32768Hz */
-#define TDMA_FRAME_TICKS   (TDMA_SLOT_TICKS * TDMA_NUM_TRACKERS)  /* 200 ticks ≈ 6.1ms */
+// TDMA parameters — now dynamically computed based on active tracker count.
+// The receiver periodically scans for active trackers and packs per-tracker
+// TDMA config (slot index, total slots, slot ticks, epoch) into a volatile
+// uint32_t that the RADIO ISR reads atomically when constructing PONG packets.
+#define TDMA_ENABLED 1
+#define TDMA_MIN_SLOT_TICKS    14  /* minimum slot width (~427μs at 32768Hz) */
+#define TDMA_MAX_TPS_TARGET   200 /* max TPS per tracker */
+#define TDMA_TOLERANCE_TICKS    3  /* slot violation tolerance band */
+#define TDMA_RECONFIG_MIN_MS 5000  /* minimum interval between TDMA reconfigurations */
+
+// Dynamic TDMA config packed into uint32_t for atomic ISR access (ARM Cortex-M).
+// Layout: [31:24]=assigned_slot, [23:16]=total_slots, [15:8]=slot_ticks, [7:0]=epoch
+static volatile uint32_t tdma_config_packed[MAX_TRACKERS];
+static uint8_t tdma_config_epoch;           // wrapping counter, incremented on each recalc
+static uint8_t tdma_dynamic_active_count;   // current number of active trackers
+static uint8_t tdma_dynamic_slot_ticks;     // current slot width in ticks
+static uint32_t tdma_active_mask;           // bitmask of active trackers (for change detection)
+static int64_t tdma_last_reconfig_time;     // timestamp of last reconfiguration (0 = never)
+
+static inline uint32_t tdma_pack_config(uint8_t slot, uint8_t total, uint8_t slot_ticks, uint8_t epoch)
+{
+	return ((uint32_t)slot << 24) | ((uint32_t)total << 16)
+	     | ((uint32_t)slot_ticks << 8) | (uint32_t)epoch;
+}
+
+/* Forward declaration — defined after last_ping_time / PING_TIMEOUT_MS */
+static void tdma_recalculate(void);
 
 static struct esb_payload rx_payload;
 // static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
 //														  0, 0, 0, 0, 0, 0, 0, 0);
-static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0, 0, 0, 0, 0);
 // static struct esb_payload tx_payload_timer = ESB_CREATE_PAYLOAD(0,
 //														  0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 // 0, 0, 0, 0, 0, 0, 0);
@@ -76,6 +97,92 @@ static volatile int16_t pending_sens_data[MAX_TRACKERS][3];   // SENS_SET sensit
 static uint8_t receiver_rf_channel = 0xFF; // Current RF channel of the receiver, 0xFF indicates using default value
 
 #define PING_TIMEOUT_MS 5000 // PING timeout threshold: 5 seconds
+
+/**
+ * Recalculate dynamic TDMA parameters based on active trackers.
+ * Called periodically from esb_stats_thread (non-ISR context).
+ */
+static void tdma_recalculate(void)
+{
+	uint64_t now = k_uptime_get();
+	uint8_t active_ids[MAX_TRACKERS];
+	uint8_t active_count = 0;
+	uint32_t new_mask = 0;
+
+	/* Scan for active trackers (received PING within timeout) */
+	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
+		if (last_ping_time[i] > 0 &&
+		    (now - last_ping_time[i]) <= PING_TIMEOUT_MS) {
+			active_ids[active_count++] = i;
+			new_mask |= (1U << i);
+		}
+	}
+
+	/* Skip update if active set hasn't changed */
+	if (new_mask == tdma_active_mask && active_count == tdma_dynamic_active_count) {
+		return;
+	}
+
+	/*
+	 * Rate-limit reconfiguration when trackers *disappear* to avoid
+	 * flapping from brief PING gaps.  New trackers should get slots
+	 * immediately so they stop transmitting in ALOHA mode ASAP.
+	 */
+	bool new_trackers_appeared = (new_mask & ~tdma_active_mask) != 0;
+	if (!new_trackers_appeared && tdma_last_reconfig_time > 0 &&
+	    (now - tdma_last_reconfig_time) < TDMA_RECONFIG_MIN_MS) {
+		return;
+	}
+
+	/* active_ids is already sorted (ascending) since we iterate 0..N */
+
+	uint8_t slot_ticks;
+	if (active_count <= 1) {
+		slot_ticks = TDMA_MIN_SLOT_TICKS;
+		if (active_count == 1) {
+			/* slot_ticks = 32768/200 = 163, but cap to keep frame short */
+			slot_ticks = 163;
+		}
+	} else {
+		/* slot_ticks = ceil(32768 / (200 * active_count)) */
+		uint32_t numerator = 32768;
+		uint32_t denominator = TDMA_MAX_TPS_TARGET * active_count;
+		slot_ticks = (uint8_t)((numerator + denominator - 1) / denominator);
+		if (slot_ticks < TDMA_MIN_SLOT_TICKS) {
+			slot_ticks = TDMA_MIN_SLOT_TICKS;
+		}
+	}
+
+	tdma_config_epoch++;
+	uint8_t epoch = tdma_config_epoch;
+
+	/* Pack config for each active tracker */
+	for (uint8_t s = 0; s < active_count; s++) {
+		uint8_t tid = active_ids[s];
+		tdma_config_packed[tid] = tdma_pack_config(s, active_count, slot_ticks, epoch);
+	}
+
+	/* Mark inactive trackers as unassigned */
+	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+		if (!(new_mask & (1U << i))) {
+			tdma_config_packed[i] = tdma_pack_config(0xFF, active_count, slot_ticks, epoch);
+		}
+	}
+
+	uint8_t old_count = tdma_dynamic_active_count;
+	uint8_t old_slot = tdma_dynamic_slot_ticks;
+	tdma_dynamic_active_count = active_count;
+	tdma_dynamic_slot_ticks = slot_ticks;
+	tdma_active_mask = new_mask;
+	tdma_last_reconfig_time = now;
+
+	if (active_count != old_count || slot_ticks != old_slot) {
+		uint32_t frame_ticks = (uint32_t)slot_ticks * active_count;
+		uint32_t est_tps = frame_ticks > 0 ? 32768 / frame_ticks : 0;
+		LOG_INF("TDMA reconfig: %u active, slot=%u ticks, frame=%u ticks, ~%u TPS/trk (epoch=%u)",
+			active_count, slot_ticks, frame_ticks, est_tps, epoch);
+	}
+}
 
 // Channel change confirmation tracking
 static atomic_t channel_change_pending = ATOMIC_INIT(0); // Indicates if a channel change is pending
@@ -175,19 +282,11 @@ static volatile uint32_t g_ping_isr_rx_ticks[MAX_TRACKERS] = {0};
 static volatile bool g_ping_isr_rx_ticks_valid[MAX_TRACKERS] = {false};
 
 #if TDMA_ENABLED
-/*
- * Tolerance band for TDMA violation detection.
- * Packets within TDMA_TOLERANCE_TICKS of their slot boundary (either side)
- * are not counted as violations.  This absorbs EVENT_IRQ scheduling jitter
- * (~2-5 ticks) and k_sleep() rounding on the tracker side.
- */
-#define TDMA_TOLERANCE_TICKS 3
-
 /**
  * Check if a packet from a tracker arrived in its assigned TDMA slot.
- * Updates statistics for diagnostics.
+ * Uses dynamic parameters from tdma_config_packed[].
  *
- * @param tracker_id   The tracker's ID (0-9)
+ * @param tracker_id   The tracker's ID (0-15)
  * @param rx_ticks     Receiver time in ticks when packet arrived
  */
 static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
@@ -196,17 +295,21 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
 		return;
 	}
 
-	/* Calculate which slot this tracker should use */
-	uint8_t expected_slot = tracker_id % TDMA_NUM_TRACKERS;
+	/* Read dynamic TDMA config (atomic 32-bit load) */
+	uint32_t cfg = tdma_config_packed[tracker_id];
+	uint8_t expected_slot = (cfg >> 24) & 0xFF;
+	uint8_t total_slots   = (cfg >> 16) & 0xFF;
+	uint8_t slot_ticks    = (cfg >> 8) & 0xFF;
+
+	/* Skip validation if tracker has no slot assignment or config invalid */
+	if (expected_slot == 0xFF || total_slots == 0 || slot_ticks == 0) {
+		return;
+	}
+
+	uint32_t frame_ticks = (uint32_t)slot_ticks * total_slots;
 
 	/*
 	 * Compensate receiver clock vs tracker clock offset.
-	 *
-	 * g_last_ping_rx_time_diff_ticks[id] = rx_ticks_at_ping - tracker_estimated_rx_ticks
-	 * This is the systematic bias between receiver time and tracker's view of
-	 * receiver time.  Subtracting it converts the receiver timestamp to the
-	 * same reference frame the tracker used when scheduling its transmission,
-	 * making TDMA slot assignment meaningful.
 	 */
 	int32_t clock_bias = g_last_ping_rx_time_diff_valid[tracker_id]
 		? g_last_ping_rx_time_diff_ticks[tracker_id]
@@ -214,24 +317,19 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
 	uint32_t adjusted_rx_ticks = (uint32_t)((int32_t)rx_ticks - clock_bias);
 
 	/* Calculate current position in the TDMA frame (tracker-relative) */
-	uint32_t frame_phase = adjusted_rx_ticks % TDMA_FRAME_TICKS;
+	uint32_t frame_phase = adjusted_rx_ticks % frame_ticks;
 
 	/*
 	 * Offset relative to the CENTER of this tracker's assigned slot.
-	 * Center = expected_slot * TDMA_SLOT_TICKS + TDMA_SLOT_TICKS / 2
-	 *
-	 * Normalize to [-FRAME_TICKS/2, FRAME_TICKS/2] to handle
-	 * frame boundary wrap-around correctly (e.g. slot 0 packet arriving
-	 * 1 tick early should be -1, not +179).
+	 * Normalize to [-frame_ticks/2, frame_ticks/2] for wrap-around.
 	 */
-	int32_t slot_center = (int32_t)(expected_slot * TDMA_SLOT_TICKS + TDMA_SLOT_TICKS / 2);
+	int32_t slot_center = (int32_t)(expected_slot * slot_ticks + slot_ticks / 2);
 	int32_t ref_offset = (int32_t)frame_phase - slot_center;
 
-	/* Normalize wrap-around: bring ref_offset into [-FRAME/2, FRAME/2] */
-	if (ref_offset > (int32_t)(TDMA_FRAME_TICKS / 2)) {
-		ref_offset -= TDMA_FRAME_TICKS;
-	} else if (ref_offset < -(int32_t)(TDMA_FRAME_TICKS / 2)) {
-		ref_offset += TDMA_FRAME_TICKS;
+	if (ref_offset > (int32_t)(frame_ticks / 2)) {
+		ref_offset -= frame_ticks;
+	} else if (ref_offset < -(int32_t)(frame_ticks / 2)) {
+		ref_offset += frame_ticks;
 	}
 
 	/* Update statistics */
@@ -252,23 +350,17 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
 		}
 	}
 
-	/*
-	 * Check for slot violation with tolerance band.
-	 * A packet is in-slot if ref_offset (from center) is within
-	 * [-SLOT/2 - TOLERANCE, +SLOT/2 + TOLERANCE], i.e. abs(ref_offset)
-	 * is at most SLOT/2 + TOLERANCE.
-	 */
-	int32_t half_slot = (int32_t)(TDMA_SLOT_TICKS / 2);
+	int32_t half_slot = (int32_t)(slot_ticks / 2);
 	int32_t abs_offset = ref_offset < 0 ? -ref_offset : ref_offset;
 	if (abs_offset > half_slot + TDMA_TOLERANCE_TICKS) {
 		stats->violations++;
 
-		/* Rate-limit per tracker to avoid flooding logs */
 		if ((stats->violations & 0x0F) == 1) {
 			LOG_DBG(
-				"TDMA viol trk=%u exp_slot=%u phase=%u off=%d bias=%d",
+				"TDMA viol trk=%u exp_slot=%u/%u phase=%u off=%d bias=%d",
 				tracker_id,
 				expected_slot,
+				total_slots,
 				frame_phase,
 				ref_offset,
 				clock_bias
@@ -561,6 +653,9 @@ static void esb_stats_thread(void)
 			}
 			LOG_INF("Total TPS: %u", total_tps);
 			last_tps_print_time = now;
+
+			/* Recalculate dynamic TDMA config every TPS print cycle (~1s) */
+			tdma_recalculate();
 		}
 
 		// Print detailed stats only when enabled
@@ -599,8 +694,74 @@ static void esb_stats_thread(void)
  * -------------------------------------------------------------------------*/
 static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 				uint32_t pipe_id, struct esb_payload *ack_payload,
-				bool *has_ack_payload)
+				bool *has_ack_payload, bool *suppress_ack)
 {
+	*has_ack_payload = false;
+	*suppress_ack = false;
+
+	/* ---- Discovery pairing packets on pipe 0 ---- */
+	if (pipe_id == 0 && data_length == 8) {
+		uint8_t step = pdu_data[1];
+		uint64_t raw_addr = 0;
+		uint64_t found_addr = 0;
+		int known_id = -1;
+		uint8_t checksum = crc8_ccitt(0x07, &pdu_data[2], 6);
+
+		if (checksum == 0) {
+			checksum = 8;
+		}
+
+		memcpy(&raw_addr, pdu_data, sizeof(raw_addr));
+		found_addr = (raw_addr >> 16) & 0xFFFFFFFFFFFFULL;
+
+		if (checksum != pdu_data[0] || found_addr == 0) {
+			*suppress_ack = true;
+			return;
+		}
+
+		known_id = esb_find_tracker(found_addr);
+
+		if (!esb_pairing) {
+			*suppress_ack = true;
+			return;
+		}
+
+		if (pairing_new_devices_blocked && known_id < 0) {
+			*suppress_ack = true;
+			return;
+		}
+
+		if (step == 0) {
+			return;
+		}
+
+		if (step == 1) {
+			if (known_id < 0) {
+				*suppress_ack = true;
+				return;
+			}
+
+			ack_payload->pipe = pipe_id;
+			ack_payload->length = 8;
+			ack_payload->noack = false;
+			ack_payload->data[0] = checksum;
+			ack_payload->data[1] = (uint8_t)known_id;
+			memcpy(&ack_payload->data[2], receiver_device_addr, 6);
+			*has_ack_payload = true;
+			return;
+		}
+
+		if (step == 2) {
+			if (known_id < 0) {
+				*suppress_ack = true;
+			}
+			return;
+		}
+
+		*suppress_ack = true;
+		return;
+	}
+
 	/* ---- PING → PONG (immediate response) ---- */
 	if (data_length == ESB_PING_LEN && pdu_data[0] == ESB_PING_TYPE) {
 		uint8_t tracker_id = pdu_data[1];
@@ -657,16 +818,13 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 				ack_payload->data[10] = (ch >> 8) & 0xFF;
 				ack_payload->data[11] = (ch) & 0xFF;
 			} else if (cmd == ESB_PONG_FLAG_NORMAL) {
-				/* ticks_diff for clock skew compensation */
-				uint32_t est = ((uint32_t)pdu_data[3] << 24)
-					     | ((uint32_t)pdu_data[4] << 16)
-					     | ((uint32_t)pdu_data[5] << 8)
-					     | ((uint32_t)pdu_data[6]);
-				int32_t diff = (int32_t)(rx_ticks - est);
-				ack_payload->data[8] = (diff >> 24) & 0xFF;
-				ack_payload->data[9] = (diff >> 16) & 0xFF;
-				ack_payload->data[10] = (diff >> 8) & 0xFF;
-				ack_payload->data[11] = (diff) & 0xFF;
+				/* Piggyback dynamic TDMA config in bytes 8-11.
+				 * Atomic 32-bit read on ARM Cortex-M — ISR safe. */
+				uint32_t cfg = tdma_config_packed[tracker_id];
+				ack_payload->data[8]  = (cfg >> 24) & 0xFF; /* assigned_slot */
+				ack_payload->data[9]  = (cfg >> 16) & 0xFF; /* total_slots */
+				ack_payload->data[10] = (cfg >> 8) & 0xFF;  /* slot_ticks */
+				ack_payload->data[11] = (cfg) & 0xFF;       /* config_epoch */
 			} else {
 				memset(&ack_payload->data[8], 0, 4);
 			}
@@ -674,35 +832,6 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 
 		ack_payload->data[ESB_PONG_LEN - 1] =
 			crc8_ccitt(0x07, ack_payload->data, ESB_PONG_LEN - 1);
-		*has_ack_payload = true;
-		return;
-	}
-
-	/* ---- Pairing response (on step 1, when tracker expects ACK) ---- */
-	if (data_length == 8 && pdu_data[1] == 1) {
-		uint64_t raw_addr = 0;
-
-		memcpy(&raw_addr, pdu_data, sizeof(raw_addr));
-		uint64_t found_addr = (raw_addr >> 16) & 0xFFFFFFFFFFFFULL;
-		uint8_t checksum = crc8_ccitt(0x07, &pdu_data[2], 6);
-		if (checksum == 0) {
-			checksum = 8;
-		}
-		if (checksum != pdu_data[0] || found_addr == 0) {
-			return;
-		}
-
-		int known_id = esb_find_tracker(found_addr);
-		if (known_id < 0 || !esb_pairing) {
-			return;
-		}
-
-		ack_payload->pipe = pipe_id;
-		ack_payload->length = 8;
-		ack_payload->noack = false;
-		ack_payload->data[0] = checksum;
-		ack_payload->data[1] = (uint8_t)known_id;
-		memcpy(&ack_payload->data[2], receiver_device_addr, 6);
 		*has_ack_payload = true;
 		return;
 	}
@@ -894,7 +1023,7 @@ void event_handler(struct esb_evt const *event)
 						}
 
 #if TDMA_ENABLED
-						if (stats->violations > 2) {
+						if (stats->violations > 12 && esb_get_stats_detailed_enabled()) {
 							LOG_WRN(
 								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld ticks StdDev=%u ticks Range=[%d, %d] "
 								"RxTimeDiff=%s%llu us",
@@ -1413,20 +1542,20 @@ int esb_initialize(bool tx)
 	if (!err) {
 		// Use saved channel if available, otherwise use default
 		uint8_t channel_to_use = (receiver_rf_channel <= 100) ? receiver_rf_channel : RADIO_RF_CHANNEL;
-		esb_set_rf_channel(channel_to_use);
+		err = esb_set_rf_channel(channel_to_use);
 		LOG_INF("Set RF channel to %u", channel_to_use);
 	}
 
 	if (!err) {
-		esb_set_base_address_0(base_addr_0);
+		err = esb_set_base_address_0(base_addr_0);
 	}
 
 	if (!err) {
-		esb_set_base_address_1(base_addr_1);
+		err = esb_set_base_address_1(base_addr_1);
 	}
 
 	if (!err) {
-		esb_set_prefixes(addr_prefix, ARRAY_SIZE(addr_prefix));
+		err = esb_set_prefixes(addr_prefix, ARRAY_SIZE(addr_prefix));
 	}
 
 	if (err) {
@@ -1654,9 +1783,6 @@ static bool esb_parse_pair(const uint8_t packet[8])
 
 	ack_valid = checksum_valid && send_tracker_id < MAX_TRACKERS;
 
-	tx_payload_pair.data[0] = ack_valid ? packet[0] : 0;
-	tx_payload_pair.data[1] = (send_tracker_id < MAX_TRACKERS) ? (uint8_t)send_tracker_id : 0xFF;
-
 	return ack_valid;
 }
 
@@ -1699,8 +1825,7 @@ static void process_pairing_queue(void)
 
 		// Device is now registered — ack_handler will respond on the
 		// next pairing step 1 via esb_find_tracker() lookup.
-		LOG_INF("New device registered: id=%u, ack_handler will respond on next step 1",
-			tx_payload_pair.data[1]);
+		LOG_INF("New device registered, ack_handler will respond on next step 1");
 		set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
 	}
 }
@@ -1897,6 +2022,12 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 		case ESB_PONG_FLAG_TDMA_OFF:
 			cmd_name = "TDMA_OFF";
 			break;
+		case ESB_PONG_FLAG_TEST_MODE_ON:
+			cmd_name = "TEST_MODE_ON";
+			break;
+		case ESB_PONG_FLAG_TEST_MODE_OFF:
+			cmd_name = "TEST_MODE_OFF";
+			break;
 		}
 		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", cmd_name, command_flag, tracker_id);
 	} else {
@@ -1999,6 +2130,12 @@ void esb_send_remote_command_all(uint8_t command_flag)
 		break;
 	case ESB_PONG_FLAG_TDMA_OFF:
 		cmd_name = "TDMA_OFF";
+		break;
+	case ESB_PONG_FLAG_TEST_MODE_ON:
+		cmd_name = "TEST_MODE_ON";
+		break;
+	case ESB_PONG_FLAG_TEST_MODE_OFF:
+		cmd_name = "TEST_MODE_OFF";
 		break;
 	}
 
@@ -2227,16 +2364,36 @@ static void esb_thread(void)
 	}
 	LOG_INF("%d/%d devices stored", tracker_count, MAX_TRACKERS);
 
+	/* Pre-fill TDMA config based on stored tracker count so trackers
+	 * receive a valid config on the very first PONG (before the periodic
+	 * recalculation detects them as active). */
+	if (tracker_count > 0) {
+		uint8_t init_slot;
+		if (tracker_count == 1) {
+			init_slot = 163;
+		} else {
+			uint32_t denom = TDMA_MAX_TPS_TARGET * tracker_count;
+			init_slot = (uint8_t)((32768 + denom - 1) / denom);
+			if (init_slot < TDMA_MIN_SLOT_TICKS) init_slot = TDMA_MIN_SLOT_TICKS;
+		}
+		tdma_config_epoch++;
+		for (uint8_t i = 0; i < tracker_count && i < MAX_TRACKERS; i++) {
+			tdma_config_packed[i] = tdma_pack_config(
+				i, tracker_count, init_slot, tdma_config_epoch);
+		}
+		tdma_dynamic_active_count = tracker_count;
+		tdma_dynamic_slot_ticks = init_slot;
+		tdma_active_mask = (1U << tracker_count) - 1;
+		uint32_t init_frame = (uint32_t)init_slot * tracker_count;
+		LOG_INF("TDMA initial: %u stored, slot=%u, frame=%u, ~%u TPS (epoch=%u)",
+			tracker_count, init_slot, init_frame,
+			init_frame > 0 ? 32768 / init_frame : 0, tdma_config_epoch);
+	}
+
 	// Cache receiver device address for ISR pairing responses
 	uint64_t *dev_addr = (uint64_t *)NRF_FICR->DEVICEADDR;
 	memcpy(receiver_device_addr, dev_addr, 6);
 	LOG_INF("Receiver address: %012llX", *dev_addr & 0xFFFFFFFFFFFF);
-
-	// Pre-fill tx_payload_pair with receiver address (for thread-side pairing responses)
-	tx_payload_pair.pipe = 0;
-	tx_payload_pair.noack = false;
-	tx_payload_pair.length = 8;
-	memcpy(&tx_payload_pair.data[2], receiver_device_addr, 6);
 
 	// Always start in unified mode: pipe 0 for pairing, pipes 1-7 for data
 	esb_receive();
