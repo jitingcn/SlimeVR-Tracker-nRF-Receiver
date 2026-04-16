@@ -262,10 +262,10 @@ static void button_thread(void)
 
 			switch (num_presses)
 			{
-			case 1: // Status check - LED blink 3 times
-				LOG_INF("Status check requested");
-				// Use ONESHOT_POWERON mode: fast blink 3 times then stop
-				set_led(SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PRIORITY_HIGHEST);
+			case 1: // Shutdown all active trackers
+				LOG_INF("Shutdown all trackers requested");
+				esb_request_all_shutdown();
+				set_led(SYS_LED_PATTERN_ONESHOT_POWEROFF, SYS_LED_PRIORITY_HIGHEST);
 				break;
 
 			case 2: // Exit pairing mode

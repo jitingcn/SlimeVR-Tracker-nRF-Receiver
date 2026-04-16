@@ -97,6 +97,7 @@ static volatile int16_t pending_sens_data[MAX_TRACKERS][3];   // SENS_SET sensit
 static uint8_t receiver_rf_channel = 0xFF; // Current RF channel of the receiver, 0xFF indicates using default value
 
 #define PING_TIMEOUT_MS 5000 // PING timeout threshold: 5 seconds
+#define REMOTE_COMMAND_ACTIVE_SCAN_MS 1000 // Time window to detect trackers actively sending data
 
 /**
  * Recalculate dynamic TDMA parameters based on active trackers.
@@ -1971,6 +1972,9 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 		case ESB_PONG_FLAG_DFU:
 			cmd_name = "DFU";
 			break;
+		case ESB_PONG_FLAG_DFU_OTA:
+			cmd_name = "DFU_OTA";
+			break;
 		case ESB_PONG_FLAG_SET_CHANNEL:
 			cmd_name = "SET_CHANNEL";
 			break;
@@ -2039,6 +2043,9 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 void esb_send_remote_command_all(uint8_t command_flag)
 {
 	uint8_t count = 0;
+	int64_t scan_start_time = k_uptime_get();
+	char active_tracker_ids[(MAX_TRACKERS * 4) + 1];
+	size_t active_tracker_ids_len = 0;
 	const char *cmd_name = "UNKNOWN";
 	switch (command_flag) {
 	case ESB_PONG_FLAG_NORMAL:
@@ -2079,6 +2086,9 @@ void esb_send_remote_command_all(uint8_t command_flag)
 		break;
 	case ESB_PONG_FLAG_DFU:
 		cmd_name = "DFU";
+		break;
+	case ESB_PONG_FLAG_DFU_OTA:
+		cmd_name = "DFU_OTA";
 		break;
 	case ESB_PONG_FLAG_SET_CHANNEL:
 		cmd_name = "SET_CHANNEL";
@@ -2139,16 +2149,40 @@ void esb_send_remote_command_all(uint8_t command_flag)
 		break;
 	}
 
+	k_msleep(REMOTE_COMMAND_ACTIVE_SCAN_MS);
+
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
-		if (stored_tracker_addr[i] != 0) {
+		if (stored_tracker_addr[i] != 0 && tracker_stats[i].last_packet_time >= scan_start_time) {
 			tracker_remote_command[i] = command_flag;
+			if (active_tracker_ids_len < sizeof(active_tracker_ids)) {
+				int written = snprintk(
+					&active_tracker_ids[active_tracker_ids_len],
+					sizeof(active_tracker_ids) - active_tracker_ids_len,
+					count == 0 ? "%u" : ",%u",
+					i
+				);
+				if (written > 0) {
+					active_tracker_ids_len += MIN((size_t)written, sizeof(active_tracker_ids) - active_tracker_ids_len - 1);
+				}
+			}
 			count++;
 		}
 	}
 	k_mutex_unlock(&tracker_store_lock);
 
-	LOG_INF("Remote command %s (0x%02X) queued for %d trackers", cmd_name, command_flag, count);
+	if (count == 0) {
+		active_tracker_ids[0] = '\0';
+	}
+
+	LOG_INF(
+		"Remote command %s (0x%02X) queued for %d active trackers after %d ms scan; active IDs: %s",
+		cmd_name,
+		command_flag,
+		count,
+		REMOTE_COMMAND_ACTIVE_SCAN_MS,
+		count > 0 ? active_tracker_ids : "none"
+	);
 }
 
 // Manually print statistics for all active trackers
@@ -2500,4 +2534,3 @@ static void esb_thread(void)
 		k_msleep(100);
 	}
 }
-

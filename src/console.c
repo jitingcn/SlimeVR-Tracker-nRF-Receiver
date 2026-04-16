@@ -52,6 +52,8 @@ K_THREAD_DEFINE(console_thread_id, 1024, console_thread, NULL, NULL, NULL, 6, 0,
 #define DFU_EXISTS CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
 #define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
 #define NRF5_BOOTLOADER CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+#define ADAFRUIT_DFU_MAGIC_UF2_RESET 0x57
+#define ADAFRUIT_DFU_MAGIC_OTA_RESET 0xA8
 
 #if NRF5_BOOTLOADER
 static const struct device *gpio_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
@@ -72,6 +74,22 @@ static void skip_dfu(void)
 #if DFU_EXISTS                            // Using Adafruit bootloader
 	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
 	ram_range_retain(dbl_reset_mem, sizeof(dbl_reset_mem), true);
+#endif
+}
+
+static void request_local_dfu(bool ota)
+{
+#if ADAFRUIT_BOOTLOADER
+	NRF_POWER->GPREGRET = ota ? ADAFRUIT_DFU_MAGIC_OTA_RESET : ADAFRUIT_DFU_MAGIC_UF2_RESET;
+	k_msleep(100);
+	sys_reboot(SYS_REBOOT_COLD);
+#elif NRF5_BOOTLOADER
+	ARG_UNUSED(ota);
+	gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
+	k_msleep(100);
+	sys_reboot(SYS_REBOOT_COLD);
+#else
+	ARG_UNUSED(ota);
 #endif
 }
 
@@ -178,7 +196,7 @@ static void print_help(void)
 		"Remote Commands:\n"
 		"  send <id|all> <command>    Send remote command to tracker(s)\n"
 		"    Commands: shutdown, calibrate, 6-side, meow, scan,\n"
-		"              mag <on|off|clear|cal>, reboot, clear, dfu,\n"
+		"              mag <on|off|clear|cal>, reboot, clear, dfu [ota],\n"
 		"              channel <1-100>, clearchannel,\n"
 		"              sens <x,y,z|reset>, reset <zro|acc|bat|mag|tcal|fusion>, ping\n"
 	);
@@ -186,27 +204,28 @@ static void print_help(void)
 	printk(
 		"    Examples:\n"
 		"      send 0 shutdown          Shutdown tracker 0\n"
-		"      send all calibrate       Calibrate all trackers\n"
+		"      send all calibrate       Calibrate all active trackers\n"
 		"      send 1 meow              Make tracker 1 meow\n"
 		"      send 2 reboot            Reboot tracker 2\n"
 		"      send 0 sens 1.0,1.0,1.0  Set sensitivity for tracker 0\n"
 		"      send all sens reset      Reset sensitivity for all\n"
 		"      send 1 reset zro         Reset ZRO calibration on tracker 1\n"
-		"      send all ping            Ping all trackers\n"
+		"      send all ping            Ping all active trackers\n"
 	);
 
 	printk(
 		"      send 3 clear             Clear pairing on tracker 3\n"
-		"      send all dfu             Enter DFU mode on all trackers\n"
-		"      send all channel 25      Set all trackers to channel 25\n"
-		"      send all clearchannel    Clear channel for all trackers\n"
+		"      send all dfu             Enter UF2 DFU mode on all active trackers\n"
+		"      send all dfu ota         Enter OTA DFU mode on all active trackers\n"
+		"      send all channel 25      Set all active trackers to channel 25\n"
+		"      send all clearchannel    Clear channel for all active trackers\n"
 		"\n"
 	);
 
 #if DFU_EXISTS
 	printk(
 		"Bootloader:\n"
-		"  dfu                        Enter DFU bootloader\n"
+		"  dfu [ota]                  Enter DFU bootloader (default UF2, optional OTA)\n"
 		"\n"
 	);
 #endif
@@ -246,9 +265,7 @@ static void console_thread(void)
 	if (button_read()) // button held on usb connect, enter DFU
 	{
 #if ADAFRUIT_BOOTLOADER
-		NRF_POWER->GPREGRET = 0x57;
-		k_msleep(100); // Wait for register to be written
-		sys_reboot(SYS_REBOOT_COLD);
+		request_local_dfu(false);
 #endif
 #if NRF5_BOOTLOADER
 		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
@@ -497,12 +514,12 @@ static void console_thread(void)
 				printk("Usage: send <id|all> <command>\n");
 				printk("Examples:\n");
 				printk("  send 0 shutdown      - Shutdown tracker 0\n");
-				printk("  send all shutdown    - Shutdown all trackers\n");
+				printk("  send all shutdown    - Shutdown all active trackers\n");
 				printk("  send 1 calibrate     - Calibrate tracker 1\n");
-				printk("  send all meow        - Make all trackers meow\n");
+				printk("  send all meow        - Make all active trackers meow\n");
 				printk("  send 2 reboot        - Reboot tracker 2\n");
 				printk("  send 3 clear         - Clear pairing on tracker 3\n");
-				printk("  send all dfu         - Enter DFU mode on all trackers\n");
+				printk("  send all dfu         - Enter DFU mode on all active trackers\n");
 				printk(
 					"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
 					"reset, ping, tcal, tdma, test\n"
@@ -576,7 +593,7 @@ static void console_thread(void)
 
 					if (target_all) {
 						esb_send_remote_command_all(mag_cmd);
-						printk("%s request sent to all trackers\n", mag_name);
+						printk("%s request sent to all active trackers\n", mag_name);
 					} else {
 						esb_send_remote_command(tracker_id, mag_cmd);
 						printk("%s request sent to tracker %d\n", mag_name, tracker_id);
@@ -589,8 +606,16 @@ static void console_thread(void)
 					cmd_flag = ESB_PONG_FLAG_CLEAR;
 					cmd_name = "Clear pairing";
 				} else if (strcmp(arg2, "dfu") == 0) {
-					cmd_flag = ESB_PONG_FLAG_DFU;
-					cmd_name = "DFU mode";
+					if (arg3 && strcmp(arg3, "ota") == 0) {
+						cmd_flag = ESB_PONG_FLAG_DFU_OTA;
+						cmd_name = "OTA DFU mode";
+					} else if (!arg3) {
+						cmd_flag = ESB_PONG_FLAG_DFU;
+						cmd_name = "UF2 DFU mode";
+					} else {
+						printk("Unknown dfu subcommand: %s (use 'ota' or omit it)\n", arg3);
+						continue;
+					}
 				} else if (strcmp(arg2, "fusion") == 0) {
 					cmd_flag = ESB_PONG_FLAG_FUSION_RESET;
 					cmd_name = "Fusion reset";
@@ -598,7 +623,7 @@ static void console_thread(void)
 					// Special handling for channel command - needs arg3
 					if (!arg3) {
 						printk("Usage: send all channel <1-100>\n");
-						printk("Example: send all channel 25 - Set all trackers to channel 25\n");
+						printk("Example: send all channel 25 - Set all active trackers to channel 25\n");
 						continue;
 					}
 
@@ -616,7 +641,7 @@ static void console_thread(void)
 					}
 
 					esb_set_all_trackers_channel((uint8_t)channel);
-					printk("Setting RF channel to %d for all trackers and receiver\n", (int)channel);
+					printk("Setting RF channel to %d for all active trackers and receiver\n", (int)channel);
 					continue;
 				} else if (strcmp(arg2, "clearchannel") == 0) {
 					if (!target_all) {
@@ -625,7 +650,7 @@ static void console_thread(void)
 					}
 
 					esb_clear_all_trackers_channel();
-					printk("Clearing RF channel for all trackers and receiver\n");
+					printk("Clearing RF channel for all active trackers and receiver\n");
 					continue;
 				} else if (strcmp(arg2, "sens") == 0) {
 					// sens command - needs arg3 for values or "reset"
@@ -640,7 +665,7 @@ static void console_thread(void)
 						// sens reset command
 						if (target_all) {
 							esb_send_remote_command_all(ESB_PONG_FLAG_SENS_RESET);
-							printk("Sens reset request sent to all trackers\n");
+							printk("Sens reset request sent to all active trackers\n");
 						} else {
 							esb_send_remote_command(tracker_id, ESB_PONG_FLAG_SENS_RESET);
 							printk("Sens reset request sent to tracker %d\n", tracker_id);
@@ -669,7 +694,7 @@ static void console_thread(void)
 									esb_send_remote_command_sens(i, values[0], values[1], values[2]);
 								}
 								printk(
-									"Sens set (%.2f,%.2f,%.2f) request sent to all trackers\n",
+									"Sens set (%.2f,%.2f,%.2f) request sent to all active trackers\n",
 									(double)values[0],
 									(double)values[1],
 									(double)values[2]
@@ -728,7 +753,7 @@ static void console_thread(void)
 
 					if (target_all) {
 						esb_send_remote_command_all(reset_cmd);
-						printk("%s request sent to all trackers\n", reset_name);
+						printk("%s request sent to all active trackers\n", reset_name);
 					} else {
 						esb_send_remote_command(tracker_id, reset_cmd);
 						printk("%s request sent to tracker %d\n", reset_name, tracker_id);
@@ -738,7 +763,7 @@ static void console_thread(void)
 					// ping command
 					if (target_all) {
 						esb_send_remote_command_all(ESB_PONG_FLAG_PING);
-						printk("Ping request sent to all trackers\n");
+						printk("Ping request sent to all active trackers\n");
 					} else {
 						esb_send_remote_command(tracker_id, ESB_PONG_FLAG_PING);
 						printk("Ping request sent to tracker %d\n", tracker_id);
@@ -749,9 +774,9 @@ static void console_thread(void)
 					if (!arg3) {
 						printk("Usage: send <id|all> tcal <on|off|auto on|auto off|boot on|boot off|clear>\n");
 						printk("Example: send 0 tcal on       - Enable temperature calibration on tracker 0\n");
-						printk("Example: send all tcal off    - Disable temperature calibration on all trackers\n");
+						printk("Example: send all tcal off    - Disable temperature calibration on all active trackers\n");
 						printk("Example: send 0 tcal auto on  - Enable auto-calibration on tracker 0\n");
-						printk("Example: send all tcal auto off - Disable auto-calibration on all trackers\n");
+						printk("Example: send all tcal auto off - Disable auto-calibration on all active trackers\n");
 						printk("Example: send 0 tcal boot on - Enable boot calibration on tracker 0\n");
 						printk("Example: send 0 tcal clear - Clear temperature calibration on tracker 0\n");
 						continue;
@@ -761,7 +786,7 @@ static void console_thread(void)
 						// Enable T-Cal
 						if (target_all) {
 							esb_send_remote_command_all(ESB_PONG_FLAG_TCAL_ON);
-							printk("T-Cal enable request sent to all trackers\n");
+							printk("T-Cal enable request sent to all active trackers\n");
 						} else {
 							esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TCAL_ON);
 							printk("T-Cal enable request sent to tracker %d\n", tracker_id);
@@ -770,7 +795,7 @@ static void console_thread(void)
 						// Disable T-Cal
 						if (target_all) {
 							esb_send_remote_command_all(ESB_PONG_FLAG_TCAL_OFF);
-							printk("T-Cal disable request sent to all trackers\n");
+							printk("T-Cal disable request sent to all active trackers\n");
 						} else {
 							esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TCAL_OFF);
 							printk("T-Cal disable request sent to tracker %d\n", tracker_id);
@@ -797,7 +822,7 @@ static void console_thread(void)
 
 						if (target_all) {
 							esb_send_remote_command_all(tcal_cmd);
-							printk("%s request sent to all trackers\n", tcal_name);
+							printk("%s request sent to all active trackers\n", tcal_name);
 						} else {
 							esb_send_remote_command(tracker_id, tcal_cmd);
 							printk("%s request sent to tracker %d\n", tcal_name, tracker_id);
@@ -806,7 +831,7 @@ static void console_thread(void)
 						// clear command - clear tcal data
 						if (target_all) {
 							esb_send_remote_command_all(ESB_PONG_FLAG_RESET_TCAL);
-							printk("T-Cal clear request sent to all trackers\n");
+							printk("T-Cal clear request sent to all active trackers\n");
 						} else {
 							esb_send_remote_command(tracker_id, ESB_PONG_FLAG_RESET_TCAL);
 							printk("T-Cal clear request sent to tracker %d\n", tracker_id);
@@ -833,7 +858,7 @@ static void console_thread(void)
 
 						if (target_all) {
 							esb_send_remote_command_all(tcal_cmd);
-							printk("%s request sent to all trackers\n", tcal_name);
+							printk("%s request sent to all active trackers\n", tcal_name);
 						} else {
 							esb_send_remote_command(tracker_id, tcal_cmd);
 							printk("%s request sent to tracker %d\n", tcal_name, tracker_id);
@@ -847,7 +872,7 @@ static void console_thread(void)
 						if (!arg3) {
 							printk("Usage: send <id|all> tdma <on|off>\n");
 							printk("Example: send 0 tdma on       - Enable TDMA scheduling on tracker 0\n");
-							printk("Example: send all tdma off    - Disable TDMA scheduling on all trackers\n");
+							printk("Example: send all tdma off    - Disable TDMA scheduling on all active trackers\n");
 							continue;
 						}
 
@@ -855,7 +880,7 @@ static void console_thread(void)
 							// Enable TDMA
 							if (target_all) {
 								esb_send_remote_command_all(ESB_PONG_FLAG_TDMA_ON);
-								printk("TDMA enable request sent to all trackers\n");
+								printk("TDMA enable request sent to all active trackers\n");
 							} else {
 								esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TDMA_ON);
 								printk("TDMA enable request sent to tracker %d\n", tracker_id);
@@ -864,7 +889,7 @@ static void console_thread(void)
 							// Disable TDMA
 							if (target_all) {
 								esb_send_remote_command_all(ESB_PONG_FLAG_TDMA_OFF);
-								printk("TDMA disable request sent to all trackers\n");
+								printk("TDMA disable request sent to all active trackers\n");
 							} else {
 								esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TDMA_OFF);
 								printk("TDMA disable request sent to tracker %d\n", tracker_id);
@@ -878,14 +903,14 @@ static void console_thread(void)
 						if (!arg3) {
 							printk("Usage: send <id|all> test <on|off>\n");
 							printk("Example: send 0 test on       - Enable test mode on tracker 0\n");
-							printk("Example: send all test on     - Enable test mode on all trackers\n");
+							printk("Example: send all test on     - Enable test mode on all active trackers\n");
 							continue;
 						}
 
 						if (strcmp(arg3, "on") == 0) {
 							if (target_all) {
 								esb_send_remote_command_all(ESB_PONG_FLAG_TEST_MODE_ON);
-								printk("Test mode enable request sent to all trackers\n");
+								printk("Test mode enable request sent to all active trackers\n");
 							} else {
 								esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TEST_MODE_ON);
 								printk("Test mode enable request sent to tracker %d\n", tracker_id);
@@ -893,7 +918,7 @@ static void console_thread(void)
 						} else if (strcmp(arg3, "off") == 0) {
 							if (target_all) {
 								esb_send_remote_command_all(ESB_PONG_FLAG_TEST_MODE_OFF);
-								printk("Test mode disable request sent to all trackers\n");
+								printk("Test mode disable request sent to all active trackers\n");
 							} else {
 								esb_send_remote_command(tracker_id, ESB_PONG_FLAG_TEST_MODE_OFF);
 								printk("Test mode disable request sent to tracker %d\n", tracker_id);
@@ -907,7 +932,7 @@ static void console_thread(void)
 					if (cmd_flag != 0xFF) {
 					if (target_all) {
 						esb_send_remote_command_all(cmd_flag);
-						printk("%s request sent to all trackers\n", cmd_name);
+						printk("%s request sent to all active trackers\n", cmd_name);
 					} else {
 						esb_send_remote_command(tracker_id, cmd_flag);
 						printk("%s request sent to tracker %d\n", cmd_name, tracker_id);
@@ -915,7 +940,7 @@ static void console_thread(void)
 				} else {
 					printk("Unknown command: %s\n", arg2);
 					printk(
-						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, fusion, sens, "
+						"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu [ota], fusion, sens, "
 						"reset, ping, tcal, tdma, test\n"
 					);
 				}
@@ -923,16 +948,16 @@ static void console_thread(void)
 		}
 #if DFU_EXISTS
 		else if (memcmp(line, command_dfu, sizeof(command_dfu)) == 0) {
-#if ADAFRUIT_BOOTLOADER
-			NRF_POWER->GPREGRET = 0x57;
-			k_msleep(100); // Wait for register to be written
-			sys_reboot(SYS_REBOOT_COLD);
-#endif
-#if NRF5_BOOTLOADER
-			gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
-			k_msleep(100); // Wait for GPIO to be configured
-			sys_reboot(SYS_REBOOT_COLD);
-#endif
+			bool ota = false;
+			if (arg) {
+				if (strcmp((char *)arg, "ota") == 0) {
+					ota = true;
+				} else {
+					printk("Unknown dfu argument: %s (use 'ota' or omit it)\n", arg);
+					continue;
+				}
+			}
+			request_local_dfu(ota);
 		}
 #endif
 		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) {
