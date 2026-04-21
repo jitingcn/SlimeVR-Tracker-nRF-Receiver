@@ -1,0 +1,3 @@
+/* Data collection HID interface - only included when CONFIG_DATA_COLLECT=y.
+ * Uses second HID instance (HID_1) for raw sensor data output.
+ * No CDC ACM needed - data goes via HID interrupt endpoint. */

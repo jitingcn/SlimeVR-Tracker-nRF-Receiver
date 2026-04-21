@@ -177,12 +177,21 @@ static uint32_t hid_stats_snapshot(bool *had_activity)
 static uint32_t dropped_reports = 0;
 static uint16_t max_dropped_reports = 0;
 static int64_t last_ep_busy_time = 0;  // Track USB endpoint busy time for timeout detection
+static int64_t ep_cooldown_until = 0;  // After stuck reset, wait before retrying
 
 static void send_report(struct k_work *work)
 {
 	if (!usb_enabled) return;
 	if (!configured) return;  // Don't send reports until USB is configured
 	if (!stored_trackers) return;
+
+	// After a stuck reset, wait for cooldown before retrying
+	if (ep_cooldown_until > 0) {
+		if (k_uptime_get() < ep_cooldown_until) {
+			return;
+		}
+		ep_cooldown_until = 0;
+	}
 
 	// Check if USB endpoint is stuck
 	if (atomic_test_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG)) {
@@ -193,6 +202,8 @@ static void send_report(struct k_work *work)
 			LOG_WRN("USB endpoint stuck for %lld ms, forcing reset", now - last_ep_busy_time);
 			atomic_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG);
 			last_ep_busy_time = 0;
+			ep_cooldown_until = now + 50;  // 50ms cooldown for USB to settle
+			return;
 		}
 	} else {
 		last_ep_busy_time = 0;
@@ -243,10 +254,18 @@ static void send_report(struct k_work *work)
 
 		if (ret != 0) {
 			/*
-			 * Do nothing and wait until host has reset the device
-			 * and hid_ep_in_busy is cleared.
+			 * Write failed — clear the busy flag immediately so the
+			 * next timer cycle can attempt to send again.  Without
+			 * this, the flag stays set until the 100 ms stuck timeout
+			 * because the completion callback never fires on error.
 			 */
-			LOG_ERR("Failed to submit report");
+			atomic_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG);
+			static int64_t last_err_log;
+			int64_t now = k_uptime_get();
+			if (now - last_err_log > 5000) {
+				LOG_ERR("Failed to submit report");
+				last_err_log = now;
+			}
 		} else {
 			//LOG_DBG("Report submitted");
 		}
@@ -352,7 +371,10 @@ static void int_in_ready_cb(const struct device *dev)
 {
 	ARG_UNUSED(dev);
 	if (!atomic_test_and_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG)) {
-		LOG_WRN("IN endpoint callback without preceding buffer write");
+		// During cooldown after stuck reset, stale callbacks are expected
+		if (ep_cooldown_until == 0) {
+			LOG_WRN("IN endpoint callback without preceding buffer write");
+		}
 	}
 }
 

@@ -1,0 +1,6 @@
+/* CDC ACM interface for data collection (serial mode) */
+&usbd {
+	cdc_acm_uart1: cdc_acm_uart1 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
