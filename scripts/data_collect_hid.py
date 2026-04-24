@@ -18,7 +18,7 @@ HID report format (64 bytes):
   [N+5..63]   zero padding
 
 Packet types in ESB payload (byte 0):
-  0x10: Raw IMU (48 bytes) - float gyro+accel (+optional mag)
+  0x10: Raw IMU (48 bytes) - float gyro+accel (+optional mag) + T-Cal temp
   0x11: Raw Mag (17 bytes) - float magnetometer
   0x12: Metadata (48 bytes) - ODR, range, sensor IDs
 
@@ -26,6 +26,7 @@ Output: CSV file with columns: seq,gx,gy,gz,ax,ay,az,mx,my,mz,temp
 """
 
 import argparse
+import math
 import struct
 import sys
 import time
@@ -83,8 +84,11 @@ def parse_raw_imu(payload: bytes):
     ax, ay, az = struct.unpack_from("<fff", payload, 16)
 
     flags = payload[40]
-    temperature = payload[41]
-    temp_c = ((temperature - 128.5) / 2 + 25) if temperature > 0 else None
+    temp_c = None
+    if len(payload) >= 45:
+        tcal_temp_c = struct.unpack_from("<f", payload, 41)[0]
+        if math.isfinite(tcal_temp_c) and -100.0 < tcal_temp_c < 150.0:
+            temp_c = tcal_temp_c
 
     mag = None
     if flags & 0x01:
@@ -267,6 +271,7 @@ def collect_hid(output_path, duration=None, device_index=None):
                     f.write(f"mag_odr_hz={meta.mag_odr}\n")
                     f.write(f"imu_id={meta.imu_id}\n")
                     f.write(f"mag_id={meta.mag_id}\n")
+                    f.write("temp_source=tcal_float_c\n")
 
             elif pkt_type == 0x10:  # Raw IMU
                 s = parse_raw_imu(esb_payload)
@@ -296,7 +301,7 @@ def collect_hid(output_path, duration=None, device_index=None):
                         f"{s['gyro'][0]:.6f},{s['gyro'][1]:.6f},{s['gyro'][2]:.6f},"
                         f"{s['accel'][0]:.6f},{s['accel'][1]:.6f},{s['accel'][2]:.6f},"
                         f"{mag[0]:.6f},{mag[1]:.6f},{mag[2]:.6f},"
-                        f"{temp:.2f}\n"
+                        f"{temp:.6f}\n"
                     )
 
                     reorder_buf[seq] = csv_line

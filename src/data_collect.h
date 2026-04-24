@@ -41,7 +41,8 @@
  * The PC reads from the second HID interface (vendor usage page 0xFF00).
  *
  * Payload types (byte 0):
- *   - Type 0x10 (RAW_IMU):  48 bytes
+ *   - Type 0x10 (RAW_IMU):  48 bytes, with full-precision T-Cal temp at
+ *                           bytes 41-44
  *   - Type 0x11 (RAW_MAG):  up to 17 bytes
  *   - Type 0x12 (RAW_META): 48 bytes
  */

@@ -15,14 +15,15 @@ Binary framing protocol (from receiver):
   [0xAA][0x55][length][payload...][rssi][rx_ticks(4)][CRC-8]
 
 Packet types in payload:
-  0x10: Raw IMU (48 bytes) - 3 batched int16 gyro+accel samples
-  0x11: Raw Mag (17 bytes) - int16 magnetometer
+  0x10: Raw IMU (48 bytes) - float gyro+accel (+optional mag) + T-Cal temp
+  0x11: Raw Mag (17 bytes) - float magnetometer
   0x12: Metadata (48 bytes) - ODR, range, sensor IDs (sent once)
 
 Output: Binary file (.bin) + optional CSV conversion
 """
 
 import argparse
+import math
 import struct
 import sys
 import time
@@ -93,10 +94,11 @@ def parse_raw_imu(payload: bytes, meta: SensorMetadata):
     ax, ay, az = struct.unpack_from("<fff", payload, 16)
 
     flags = payload[40]
-    temperature = payload[41]
-
-    # Decode temperature
-    temp_c = ((temperature - 128.5) / 2 + 25) if temperature > 0 else None
+    temp_c = None
+    if len(payload) >= 45:
+        tcal_temp_c = struct.unpack_from("<f", payload, 41)[0]
+        if math.isfinite(tcal_temp_c) and -100.0 < tcal_temp_c < 150.0:
+            temp_c = tcal_temp_c
 
     # Mag (piggybacked if flag bit 0 is set)
     mag = None
@@ -240,6 +242,7 @@ def collect(port, output_path, duration=None):
                     f.write(f"mag_odr_hz={meta.mag_odr}\n")
                     f.write(f"imu_id={meta.imu_id}\n")
                     f.write(f"mag_id={meta.mag_id}\n")
+                    f.write("temp_source=tcal_float_c\n")
 
             elif pkt_type == 0x10:  # Raw IMU
                 s = parse_raw_imu(esb_payload, meta)
@@ -266,7 +269,7 @@ def collect(port, output_path, duration=None):
                         f"{s['gyro'][0]:.6f},{s['gyro'][1]:.6f},{s['gyro'][2]:.6f},"
                         f"{s['accel'][0]:.6f},{s['accel'][1]:.6f},{s['accel'][2]:.6f},"
                         f"{mag[0]:.6f},{mag[1]:.6f},{mag[2]:.6f},"
-                        f"{temp:.2f}\n"
+                        f"{temp:.6f}\n"
                     )
 
                     reorder_buf[seq] = csv_line
