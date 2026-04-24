@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.ref }}
+  group: ${{ github.event.pull_request.head.sha || github.ref }}
   cancel-in-progress: true
 
 permissions: write-all
@@ -35,6 +35,12 @@ jobs:
         with:
           path: zephyr-workspace/SlimeNRF-CI
           submodules: recursive
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: 📟 Install yq
+        run: |
+          sudo wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+          sudo chmod +x /usr/bin/yq
 
       - name: 📟 Generate CI Variables
         id: generate-vars
@@ -54,14 +60,21 @@ jobs:
             exit 1
           fi
 
-          SDK_URL=$(grep -A5 "name: sdk-nrf" "$WEST_FILE" | grep "url:" | sed 's/.*url: *//')
-          SDK_REVISION=$(grep -A5 "name: sdk-nrf" "$WEST_FILE" | grep "revision:" | sed 's/.*revision: *//')
+          SDK_URL=$(yq -r '.manifest.projects[] | select(.name=="sdk-nrf") | .url' "$WEST_FILE")
+          SDK_REVISION=$(yq -r '.manifest.projects[] | select(.name=="sdk-nrf") | .revision' "$WEST_FILE")
           SDK_COMMIT=$(git ls-remote "$SDK_URL" "$SDK_REVISION" | awk '{print $1}')
 
-          REPO="$GITHUB_REPOSITORY"
-          REPO_URL="https://github.com/$GITHUB_REPOSITORY.git"
-          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
-          REPO_COMMIT="$GITHUB_SHA"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            REPO="${{ github.event.pull_request.head.repo.full_name }}"
+            REPO_URL="${{ github.event.pull_request.head.repo.clone_url }}"
+            BRANCH="${{ github.event.pull_request.head.ref }}"
+            REPO_COMMIT="${{ github.event.pull_request.head.sha }}"
+          else
+            REPO="$GITHUB_REPOSITORY"
+            REPO_URL="https://github.com/$GITHUB_REPOSITORY.git"
+            BRANCH="${GITHUB_REF#refs/heads/}"
+            REPO_COMMIT="$GITHUB_SHA"
+          fi
 
           echo "sdk-hash=$SDK_COMMIT" >> "$GITHUB_OUTPUT"
           echo "sdk-revision=$SDK_REVISION" >> "$GITHUB_OUTPUT"
@@ -75,7 +88,7 @@ jobs:
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
           packages: >-
-            git cmake ninja-build gperf dfu-util device-tree-compiler wget
+            git cmake ninja-build gperf ccache dfu-util device-tree-compiler wget
             python3-dev python3-pip python3-setuptools python3-tk python3-wheel python3-venv
             xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1
           version: 1.0
@@ -109,19 +122,35 @@ jobs:
             zephyr-workspace/tools
           key: west-workspace-${{ steps.generate-vars.outputs.sdk-hash }}
 
-      - name: 📦 Cache Python venv
-        id: cache-venv
+      - name: 📦 Cache PIP Requirements
+        id: cache-pip
         uses: actions/cache@v5
+        with:
+          path: ~/.venv
+          key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
+
+      - name: 📦 Restore Python venv
+        if: steps.cache-pip.outputs.cache-hit != 'true'
+        id: restore-venv
+        uses: actions/cache/restore@v5
         with:
           path: ~/.venv
           key: venv-${{ env.ZEPHYR_SDK_VERSION }}
 
       - name: 🐍 Setup Python venv + West
         id: setup-venv
-        if: steps.cache-venv.outputs.cache-hit != 'true'
+        if: ${{ steps.cache-pip.outputs.cache-hit != 'true' && steps.restore-venv.outputs.cache-hit != 'true' }}
         run: |
           python3 -m venv ~/.venv
           ~/.venv/bin/pip install west ninja
+
+      - name: 📦 Cache Python venv
+        if: steps.restore-venv.outputs.cache-hit != 'true'
+        id: cache-venv
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.venv
+          key: venv-${{ env.ZEPHYR_SDK_VERSION }}
 
       - name: ♻️ Initialize Zephyr Workspace
         id: init-west
@@ -134,13 +163,6 @@ jobs:
           fi
           west update --narrow -o=--depth=1
           west zephyr-export
-
-      - name: 📦 Cache PIP Requirements
-        id: cache-pip
-        uses: actions/cache@v5
-        with:
-          path: ~/.venv
-          key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
 
       - name: 🐍 Install Zephyr Python Requirements
         id: install-pip
@@ -192,13 +214,14 @@ jobs:
         with:
           path: zephyr-workspace/SlimeNRF-CI
           submodules: recursive
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: 🧰 Cache + Install Apt Dependencies
         id: restore-apt
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
           packages: >-
-            git cmake ninja-build gperf dfu-util device-tree-compiler wget
+            git cmake ninja-build gperf ccache dfu-util device-tree-compiler wget
             python3-dev python3-pip python3-setuptools python3-tk python3-wheel python3-venv
             xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1
           version: 1.0
@@ -231,15 +254,12 @@ jobs:
           key: west-workspace-${{ needs.setup.outputs.sdk-hash }}
           fail-on-cache-miss: true
 
-      - name: 📦 Restore Python venv
-        id: restore-venv
+      - name: 📦 Restore PIP Requirements
+        id: restore-pip
         uses: actions/cache/restore@v5
         with:
           path: ~/.venv
           key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
-          restore-keys: |
-            venv-pip-
-            venv-
           fail-on-cache-miss: true
 
       - name: ♻️ Register Zephyr Workspace

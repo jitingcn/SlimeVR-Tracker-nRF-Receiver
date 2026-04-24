@@ -35,6 +35,36 @@
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
+//|type    |description
+//|RX  CRC8|pairing
+//|TX  CRC8|pairing
+
+//|b0      |b1      |b2      |b3      |b4      |b5      |b6      |b7      |b8      |b9      |b10     |b11     |b12     |b13     |b14     |b15     |
+//|type    |data                                                                                                                                  |
+//|RX  CRC8|ack     |device_addr                                          |-
+//|TX  CRC8|ack     |recv_addr                                            |-
+
+//|packet  |description
+//|RX     1|request from tracker
+//|TX     2|pairing accepted from dongle
+//|TX     3|Dongle State
+//|TX     4|No Windows
+//|TX     5|Window Info
+
+//|packet  |b0      |b1      |b2      |b3      |b4      |b5      |b6      |b7      |b8      |b9      |b10     |b11     |b12     |b13     |b14     |b15     |
+//|RX     1|    0xCD|    0x01|    0x00|Tracker Hardware ID                                  |Tracker Hardware ID                                  |-
+//|TX     2|    0xCD|    0x02|Trckr ID|Dongle Hardware ID                                   |Tracker Hardware ID                                  |-
+//|TX     3|    0xCD|    0x03|Dongle Hardware ID                                   |state   |channel |-
+//|TX     4|    0xCD|    0x04|-
+//|TX     5|    0xCD|    0x05|Window  |Timer                              |Packet  |-
+
+// packet 3:
+// state field bits: 9[0:0]: Accepts new trackers?; 9[1:1]: Force pair
+// channel bundle field bits: 10[0:3]: Channels bundle; 10[4:7]: Next channel offset
+// packet 5:
+// Packet: Packet Number
+
+
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 #define PAIRING_TIMEOUT_SECONDS CONFIG_PAIRING_TIMEOUT
@@ -1443,6 +1473,10 @@ void event_handler(struct esb_evt const *event)
 			} break;
 			case 17: // 16 bytes data + 1 byte sequence number
 			{
+				if (rx_payload.data[0] == ESB_COMPOSITE_TYPE) {
+					goto handle_composite_packet;
+				}
+
 				uint8_t tracker_id = rx_payload.data[1];
 
 				// TDMA Slot Check for Data (Type 17)
@@ -1485,20 +1519,6 @@ void event_handler(struct esb_evt const *event)
 				hid_write_packet_n(rx_payload.data,
 								   rx_payload.rssi); // write to hid endpoint
 			} break;
-			case 16: // legacy format without sequence number, no TDMA check, just for backward compatibility
-			{
-				uint8_t imu_id = rx_payload.data[1];
-
-				if (imu_id >= stored_trackers) { // not a stored tracker
-					continue;
-				}
-
-				if (rx_payload.data[0] > 223) { // reserved for receiver only
-					break;
-				}
-				hid_write_packet_n(rx_payload.data,
-								   rx_payload.rssi); // write to hid endpoint
-			} break;
 			default:
 			{
 				/* Raw data collection packets (types 0x10-0x12): variable length.
@@ -1530,8 +1550,9 @@ void event_handler(struct esb_evt const *event)
 					}
 					break;
 				}
-				/* Composite packet (type 0x05): variable length.
-				 * Format: [0x05][tracker_id][sub_count][sub_type0][sub_data0...]...[sequence]
+handle_composite_packet:
+				/* Composite packet (type ESB_COMPOSITE_TYPE): variable length.
+				 * Format: [ESB_COMPOSITE_TYPE][tracker_id][sub_count][sub_type0][sub_data0...]...[sequence]
 				 * Each sub-packet: 1 byte type + variable data.
 				 */
 				if (rx_payload.length < 5 || rx_payload.data[0] != ESB_COMPOSITE_TYPE) {
@@ -1578,6 +1599,7 @@ void event_handler(struct esb_evt const *event)
 					case 2: sub_len = 13; break; /* compact quat */
 					case 3: sub_len = 2; break;  /* status */
 					case 4: sub_len = 14; break; /* quat+mag */
+					case 5: sub_len = 8; break;  /* runtime */
 					default:
 						LOG_ERR("Unknown composite sub-type: %d", sub_type);
 						sub_len = -1;

@@ -30,6 +30,7 @@
 #include <zephyr/usb/class/usb_hid.h>
 
 static struct k_work report_send;
+static struct k_work report_read;
 
 static struct tracker_report {
 	uint8_t data[16];
@@ -49,9 +50,11 @@ atomic_t report_read_index = 0;
 static bool configured;
 static const struct device *hdev;
 static ATOMIC_DEFINE(hid_ep_in_busy, 1);
+static ATOMIC_DEFINE(hid_ep_out_busy, 1);
 
 #define HID_EP_BUSY_FLAG	0
 #define REPORT_PERIOD		K_MSEC(1) // streaming reports
+#define POLL_PERIOD		K_MSEC(1)
 #define HID_EP_REPORT_COUNT 4
 #define HID_TPS_UPDATE_INTERVAL_MS 1000
 #define HID_STATS_POLL_INTERVAL_MS 200
@@ -64,6 +67,7 @@ static ATOMIC_DEFINE(hid_ep_in_busy, 1);
 #define RSSI_EMA_ALPHA 51  // 范围: 1-255, 推荐值: 26-77 (0.1-0.3)
 
 struct tracker_report ep_report_buffer[HID_EP_REPORT_COUNT];
+static uint8_t ep_read_buffer[256];
 
 // RSSI EMA平滑处理结构
 struct rssi_ema_state {
@@ -102,12 +106,33 @@ static const uint8_t hid_report_desc[] = {
 		HID_REPORT_SIZE(8),
 		HID_REPORT_COUNT(64),
 		HID_INPUT(0x02),
+		HID_USAGE(HID_USAGE_GEN_DESKTOP_UNDEFINED),
+		HID_REPORT_SIZE(8),
+		HID_REPORT_COUNT(64),
+		HID_OUTPUT(0x02),
 	HID_END_COLLECTION,
 };
 
 uint16_t sent_device_addr = 0;
 bool usb_enabled = false;
 int64_t last_registration_sent = 0;
+
+//|type    |description
+//|TX   255|receiver packet 0, associate id and tracker address
+//|TX   254|device list hash, round trip ping
+//|TX   253|receiver status
+//|TX   252|device pairing request
+//|RX   255|round trip response
+//|RX   254|command
+
+//|b0      |b1      |b2      |b3      |b4      |b5      |b6      |b7      |b8      |b9      |b10     |b11     |b12     |b13     |b14     |b15     |
+//|type    |data                                                                                                                                  |
+//|TX   255|id      |device_addr                                          |resv-------------------------------------------------------------------|
+//|TX   254|stored  |crc                                |latency          |resv-------------------------------------------------------------------|
+//|TX   253|status  |resv-------------------------------------------------|resv-------------------------------------------------------------------|
+//|TX   252|id      |device_addr                                          |resv-------------------------------------------------------------------|
+//|RX   255|resv----------------------------------------------------------|resv-------------------------------------------------------------------|
+//|RX   254|command |resv-------------------------------------------------|resv-------------------------------------------------------------------|
 
 static void packet_device_addr(uint8_t *report, uint16_t id) // associate id and tracker address
 {
@@ -367,6 +392,25 @@ void hid_reset_all_rssi_smooth(void)
 
 K_THREAD_DEFINE(hid_dropped_reports_logging_thread, 256, hid_dropped_reports_logging, NULL, NULL, NULL, 7, 0, 0);
 
+static void read_report(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (!usb_enabled || !configured) {
+		return;
+	}
+
+	int ret;
+	int read = 0;
+
+	if (!atomic_test_and_set_bit(hid_ep_out_busy, HID_EP_BUSY_FLAG)) {
+		ret = hid_int_ep_read(hdev, ep_read_buffer, sizeof(ep_read_buffer), &read);
+		if (ret != 0) {
+			LOG_ERR("hid_int_ep_read: %d", ret);
+		}
+	}
+}
+
 static void int_in_ready_cb(const struct device *dev)
 {
 	ARG_UNUSED(dev);
@@ -375,6 +419,14 @@ static void int_in_ready_cb(const struct device *dev)
 		if (ep_cooldown_until == 0) {
 			LOG_WRN("IN endpoint callback without preceding buffer write");
 		}
+	}
+}
+
+static void int_out_ready_cb(const struct device *dev)
+{
+	ARG_UNUSED(dev);
+	if (!atomic_test_and_clear_bit(hid_ep_out_busy, HID_EP_BUSY_FLAG)) {
+		LOG_WRN("OUT endpoint callback without preceding buffer read");
 	}
 }
 
@@ -395,6 +447,16 @@ static void report_event_handler(struct k_timer *dummy)
 		k_work_submit(&report_send);
 }
 
+static void report_read_handler(struct k_timer *dummy);
+static K_TIMER_DEFINE(read_timer, report_read_handler, NULL);
+
+static void report_read_handler(struct k_timer *dummy)
+{
+	ARG_UNUSED(dummy);
+	if (usb_enabled)
+		k_work_submit(&report_read);
+}
+
 static void protocol_cb(const struct device *dev, uint8_t protocol)
 {
 	LOG_INF("New protocol: %s", protocol == HID_PROTOCOL_BOOT ?
@@ -403,6 +465,7 @@ static void protocol_cb(const struct device *dev, uint8_t protocol)
 
 static const struct hid_ops ops = {
 	.int_in_ready = int_in_ready_cb,
+	.int_out_ready = int_out_ready_cb,
 	.on_idle = on_idle_cb,
 	.protocol_change = protocol_cb,
 };
@@ -448,6 +511,8 @@ static int composite_pre_init()
 
 	atomic_set_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG);
 	k_timer_start(&event_timer, REPORT_PERIOD, REPORT_PERIOD);
+	atomic_set_bit(hid_ep_out_busy, HID_EP_BUSY_FLAG);
+	k_timer_start(&read_timer, POLL_PERIOD, POLL_PERIOD);
 
 	if (usb_hid_set_proto_code(hdev, HID_BOOT_IFACE_CODE_NONE)) {
 		LOG_WRN("Failed to set Protocol Code");
@@ -462,19 +527,34 @@ void usb_init_thread(void)
 {
 	usb_enable(status_cb);
 	k_work_init(&report_send, send_report);
+	k_work_init(&report_read, read_report);
 	usb_enabled = true;
 }
 
 K_THREAD_DEFINE(usb_init_thread_id, 256, usb_init_thread, NULL, NULL, NULL, 6, 0, 0);
 
+//|type    |description
+//|RX     0|device info ("info")
+//|RX     1|full precision quat and accel
+//|RX     2|reduced precision quat and accel with battery, temp, and rssi ("info")
+//|RX     3|status ("status")
+//|RX     4|full precision quat and magnetometer
+//|RX     5|runtime ("status2")
+//|RX     6|reduced precision quat and accel with button and sleep time ("info2")
+//|RX     7|button and sleep time ("info2")
+
 //|b0      |b1      |b2      |b3      |b4      |b5      |b6      |b7      |b8      |b9      |b10     |b11     |b12     |b13     |b14     |b15     |
 //|type    |id      |packet data                                                                                                                  |
-//|0       |id      |proto   |batt    |batt_v  |temp    |brd_id  |mcu_id  |imu_id  |mag_id  |fw_date          |major   |minor   |patch   |rssi    |
-//|1       |id      |q0               |q1               |q2               |q3               |a0               |a1               |a2               |
-//|2       |id      |batt    |batt_v  |temp    |q_buf                              |a0               |a1               |a2               |rssi    |
-//|3	   |id      |svr_stat|status  |resv                                                                                              |rssi    |
-//|4       |id      |q0               |q1               |q2               |q3               |m0               |m1               |m2               |
-//|255     |id      |addr                                                 |resv                                                                   |
+//|RX     0|id      |batt    |batt_v  |temp    |brd_id  |mcu_id  |resv----|imu_id  |mag_id  |fw_date          |major   |minor   |patch   |rssi    |
+//|RX     1|id      |q0               |q1               |q2               |q3               |a0               |a1               |a2               |
+//|RX     2|id      |batt    |batt_v  |temp    |q_buf                              |a0               |a1               |a2               |rssi    |
+//|RX     3|id      |svr_stat|status  |resv----------------------------------------------------------------------------------------------|rssi    |
+//|RX     4|id      |q0               |q1               |q2               |q3               |m0               |m1               |m2               |
+//|RX     5|id      |runtime                                                                |resv----------------------------------------|rssi    |
+//|RX     6|id      |button  |sleeptime        |resv-------------------------------------------------------------------------------------|rssi    |
+//|RX     7|id      |button  |sleeptime        |q_buf                              |a0               |a1               |a2               |rssi    |
+
+// runtime is in microseconds (overkill), sleeptime is in milliseconds (overkill but less)
 
 // Per-tracker FIFO drop tracking for detailed diagnostics
 static uint32_t tracker_drops[MAX_TRACKERS] = {0};
