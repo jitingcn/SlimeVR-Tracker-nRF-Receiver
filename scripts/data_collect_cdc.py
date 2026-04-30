@@ -208,7 +208,7 @@ def collect(port, output_path, duration=None):
     gap_count = 0  # sequence gaps never filled (actual loss)
 
     # Reorder buffer for ARQ retransmits
-    REORDER_BUF_MAX = 64
+    REORDER_BUF_MAX = 128
     reorder_buf = {}  # seq -> csv_line
     write_cursor = None
 

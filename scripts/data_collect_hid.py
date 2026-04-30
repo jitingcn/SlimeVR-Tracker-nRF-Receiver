@@ -188,7 +188,7 @@ def collect_hid(output_path, duration=None, device_index=None):
 
     # Reorder buffer: holds samples until we can write them in order.
     # Keyed by sequence number; flushed when contiguous run available.
-    REORDER_BUF_MAX = 64  # max buffered samples before force-flush
+    REORDER_BUF_MAX = 128  # max buffered samples before force-flush
     reorder_buf = {}  # seq -> csv_line
     write_cursor = None  # next seq expected to be written
 
