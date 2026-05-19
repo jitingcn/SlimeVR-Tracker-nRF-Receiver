@@ -278,25 +278,27 @@ jobs:
           key: firmware-${{ needs.setup.outputs.repo-hash }}
           fail-on-cache-miss: true
 
-      - name: 🔨 Build SlimeVR-Tracker-nRF-Receiver - ${{ matrix.boards.boardname }}
-        id: build-firmware
-        run: |
-          cd zephyr-workspace
-          sudo rm -rf Releases
-          mkdir -p Releases
-          REPO_DIR="${{ github.event.repository.name }}"
-          if [ ! -d "$REPO_DIR" ]; then
-            echo "Repo dir not found: $REPO_DIR; fallback to SlimeNRF-CI"
-            REPO_DIR="SlimeNRF-CI"
-          fi
-          rm -rf "$REPO_DIR/build"
-          west build \
-              --board ${{ matrix.boards.boardname }} \
-              --pristine=always "$REPO_DIR" \
-              --build-dir "$REPO_DIR/build" \
-              -- \
-              -DNCS_TOOLCHAIN_VERSION=NONE \
-              -DBOARD_ROOT=../"$REPO_DIR"
+        - name: 🔨 Build SlimeVR-Tracker-nRF-Receiver - ${{ matrix.boards.boardname }}
+  id: build-firmware
+  run: |
+    cd zephyr-workspace
+    sudo rm -rf Releases
+    mkdir -p Releases
+    REPO_DIR="${{ github.event.repository.name }}"
+    if [ ! -d "$REPO_DIR" ]; then
+      echo "Repo dir not found: $REPO_DIR; fallback to SlimeNRF-CI"
+      REPO_DIR="SlimeNRF-CI"
+    fi
+    rm -rf "$REPO_DIR/build"
+    west build \
+        --board ${{ matrix.boards.boardname }} \
+        --pristine=always "$REPO_DIR" \
+        --build-dir "$REPO_DIR/build" \
+        -- \
+        -DNCS_TOOLCHAIN_VERSION=NONE \
+        -DBOARD_ROOT=../"$REPO_DIR" \
+        -DEXTRA_CONF_FILE=boards/data_collect_cdc.conf \
+        -DEXTRA_DTC_OVERLAY_FILE=boards/data_collect_cdc_overlay
 
           for ext in uf2 hex; do
             src="$REPO_DIR/build/$REPO_DIR/zephyr/zephyr.${ext}"
