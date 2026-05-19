@@ -204,7 +204,7 @@ jobs:
                   # {boardname: "etee_dongle_uf2/nrf52840", filename: "SlimeNRF_etee_Receiver"},
                   # {boardname: "nrf52840dk/nrf52840", filename: "SlimeNRF_nRF52840dk_Receiver"},
                   # {boardname: "styria_r1_uf2/nrf52840", filename: "SlimeNRF_Styria_R1_Receiver"},
-                  # {boardname: "aerorx_r1_uf2/nrf52840", filename: "SlimeNRF_AeroRX_R1_Receiver"},
+                  {boardname: "aerorx_r1_uf2/nrf52840", filename: "SlimeNRF_AeroRX_R1_Receiver"},
                   {boardname: "nekonya_uf2/nrf52833", filename: "SlimeNRF_NekoNya_Receiver"}
                 ]
     runs-on: ubuntu-latest
