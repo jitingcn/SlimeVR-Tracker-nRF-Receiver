@@ -563,6 +563,14 @@ static int64_t last_drop_log_time[MAX_TRACKERS] = {0};
 
 void hid_write_packet_n(uint8_t *data, uint8_t rssi)
 {
+	// Drop packets with all-zero quaternion (type 1 and 4: quat in bytes 2-9).
+	if (data[0] == 1 || data[0] == 4) {
+		const uint16_t *q = (const uint16_t *)&data[2];
+		if (q[0] == 0 && q[1] == 0 && q[2] == 0 && q[3] == 0) {
+			return;
+		}
+	}
+
 	memcpy(&report.data, data, sizeof(report)); // all data can be passed through
 
 	if (data[0] != 1 && data[0] != 4) { // packet 1 and 4 are full precision quat and accel/mag, no room for rssi

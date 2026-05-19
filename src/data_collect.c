@@ -23,6 +23,7 @@
 
 #include "globals.h"
 #include "data_collect.h"
+#include "connection/esb.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -36,8 +37,9 @@ LOG_MODULE_REGISTER(data_collect, LOG_LEVEL_INF);
 static const struct device *cdc_dev;
 static bool cdc_ready;
 
-/* Ring buffer for CDC output to decouple ISR-context writes from USB */
-#define DATA_COLLECT_BUF_SIZE 4096
+/* Ring buffer for CDC output to decouple ISR-context writes from USB.
+ * 16 KB holds ~287 frames (57 bytes each) ≈ 717 ms at 400 Hz. */
+#define DATA_COLLECT_BUF_SIZE 16384
 static uint8_t dc_buf[DATA_COLLECT_BUF_SIZE];
 static volatile uint32_t dc_buf_head;
 static volatile uint32_t dc_buf_tail;
@@ -49,6 +51,10 @@ static uint32_t dc_frames_dropped;
 /* Runtime state */
 static bool dc_active;
 static uint8_t dc_target_tracker_id;
+
+/* Timeout: auto-stop if no raw data received for this long */
+#define DC_TIMEOUT_MS 60000
+static int64_t dc_last_rx_time;
 
 /* CRC-8 CCITT (polynomial 0x07) - same as ESB uses */
 static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t len)
@@ -114,10 +120,31 @@ static void dc_flush_work_handler(struct k_work *work)
 static void dc_timer_handler(struct k_timer *timer);
 static K_TIMER_DEFINE(dc_timer, dc_timer_handler, NULL);
 
+/* Timeout work: stop collection and notify tracker (runs in workqueue context) */
+static void dc_timeout_work_handler(struct k_work *work);
+static K_WORK_DEFINE(dc_timeout_work, dc_timeout_work_handler);
+
+static void dc_timeout_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	if (!dc_active) return;
+	uint8_t tid = dc_target_tracker_id;
+	data_collect_stop();
+	esb_send_remote_command(tid, ESB_PONG_FLAG_DATA_COLLECT_OFF);
+	LOG_WRN("Data collection timed out (no data for %d s), sent OFF to tracker %u",
+		DC_TIMEOUT_MS / 1000, tid);
+}
+
 static void dc_timer_handler(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
 	k_work_submit(&dc_flush_work);
+
+	/* Check for data collection timeout */
+	if (dc_active && dc_last_rx_time > 0 &&
+	    (k_uptime_get() - dc_last_rx_time) > DC_TIMEOUT_MS) {
+		k_work_submit(&dc_timeout_work);
+	}
 }
 
 int data_collect_init(void)
@@ -147,6 +174,7 @@ void data_collect_start(uint8_t tracker_id)
 	dc_active = true;
 	dc_frames_sent = 0;
 	dc_frames_dropped = 0;
+	dc_last_rx_time = k_uptime_get();
 	LOG_INF("Data collection STARTED for tracker %u", tracker_id);
 }
 
@@ -175,6 +203,8 @@ bool data_collect_is_target(uint8_t tracker_id)
 void data_collect_write(const uint8_t *data, uint8_t len, uint8_t rssi)
 {
 	if (!cdc_ready) return;
+
+	dc_last_rx_time = k_uptime_get();
 
 	/* Frame: [0xAA][0x55][length][payload...][rssi][rx_ticks(4)][CRC-8]
 	 * Total overhead: 2 sync + 1 len + 1 rssi + 4 ticks + 1 crc = 9 bytes */

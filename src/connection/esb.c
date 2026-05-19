@@ -1547,6 +1547,18 @@ void event_handler(struct esb_evt const *event)
 						data_collect_write(rx_payload.data,
 								   rx_payload.length,
 								   rx_payload.rssi);
+					} else if (tracker_id < stored_trackers &&
+						   !data_collect_is_active()) {
+						/* Tracker is still sending raw data but
+						 * receiver is not in collection mode (e.g.
+						 * receiver was unplugged and re-plugged).
+						 * Tell the tracker to stop collecting. */
+						if (tracker_remote_command[tracker_id] !=
+						    ESB_PONG_FLAG_DATA_COLLECT_OFF) {
+							esb_send_remote_command(
+								tracker_id,
+								ESB_PONG_FLAG_DATA_COLLECT_OFF);
+						}
 					}
 					break;
 				}
