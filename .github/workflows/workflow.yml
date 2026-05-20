@@ -204,7 +204,7 @@ jobs:
                   # {boardname: "etee_dongle_uf2/nrf52840", filename: "SlimeNRF_etee_Receiver"},
                   # {boardname: "nrf52840dk/nrf52840", filename: "SlimeNRF_nRF52840dk_Receiver"},
                   # {boardname: "styria_r1_uf2/nrf52840", filename: "SlimeNRF_Styria_R1_Receiver"},
-                  {boardname: "aerorx_r1_uf2/nrf52840", filename: "SlimeNRF_AeroRX_R1_Receiver"},
+                  # {boardname: "aerorx_r1_uf2/nrf52840", filename: "SlimeNRF_AeroRX_R1_Receiver"},
                   {boardname: "nekonya_uf2/nrf52833", filename: "SlimeNRF_NekoNya_Receiver"}
                 ]
     runs-on: ubuntu-latest
@@ -278,33 +278,28 @@ jobs:
           key: firmware-${{ needs.setup.outputs.repo-hash }}
           fail-on-cache-miss: true
 
-      - name: 🔨 Build SlimeVR-Tracker-nRF-Receiver (Data Collect Version) - ${{ matrix.boards.boardname }}
+      - name: 🔨 Build SlimeVR-Tracker-nRF-Receiver - ${{ matrix.boards.boardname }}
         id: build-firmware
         run: |
           cd zephyr-workspace
           sudo rm -rf Releases
           mkdir -p Releases
-          
-          # 进入接收器源码目录 (相当于你的 RECEIVER_ROOT)
-          cd SlimeVR-Tracker-nRF-Receiver
-          
-          # 执行带有数据采集 Overlay 配置的编译
+          REPO_DIR="${{ github.event.repository.name }}"
+          if [ ! -d "$REPO_DIR" ]; then
+            echo "Repo dir not found: $REPO_DIR; fallback to SlimeNRF-CI"
+            REPO_DIR="SlimeNRF-CI"
+          fi
+          rm -rf "$REPO_DIR/build"
           west build \
               --board ${{ matrix.boards.boardname }} \
-              --pristine=always \
-              --build-dir build_nekonya_datacollect \
-              . \
+              --pristine=always "$REPO_DIR" \
+              --build-dir "$REPO_DIR/build" \
               -- \
               -DNCS_TOOLCHAIN_VERSION=NONE \
-              -DCONF_FILE=prj.conf \
-              -DEXTRA_CONF_FILE=boards/data_collect_cdc.conf \
-              -DEXTRA_DTC_OVERLAY_FILE=boards/data_collect_cdc.overlay \
-              -DBOARD_ROOT=.
+              -DBOARD_ROOT=../"$REPO_DIR"
 
-          # 返回上级目录并提取固件到 Releases 文件夹
-          cd ..
           for ext in uf2 hex; do
-            src="SlimeVR-Tracker-nRF-Receiver/build_nekonya_datacollect/SlimeVR-Tracker-nRF-Receiver/zephyr/zephyr.${ext}"
+            src="$REPO_DIR/build/$REPO_DIR/zephyr/zephyr.${ext}"
             dst="Releases/${{ matrix.boards.filename }}.${ext}"
             if [ -f "$src" ]; then
               cp "$src" "$dst"
