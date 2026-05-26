@@ -205,7 +205,7 @@ static bool ring_full(void)
  */
 static void suppress_non_ota_trackers(void)
 {
-	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
 		if (!ota_relay.tracker[i].participating) {
 			esb_send_remote_command(i, ESB_PONG_FLAG_OTA_SUPPRESS);
 		}
@@ -214,7 +214,7 @@ static void suppress_non_ota_trackers(void)
 
 static void unsuppress_all_trackers(void)
 {
-	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
 		esb_send_remote_command(i, ESB_PONG_FLAG_OTA_UNSUPPRESS);
 	}
 }
@@ -301,11 +301,9 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 			t->pending_cmd_type = 0;
 			t->pending_cmd_send_count = 0;
 			t->last_hid_forward_time = 0;
-			/* Fall through to re-setup BEGIN command below */
-		}
-
-		/* Check parallel limit */
-		if (ota_relay.num_targets >= OTA_MAX_PARALLEL) {
+			/* Skip parallel limit check — already counted */
+		} else if (ota_relay.num_targets >= OTA_MAX_PARALLEL) {
+			/* Check parallel limit for NEW trackers only */
 			LOG_ERR("OTA: Max parallel targets (%d) reached", OTA_MAX_PARALLEL);
 			break;
 		}
@@ -330,6 +328,14 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 		/* Initialize per-tracker state (BEFORE suppressing so this
 		 * tracker is marked as participating and won't be suppressed) */
 		struct ota_per_tracker *t = &ota_relay.tracker[tracker_id];
+
+		/* Add to target list if not already present */
+		if (!t->participating) {
+			if (ota_relay.num_targets < OTA_MAX_PARALLEL) {
+				ota_relay.target_ids[ota_relay.num_targets++] = tracker_id;
+			}
+		}
+
 		t->participating = true;
 		t->status = OTA_STATUS_IDLE;
 		t->next_seq = 0; /* Tracker starts requesting from seq 0 */
@@ -337,11 +343,6 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 		t->pending_cmd_set_ticks = 0;
 		t->pending_cmd_send_count = 0;
 		t->last_hid_forward_time = 0;
-
-		/* Add to target list (skip if already present from reset path) */
-		if (!t->participating) {
-			ota_relay.target_ids[ota_relay.num_targets++] = tracker_id;
-		}
 
 		/* Suppress non-OTA trackers (done after marking this tracker
 		 * as participating to avoid suppressing the OTA target itself) */

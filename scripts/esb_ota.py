@@ -190,12 +190,122 @@ def parse_uf2(path: Path, flash_offset: int = 0x1000) -> FirmwareImage:
 
 # ── HID Communication ──────────────────────────────────────────────
 
+def enumerate_receivers() -> list[dict]:
+    """Enumerate all connected SlimeNRF receivers."""
+    devices = hid.enumerate(VID, PID)
+    # Deduplicate by path (some OSes list multiple interfaces)
+    seen = set()
+    unique = []
+    for d in devices:
+        path = d["path"]
+        if path not in seen:
+            seen.add(path)
+            unique.append(d)
+    return unique
+
+
+def select_receiver(devices: list[dict], index: int | None = None) -> bytes:
+    """Select a receiver device path.
+
+    If index is specified, use it directly.
+    If only one device, use it.
+    If multiple, prompt the user.
+    Returns the device path.
+    """
+    if not devices:
+        print("Error: No SlimeNRF receivers found.")
+        print(f"       (looking for VID={VID:#06x} PID={PID:#06x})")
+        sys.exit(1)
+
+    if index is not None:
+        if index < 0 or index >= len(devices):
+            print(f"Error: Receiver index {index} out of range (0-{len(devices)-1})")
+            sys.exit(1)
+        return devices[index]["path"]
+
+    if len(devices) == 1:
+        return devices[0]["path"]
+
+    # Multiple devices — list and prompt
+    print(f"\nMultiple receivers found ({len(devices)}):")
+    for i, d in enumerate(devices):
+        serial = d.get("serial_number", "") or "n/a"
+        product = d.get("product_string", "") or "unknown"
+        trackers = discover_trackers(d["path"])
+        online = [t for t in sorted(trackers) if trackers[t]["online"]]
+        tracker_str = ", ".join(str(t) for t in online) if online else "none online"
+        print(f"  [{i}] {product}  (serial: {serial}, trackers: {tracker_str})")
+    print()
+    try:
+        choice = input(f"Select receiver [0-{len(devices)-1}]: ")
+        idx = int(choice.strip())
+        if idx < 0 or idx >= len(devices):
+            print("Invalid choice.")
+            sys.exit(1)
+        return devices[idx]["path"]
+    except (ValueError, EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        sys.exit(1)
+
+
+def discover_trackers(device_path: bytes, duration_s: float = 1.5) -> dict[int, dict]:
+    """Open a receiver briefly and discover connected tracker IDs and addresses.
+
+    Reads HID reports for `duration_s` seconds and extracts tracker info.
+
+    Returns dict of tracker_id → {"addr": hex_string, "online": bool}.
+    "online" is True if the tracker is actively sending data packets,
+    False if only seen via device_addr registration (padding).
+    """
+    try:
+        dev = hid.device()
+        dev.open_path(device_path)
+        dev.set_nonblocking(True)
+    except Exception:
+        return {}
+
+    trackers: dict[int, dict] = {}
+    deadline = time.monotonic() + duration_s
+
+    while time.monotonic() < deadline:
+        data = dev.read(REPORT_SIZE, timeout_ms=100)
+        if not data or len(data) < 16:
+            continue
+        # Split 64-byte frame into 4 × 16-byte sub-reports
+        for offset in range(0, min(len(data), 64), 16):
+            sub = data[offset:offset + 16]
+            if len(sub) < 8:
+                continue
+            pkt_type = sub[0]
+            tid = sub[1]
+            if pkt_type == 255 and tid < 64:
+                # Device address registration (padding) — all registered trackers
+                addr_bytes = sub[2:8]
+                addr_str = "".join(f"{b:02X}" for b in reversed(addr_bytes))
+                if tid not in trackers:
+                    trackers[tid] = {"addr": addr_str, "online": False}
+                else:
+                    trackers[tid]["addr"] = addr_str
+            elif pkt_type != 0 and pkt_type < 0xF0 and tid < 64:
+                # Active data packet — tracker is online
+                if tid not in trackers:
+                    trackers[tid] = {"addr": "", "online": True}
+                else:
+                    trackers[tid]["online"] = True
+
+    dev.close()
+    return trackers
+
+
 class OTAClient:
     """Communicates with the receiver via USB HID for OTA firmware updates."""
 
-    def __init__(self):
+    def __init__(self, device_path: bytes | None = None):
         self.dev = hid.device()
-        self.dev.open(VID, PID)
+        if device_path:
+            self.dev.open_path(device_path)
+        else:
+            self.dev.open(VID, PID)
         self.dev.set_nonblocking(True)
         info = self.dev.get_product_string()
         print(f"Connected: {info}")
@@ -326,25 +436,30 @@ class OTAClient:
 
         # Parse the 48-byte firmware info
         # Byte 2: major, 3: minor, 4: patch
-        # Byte 5-6: build_date packed
-        # Byte 7-10: firmware_size LE
-        # Byte 11: bootloader_type
-        # Byte 12: ota_protocol_version
-        # Byte 13-44: board_target
+        # Byte 5-8: build_datetime packed (32-bit BE)
+        #   bits 31-25: year-2020, 24-21: month, 20-16: day,
+        #   15-11: hour, 10-5: minute, 4-0: second/2
+        # Byte 9-12: firmware_size LE
+        # Byte 13: bootloader_type
+        # Byte 14: ota_protocol_version
+        # Byte 15-44: board_target
         major = info_data[2]
         minor = info_data[3]
         patch = info_data[4]
-        build_date_raw = struct.unpack_from(">H", info_data, 5)[0]
-        year = ((build_date_raw >> 9) & 0x7F) + 2020
-        month = (build_date_raw >> 5) & 0x0F
-        day = build_date_raw & 0x1F
-        fw_size = struct.unpack_from("<I", info_data, 7)[0]
-        bl_type = info_data[11]
-        proto_ver = info_data[12]
-        board_end = info_data.find(0, 13, 45)
+        build_dt_raw = struct.unpack_from(">I", info_data, 5)[0]
+        year = ((build_dt_raw >> 25) & 0x7F) + 2020
+        month = (build_dt_raw >> 21) & 0x0F
+        day = (build_dt_raw >> 16) & 0x1F
+        hour = (build_dt_raw >> 11) & 0x1F
+        minute = (build_dt_raw >> 5) & 0x3F
+        second = (build_dt_raw & 0x1F) * 2
+        fw_size = struct.unpack_from("<I", info_data, 9)[0]
+        bl_type = info_data[13]
+        proto_ver = info_data[14]
+        board_end = info_data.find(0, 15, 45)
         if board_end < 0:
             board_end = 45
-        board_target = info_data[13:board_end].decode("utf-8", errors="replace")
+        board_target = info_data[15:board_end].decode("utf-8", errors="replace")
 
         # Flash base address (bytes 45-46, page-aligned: value << 12)
         flash_base_raw = struct.unpack_from(">H", info_data, 45)[0]
@@ -354,7 +469,7 @@ class OTAClient:
 
         return {
             "version": f"{major}.{minor}.{patch}",
-            "build_date": f"{year}-{month:02d}-{day:02d}",
+            "build_date": f"{year}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:{second:02d}",
             "firmware_size": fw_size,
             "bootloader": bl_types.get(bl_type, f"unknown({bl_type})"),
             "protocol_version": proto_ver,
@@ -414,9 +529,10 @@ class OTAClient:
 
 # ── OTA Update Procedure ────────────────────────────────────────────
 
-def do_query_info(client: OTAClient, tracker_id: int):
+def do_query_info(client: OTAClient, tracker_id: int, quiet: bool = False):
     """Query and display firmware info from a tracker."""
-    print(f"\nQuerying firmware info for tracker {tracker_id}...")
+    if not quiet:
+        print(f"\nQuerying firmware info for tracker {tracker_id}...")
     client.query_info(tracker_id)
 
     # Collect FW_INFO chunks (4 expected)
@@ -427,29 +543,28 @@ def do_query_info(client: OTAClient, tracker_id: int):
         for r in reports:
             if r[0] == HID_OTA_FW_INFO and r[1] == tracker_id:
                 chunks.append(r)
-                print(f"  [chunk {r[2]}] data={r.hex()}")
+                if not quiet:
+                    print(f"  [chunk {r[2]}] data={r.hex()}")
 
     if not chunks:
-        print("Error: No firmware info response received.")
-        print("       Make sure the tracker is connected and responding.")
+        if not quiet:
+            print("Error: No firmware info response received.")
+            print("       Make sure the tracker is connected and responding.")
         return None
 
     if len(chunks) < 3:
-        print(f"  Warning: Only received {len(chunks)}/4 FW_INFO chunks")
-
-    if not chunks:
-        print("Error: No firmware info response received.")
-        print("       Make sure the tracker is connected and responding.")
-        return None
+        if not quiet:
+            print(f"  Warning: Only received {len(chunks)}/4 FW_INFO chunks")
 
     info = OTAClient.parse_fw_info(chunks)
-    print(f"\n  Firmware Version: {info['version']}")
-    print(f"  Build Date:      {info['build_date']}")
-    print(f"  Firmware Size:   {info['firmware_size']} bytes")
-    print(f"  Bootloader:      {info['bootloader']}")
-    print(f"  OTA Protocol:    v{info['protocol_version']}")
-    print(f"  Board Target:    {info['board_target']}")
-    print(f"  Flash Base:      0x{info['flash_base']:08X}")
+    if not quiet:
+        print(f"\n  Firmware Version: {info['version']}")
+        print(f"  Build Date:      {info['build_date']}")
+        print(f"  Firmware Size:   {info['firmware_size']} bytes")
+        print(f"  Bootloader:      {info['bootloader']}")
+        print(f"  OTA Protocol:    v{info['protocol_version']}")
+        print(f"  Board Target:    {info['board_target']}")
+        print(f"  Flash Base:      0x{info['flash_base']:08X}")
     return info
 
 
@@ -798,6 +913,12 @@ Examples:
     parser.add_argument("--flash-offset", type=lambda x: int(x, 0),
                         default=0x1000,
                         help="Flash load offset (default: 0x1000)")
+    parser.add_argument("-r", "--receiver", type=int, default=None,
+                        help="Receiver index when multiple are connected (use --list to see)")
+    parser.add_argument("--list", action="store_true",
+                        help="List connected receivers and their trackers")
+    parser.add_argument("--scan", action="store_true",
+                        help="Scan all receivers and query firmware info from each tracker")
     parser.add_argument("--no-verify", action="store_true",
                         help="Skip CRC32 verification (not recommended)")
     parser.add_argument("--no-activate", action="store_true",
@@ -806,13 +927,89 @@ Examples:
     args = parser.parse_args()
     tracker_ids = parse_tracker_ids(args.tracker)
 
-    if not args.firmware and not args.info and not args.abort:
+    if not args.firmware and not args.info and not args.abort and not args.list and not args.scan:
         parser.print_help()
         sys.exit(1)
 
+    # Enumerate receivers
+    devices = enumerate_receivers()
+
+    if args.list:
+        if not devices:
+            print("No SlimeNRF receivers found.")
+        else:
+            print(f"Found {len(devices)} receiver(s):")
+            for i, d in enumerate(devices):
+                serial = d.get("serial_number", "") or "n/a"
+                product = d.get("product_string", "") or "unknown"
+                trackers = discover_trackers(d["path"])
+                print(f"  [{i}] {product}  (serial: {serial})")
+                if trackers:
+                    for tid in sorted(trackers):
+                        info = trackers[tid]
+                        addr = info["addr"]
+                        online = info["online"]
+                        parts = [f"Tracker {tid}"]
+                        if addr:
+                            parts.append(f"({addr})")
+                        parts.append("online" if online else "offline")
+                        print(f"       {' '.join(parts)}")
+                else:
+                    print(f"       No trackers detected")
+        return
+
+    if args.scan:
+        if not devices:
+            print("No SlimeNRF receivers found.")
+            return
+        print(f"Scanning {len(devices)} receiver(s)...\n")
+        for i, d in enumerate(devices):
+            serial = d.get("serial_number", "") or "n/a"
+            product = d.get("product_string", "") or "unknown"
+            trackers = discover_trackers(d["path"])
+            print(f"Receiver [{i}] {product}  (serial: {serial})")
+            if not trackers:
+                print(f"  No trackers detected\n")
+                continue
+
+            online_ids = [tid for tid in sorted(trackers) if trackers[tid]["online"]]
+            offline_ids = [tid for tid in sorted(trackers) if not trackers[tid]["online"]]
+
+            if not online_ids:
+                for tid in sorted(trackers):
+                    addr = trackers[tid]["addr"]
+                    print(f"  Tracker {tid} ({addr})  offline")
+                print()
+                continue
+
+            # Open receiver to query firmware info for online trackers
+            try:
+                client = OTAClient(d["path"])
+            except Exception as e:
+                print(f"  Error opening receiver: {e}\n")
+                continue
+            for tid in online_ids:
+                addr = trackers[tid]["addr"]
+                info = do_query_info(client, tid, quiet=True)
+                if info:
+                    print(f"  Tracker {tid} ({addr})  v{info['version']}  "
+                          f"{info['build_date']}  {info['board_target']}  "
+                          f"flash:0x{info['flash_base']:05X}  "
+                          f"{info['firmware_size']/1024:.0f}KB")
+                else:
+                    print(f"  Tracker {tid} ({addr})  no response")
+            for tid in offline_ids:
+                addr = trackers[tid]["addr"]
+                print(f"  Tracker {tid} ({addr})  offline")
+            client.close()
+            print()
+        return
+
+    device_path = select_receiver(devices, args.receiver)
+
     # Open HID device
     try:
-        client = OTAClient()
+        client = OTAClient(device_path)
     except Exception as e:
         print(f"Error: Cannot open HID device (VID={VID:#06x} PID={PID:#06x}): {e}")
         print("       Make sure the receiver is connected via USB.")
@@ -879,7 +1076,14 @@ Examples:
         print(f"\n{'='*60}")
         print(f"  Update Plan:")
         for bt, ids in board_groups.items():
-            print(f"    Board '{bt}': trackers {ids}")
+            if "nrf52833" in bt:
+                mp = 1
+            elif "nrf52840" in bt:
+                mp = 2
+            else:
+                mp = 2
+            batches = (len(ids) + mp - 1) // mp
+            print(f"    Board '{bt}': trackers {ids} (max {mp} parallel, {batches} batch{'es' if batches > 1 else ''})")
         if len(board_groups) > 1:
             print(f"    ({len(board_groups)} board groups, will update sequentially)")
         print(f"{'='*60}")
@@ -898,13 +1102,19 @@ Examples:
         # same board trackers in parallel)
         all_success = True
         for board_target, group_ids in board_groups.items():
-            # Limit to 4 parallel per group
-            for i in range(0, len(group_ids), 4):
-                batch = group_ids[i:i+4]
+            # Determine max parallel based on chip type
+            if "nrf52833" in board_target:
+                max_parallel = 1
+            elif "nrf52840" in board_target:
+                max_parallel = 2
+            else:
+                max_parallel = 2  # default conservative limit
+            for i in range(0, len(group_ids), max_parallel):
+                batch = group_ids[i:i+max_parallel]
                 success = do_update(client, batch, firmware, board_target)
                 if not success:
                     all_success = False
-                if i + 4 < len(group_ids):
+                if i + max_parallel < len(group_ids):
                     time.sleep(2.0)  # Brief pause between batches
 
         if all_success:

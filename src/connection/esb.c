@@ -1026,6 +1026,15 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 			cmd = ESB_PONG_FLAG_SHUTDOWN;
 		}
 
+		/* During active OTA, keep non-participating trackers suppressed.
+		 * This handles trackers that reboot mid-session (e.g. after a
+		 * previous batch completes) and reconnect without suppress. */
+		if (cmd == ESB_PONG_FLAG_NORMAL &&
+		    esb_ota_relay_is_active() &&
+		    !esb_ota_relay_is_target(tracker_id)) {
+			cmd = ESB_PONG_FLAG_OTA_SUPPRESS;
+		}
+
 		ack_payload->pipe = 1 + (tracker_id % 7);
 		ack_payload->length = ESB_PONG_LEN;
 		ack_payload->noack = false;
