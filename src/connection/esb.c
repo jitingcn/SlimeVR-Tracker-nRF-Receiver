@@ -32,6 +32,7 @@
 #include "hid.h"
 #include "system/system.h"
 #include "data_collect.h"
+#include "esb_ota.h"
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
@@ -75,7 +76,11 @@ LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 // uint32_t that the RADIO ISR reads atomically when constructing PONG packets.
 #define TDMA_ENABLED 1
 #define TDMA_MIN_SLOT_TICKS    14  /* minimum slot width (~427μs at 32768Hz) */
-#define TDMA_MAX_TPS_TARGET   200 /* max TPS per tracker */
+#define TDMA_TPS_TIER_HIGH   260  /* per-tracker TPS target for ≤3 trackers */
+#define TDMA_TPS_TIER_MID_H  220  /* per-tracker TPS target for 4-5 trackers */
+#define TDMA_TPS_TIER_MID    200  /* per-tracker TPS target for 6 trackers */
+#define TDMA_TPS_TIER_LOW    190  /* per-tracker TPS target for ≥7 trackers */
+#define TDMA_MIN_EFF_SLOT     18  /* effective slot floor → aggregate ≤ ~1820 TPS */
 #define TDMA_TOLERANCE_TICKS    3  /* slot violation tolerance band */
 #define TDMA_RECONFIG_MIN_MS 5000  /* minimum interval between TDMA reconfigurations */
 
@@ -150,6 +155,13 @@ static void tdma_recalculate(void)
 		return;
 	}
 
+	/* No active trackers — clear state and return */
+	if (active_count == 0) {
+		tdma_active_mask = 0;
+		tdma_dynamic_active_count = 0;
+		return;
+	}
+
 	/*
 	 * Rate-limit reconfiguration when trackers *disappear* to avoid
 	 * flapping from brief PING gaps.  New trackers should get slots
@@ -163,21 +175,16 @@ static void tdma_recalculate(void)
 
 	/* active_ids is already sorted (ascending) since we iterate 0..N */
 
-	uint8_t slot_ticks;
-	if (active_count <= 1) {
-		slot_ticks = TDMA_MIN_SLOT_TICKS;
-		if (active_count == 1) {
-			/* slot_ticks = 32768/200 = 163, but cap to keep frame short */
-			slot_ticks = 163;
-		}
-	} else {
-		/* slot_ticks = ceil(32768 / (200 * active_count)) */
-		uint32_t numerator = 32768;
-		uint32_t denominator = TDMA_MAX_TPS_TARGET * active_count;
-		slot_ticks = (uint8_t)((numerator + denominator - 1) / denominator);
-		if (slot_ticks < TDMA_MIN_SLOT_TICKS) {
-			slot_ticks = TDMA_MIN_SLOT_TICKS;
-		}
+	/* Tiered TPS: ≤3 → 260, 4-5 → 220, 6 → 200, ≥7 → 180, with aggregate cap */
+	uint16_t target_tps = (active_count <= 3) ? TDMA_TPS_TIER_HIGH
+	                    : (active_count <= 5) ? TDMA_TPS_TIER_MID_H
+	                    : (active_count <= 6) ? TDMA_TPS_TIER_MID
+	                    : TDMA_TPS_TIER_LOW;
+	uint32_t numerator = 32768;
+	uint32_t denominator = (uint32_t)target_tps * active_count;
+	uint8_t slot_ticks = (uint8_t)((numerator + denominator - 1) / denominator);
+	if (slot_ticks < TDMA_MIN_EFF_SLOT) {
+		slot_ticks = TDMA_MIN_EFF_SLOT;
 	}
 
 	tdma_config_epoch++;
@@ -284,8 +291,10 @@ struct tdma_stats {
 	int32_t min_offset;      // Minimum offset seen
 	int32_t max_offset;      // Maximum offset seen
 	uint32_t count;          // Packet count
-	uint32_t violations;     // Slot violation count
+	uint32_t violations;     // Slot violation count (deviation from running mean)
 	int64_t last_log_time;   // Last log output time
+	int32_t phase_ema_q8;    // EMA of ref_offset in Q8 fixed-point (×256)
+	bool phase_initialized;  // Whether EMA has been seeded
 };
 
 static struct tdma_stats g_tdma_stats[MAX_TRACKERS] = {0};
@@ -308,18 +317,49 @@ static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS] = {0};
 static volatile uint32_t g_ping_isr_rx_ticks[MAX_TRACKERS] = {0};
 static volatile bool g_ping_isr_rx_ticks_valid[MAX_TRACKERS] = {false};
 
+/* Per-tracker RADIO ISR timestamp for ALL packets (PING + data).
+ * Now works for NoACK data packets too, since the ESB library was patched
+ * to always call ack_handler regardless of the no_ack flag.
+ * Used by tdma_check_slot() for accurate phase measurement. */
+static volatile uint32_t g_last_isr_rx_ticks[MAX_TRACKERS] = {0};
+static volatile bool g_last_isr_rx_valid[MAX_TRACKERS] = {false};
+
+/* Clock bias drift rate estimation (ppb = parts per billion).
+ * Uses a long-baseline approach: hold a reference point and measure
+ * total drift over time, averaging out PING retransmission noise.
+ *
+ * g_bias_ppb: estimated drift rate in ppb, positive = tracker clock
+ *   is fast relative to receiver.
+ * g_bias_ref_offset: clock_bias at the reference point.
+ * g_bias_ref_ticks: receiver ticks at the reference point.
+ * g_last_ping_isr_rx_ticks_raw: ticks of the most recent PING,
+ *   used as elapsed-time baseline for per-packet extrapolation. */
+static uint8_t g_bias_ppb_valid[MAX_TRACKERS] = {0};
+static int32_t g_bias_ppb[MAX_TRACKERS] = {0};
+static int32_t g_bias_ref_offset[MAX_TRACKERS] = {0};
+static uint32_t g_bias_ref_ticks[MAX_TRACKERS] = {0};
+static uint32_t g_last_ping_isr_rx_ticks_raw[MAX_TRACKERS] = {0};
+
 #if TDMA_ENABLED
 /**
  * Check if a packet from a tracker arrived in its assigned TDMA slot.
  * Uses dynamic parameters from tdma_config_packed[].
  *
  * @param tracker_id   The tracker's ID (0-15)
- * @param rx_ticks     Receiver time in ticks when packet arrived
+ * @param rx_ticks     Receiver time in ticks when packet arrived (EVENT_IRQ fallback)
  */
 static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
 {
 	if (tracker_id >= MAX_TRACKERS) {
 		return;
+	}
+
+	/* Prefer RADIO ISR timestamp (accurate) over EVENT_IRQ timestamp
+	 * (delayed 10-25+ ticks by kernel scheduling).  The ISR timestamp is
+	 * now available for ALL packets including NoACK data, thanks to the
+	 * ESB library patch that always calls on_radio_disabled_rx_dpl(). */
+	if (g_last_isr_rx_valid[tracker_id]) {
+		rx_ticks = g_last_isr_rx_ticks[tracker_id];
 	}
 
 	/* Read dynamic TDMA config (atomic 32-bit load) */
@@ -337,10 +377,24 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
 
 	/*
 	 * Compensate receiver clock vs tracker clock offset.
+	 * Base bias: last clean PING measurement, extrapolated forward
+	 * using the measured drift rate (ppb) to keep it accurate
+	 * between PING sync intervals.
 	 */
 	int32_t clock_bias = g_last_ping_rx_time_diff_valid[tracker_id]
 		? g_last_ping_rx_time_diff_ticks[tracker_id]
 		: 0;
+
+	/* Drift extrapolation: bias changes linearly between PINGs.
+	 * Use the long-baseline ppb estimate to correct for drift
+	 * since the last PING, keeping the effective bias accurate
+	 * throughout the sync interval. */
+	if (clock_bias && g_bias_ppb_valid[tracker_id]) {
+		uint32_t elapsed = rx_ticks - g_last_ping_isr_rx_ticks_raw[tracker_id];
+		int32_t drift_comp = (int32_t)((int64_t)g_bias_ppb[tracker_id] * elapsed / 1000000000LL);
+		clock_bias += drift_comp;
+	}
+
 	uint32_t adjusted_rx_ticks = (uint32_t)((int32_t)rx_ticks - clock_bias);
 
 	/* Calculate current position in the TDMA frame (tracker-relative) */
@@ -377,18 +431,46 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks)
 		}
 	}
 
+	/*
+	 * Phase-consistency violation detection.
+	 *
+	 * The absolute ref_offset includes a per-tracker constant bias from:
+	 *   - D_est update after PONG (tracker updates offset, receiver's
+	 *     clock_bias is stale until next PING)
+	 *   - ISR-vs-EVENT timing differences
+	 *   - Air-time asymmetry in RTT model
+	 *
+	 * Instead of checking absolute offset against slot boundaries, track
+	 * a running mean (EMA) of each tracker's observed phase and flag
+	 * DEVIATIONS from that mean.  This automatically adapts to D_est
+	 * jumps and only fires for genuine TDMA failures (wrong slot, phase
+	 * drift, collisions).
+	 */
+	if (!stats->phase_initialized) {
+		stats->phase_ema_q8 = ref_offset << 8;
+		stats->phase_initialized = true;
+	} else {
+		/* EMA alpha=1/8: converges in ~8 packets (~50ms at 170 TPS) */
+		stats->phase_ema_q8 += (((ref_offset << 8) - stats->phase_ema_q8) + 4) >> 3;
+	}
+
+	int32_t phase_mean = stats->phase_ema_q8 >> 8;
+	int32_t deviation = ref_offset - phase_mean;
+	int32_t abs_dev = deviation < 0 ? -deviation : deviation;
+
+	/* Violation: packet deviates from its own running mean by more than
+	 * half a slot.  This catches actual TDMA failures while ignoring
+	 * the constant per-tracker phase bias. */
 	int32_t half_slot = (int32_t)(slot_ticks / 2);
-	int32_t abs_offset = ref_offset < 0 ? -ref_offset : ref_offset;
-	if (abs_offset > half_slot + TDMA_TOLERANCE_TICKS) {
+	if (abs_dev > half_slot) {
 		stats->violations++;
 
 		if ((stats->violations & 0x0F) == 1) {
 			LOG_DBG(
-				"TDMA viol trk=%u exp_slot=%u/%u phase=%u off=%d bias=%d",
+				"TDMA viol trk=%u dev=%d ema=%d off=%d bias=%d",
 				tracker_id,
-				expected_slot,
-				total_slots,
-				frame_phase,
+				deviation,
+				phase_mean,
 				ref_offset,
 				clock_bias
 			);
@@ -909,6 +991,15 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 		return;
 	}
 
+	/* ---- Capture ISR timestamp for any tracker packet (non-pairing) ---- */
+	if (data_length > 1 && pipe_id > 0) {
+		uint8_t tid = pdu_data[1];
+		if (tid < MAX_TRACKERS) {
+			g_last_isr_rx_ticks[tid] = k_uptime_ticks();
+			g_last_isr_rx_valid[tid] = true;
+		}
+	}
+
 	/* ---- PING → PONG (immediate response) ---- */
 	if (data_length == ESB_PING_LEN && pdu_data[0] == ESB_PING_TYPE) {
 		uint8_t tracker_id = pdu_data[1];
@@ -986,10 +1077,33 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 		ack_payload->data[ESB_PONG_LEN - 1] =
 			crc8_ccitt(0x07, ack_payload->data, ESB_PONG_LEN - 1);
 		*has_ack_payload = true;
+
+		/* If OTA session has a pending command for this tracker
+		 * (e.g., BEGIN before tracker enters OTA mode), override
+		 * the standard PONG with the OTA payload. */
+		if (esb_ota_relay_is_active() &&
+		    esb_ota_relay_is_target(tracker_id)) {
+			bool ota_has_ack = false;
+			esb_ota_relay_fill_ack(tracker_id, pipe_id,
+					       ack_payload, &ota_has_ack,
+					       NULL, 0);
+			if (ota_has_ack) {
+				*has_ack_payload = true;
+			}
+		}
 		return;
 	}
 
 	/* Other packet types: no ACK payload, handled by event_handler */
+
+	/* ---- OTA status/poll packets from tracker in OTA mode ---- */
+	if (data_length >= 2 && pdu_data[0] == ESB_OTA_STATUS_TYPE) {
+		uint8_t tracker_id = pdu_data[1];
+		esb_ota_relay_fill_ack(tracker_id, pipe_id,
+				       ack_payload, has_ack_payload,
+				       pdu_data, data_length);
+		return;
+	}
 
 	/* ---- Raw data ARQ (type 0x10, data collection active) ---- */
 	if (data_length >= 4 && pdu_data[0] == ESB_RAW_IMU_TYPE) {
@@ -1018,7 +1132,6 @@ void event_handler(struct esb_evt const *event)
 		break;
 	case ESB_EVENT_RX_RECEIVED: {
 		int err = 0;
-		uint32_t current_rx_ticks = k_uptime_ticks();
 		while (!err) {
 			err = esb_read_rx_payload(&rx_payload);
 			if (err == -ENODATA) {
@@ -1027,6 +1140,7 @@ void event_handler(struct esb_evt const *event)
 				LOG_ERR("Error while reading rx packet: %d", err);
 				break;
 			}
+			uint32_t current_rx_ticks = k_uptime_ticks();
 			switch (rx_payload.length) {
 			case 1: // ACK packet
 				LOG_DBG("RX ACK len=%u pipe=%u data=%02X", rx_payload.length, rx_payload.pipe, rx_payload.data[0]);
@@ -1144,6 +1258,8 @@ void event_handler(struct esb_evt const *event)
 					 * (a 400-tick spike only moves bias by 2 instead of 50).
 					 */
 					#define CLOCK_BIAS_MAX_UP_PER_PING 2
+					int32_t prev_bias = g_last_ping_rx_time_diff_valid[tracker_id]
+						? g_last_ping_rx_time_diff_ticks[tracker_id] : 0;
 					if (!g_last_ping_rx_time_diff_valid[tracker_id]) {
 						g_last_ping_rx_time_diff_ticks[tracker_id] = rx_time_diff_ticks;
 					} else {
@@ -1161,6 +1277,36 @@ void event_handler(struct esb_evt const *event)
 						}
 					}
 					g_last_ping_rx_time_diff_valid[tracker_id] = true;
+
+					/* Update clock bias drift rate using long-baseline ppb
+					 * estimation.  Keep a reference point and measure total
+					 * drift over ≥1s baselines to average out RTT noise. */
+					if (prev_bias != 0) {
+						if (!g_bias_ppb_valid[tracker_id]) {
+							g_bias_ref_offset[tracker_id] = g_last_ping_rx_time_diff_ticks[tracker_id];
+							g_bias_ref_ticks[tracker_id] = isr_rx_ticks;
+							g_bias_ppb[tracker_id] = 0;
+							g_bias_ppb_valid[tracker_id] = 1;
+						} else {
+							uint32_t elapsed = isr_rx_ticks - g_bias_ref_ticks[tracker_id];
+							if (elapsed >= 32768u) {
+								int32_t new_bias = g_last_ping_rx_time_diff_ticks[tracker_id];
+								int64_t total_drift = (int64_t)(new_bias - g_bias_ref_offset[tracker_id]);
+								int32_t raw_ppb = (int32_t)(total_drift * 1000000000LL / elapsed);
+								if (g_bias_ppb_valid[tracker_id] > 1) {
+									g_bias_ppb[tracker_id] += (raw_ppb - g_bias_ppb[tracker_id]) / 4;
+								} else {
+									g_bias_ppb[tracker_id] = raw_ppb;
+									g_bias_ppb_valid[tracker_id] = 2;
+								}
+							}
+							if (elapsed > 60u * 32768u) {
+								g_bias_ref_offset[tracker_id] = g_last_ping_rx_time_diff_ticks[tracker_id];
+								g_bias_ref_ticks[tracker_id] = isr_rx_ticks;
+							}
+						}
+					}
+					g_last_ping_isr_rx_ticks_raw[tracker_id] = isr_rx_ticks;
 
 					uint64_t rx_time_diff_us
 						= k_ticks_to_us_floor64((rx_time_diff_ticks < 0 ? -rx_time_diff_ticks : rx_time_diff_ticks));
@@ -1191,13 +1337,14 @@ void event_handler(struct esb_evt const *event)
 #if TDMA_ENABLED
 						if (stats->violations > 12 && esb_get_stats_detailed_enabled()) {
 							LOG_WRN(
-								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld ticks StdDev=%u ticks Range=[%d, %d] "
-								"RxTimeDiff=%s%llu us",
+								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld StdDev=%u EMA=%d "
+								"Range=[%d,%d] RxDiff=%s%llu us",
 								tracker_id,
 								stats->count,
 								stats->violations,
 								mean,
 								std_dev,
+								stats->phase_initialized ? (stats->phase_ema_q8 >> 8) : 0,
 								stats->min_offset,
 								stats->max_offset,
 								rx_time_diff_ticks >= 0 ? "+" : "-",
@@ -1205,13 +1352,14 @@ void event_handler(struct esb_evt const *event)
 							);
 						} else {
 							LOG_DBG(
-								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld ticks StdDev=%u ticks Range=[%d, %d] "
-								"RxTimeDiff=%s%llu us",
+								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld StdDev=%u EMA=%d "
+								"Range=[%d,%d] RxDiff=%s%llu us",
 								tracker_id,
 								stats->count,
 								stats->violations,
 								mean,
 								std_dev,
+								stats->phase_initialized ? (stats->phase_ema_q8 >> 8) : 0,
 								stats->min_offset,
 								stats->max_offset,
 								rx_time_diff_ticks >= 0 ? "+" : "-",
@@ -1223,8 +1371,12 @@ void event_handler(struct esb_evt const *event)
 #endif
 					}
 
-					// Reset stats
+					// Reset stats (preserve phase EMA across windows)
+					int32_t saved_ema = stats->phase_ema_q8;
+					bool saved_init = stats->phase_initialized;
 					memset(stats, 0, sizeof(struct tdma_stats));
+					stats->phase_ema_q8 = saved_ema;
+					stats->phase_initialized = saved_init;
 					stats->last_log_time = now_ms;
 				}
 
@@ -1469,6 +1621,14 @@ void event_handler(struct esb_evt const *event)
 					/* PONG is now built by ack_handler in radio ISR context.
 					 * event_handler only needs to track sequence state. */
 					last_pong_queued_counter[tracker_id] = counter;
+				} else {
+					/* Not a PING packet — check for OTA STATUS (same length) */
+					uint8_t pkt_type = rx_payload.data[0];
+					if (pkt_type == ESB_OTA_STATUS_TYPE ||
+					    pkt_type == ESB_OTA_FW_INFO_TYPE) {
+						esb_ota_relay_process_tracker_packet(
+							rx_payload.data, rx_payload.length);
+					}
 				}
 			} break;
 			case 17: // 16 bytes data + 1 byte sequence number
@@ -1521,12 +1681,20 @@ void event_handler(struct esb_evt const *event)
 			} break;
 			default:
 			{
+				/* OTA packets from tracker (status, firmware info) */
+				uint8_t pkt_type = rx_payload.data[0];
+				if (pkt_type == ESB_OTA_STATUS_TYPE ||
+				    pkt_type == ESB_OTA_FW_INFO_TYPE) {
+					esb_ota_relay_process_tracker_packet(
+						rx_payload.data, rx_payload.length);
+					break;
+				}
+
 				/* Raw data collection packets (types 0x10-0x12): variable length.
 				 * Forward raw payload to CDC for PC-side data collection.
 				 * Duplicate raw IMU packets (same tracker+sequence) are
 				 * dropped since trackers send each sample twice for
 				 * redundancy in noack mode. */
-				uint8_t pkt_type = rx_payload.data[0];
 				if (pkt_type == ESB_RAW_IMU_TYPE ||
 				    pkt_type == ESB_RAW_MAG_TYPE ||
 				    pkt_type == ESB_RAW_META_TYPE) {
@@ -2242,6 +2410,18 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 		case ESB_PONG_FLAG_DATA_COLLECT_OFF:
 			cmd_name = "DATA_COLLECT_OFF";
 			break;
+		case ESB_PONG_FLAG_OTA_QUERY_INFO:
+			cmd_name = "OTA_QUERY_INFO";
+			break;
+		case ESB_PONG_FLAG_OTA_ABORT:
+			cmd_name = "OTA_ABORT";
+			break;
+		case ESB_PONG_FLAG_OTA_SUPPRESS:
+			cmd_name = "OTA_SUPPRESS";
+			break;
+		case ESB_PONG_FLAG_OTA_UNSUPPRESS:
+			cmd_name = "OTA_UNSUPPRESS";
+			break;
 		}
 		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", cmd_name, command_flag, tracker_id);
 	} else {
@@ -2601,13 +2781,13 @@ static void esb_thread(void)
 	 * recalculation detects them as active). */
 	if (tracker_count > 0) {
 		uint8_t init_slot;
-		if (tracker_count == 1) {
-			init_slot = 163;
-		} else {
-			uint32_t denom = TDMA_MAX_TPS_TARGET * tracker_count;
-			init_slot = (uint8_t)((32768 + denom - 1) / denom);
-			if (init_slot < TDMA_MIN_SLOT_TICKS) init_slot = TDMA_MIN_SLOT_TICKS;
-		}
+		uint16_t tps = (tracker_count <= 3) ? TDMA_TPS_TIER_HIGH
+		             : (tracker_count <= 5) ? TDMA_TPS_TIER_MID_H
+		             : (tracker_count <= 6) ? TDMA_TPS_TIER_MID
+		             : TDMA_TPS_TIER_LOW;
+		uint32_t denom = (uint32_t)tps * tracker_count;
+		init_slot = (uint8_t)((32768 + denom - 1) / denom);
+		if (init_slot < TDMA_MIN_EFF_SLOT) init_slot = TDMA_MIN_EFF_SLOT;
 		tdma_config_epoch++;
 		for (uint8_t i = 0; i < tracker_count && i < MAX_TRACKERS; i++) {
 			tdma_config_packed[i] = tdma_pack_config(

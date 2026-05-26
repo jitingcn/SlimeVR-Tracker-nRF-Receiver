@@ -71,11 +71,23 @@
 #define ESB_PONG_FLAG_DFU_OTA 0x21       // Enter OTA DFU bootloader
 #define ESB_PONG_FLAG_DATA_COLLECT_ON 0x22  // Start raw data collection
 #define ESB_PONG_FLAG_DATA_COLLECT_OFF 0x23 // Stop raw data collection
+#define ESB_PONG_FLAG_OTA_QUERY_INFO 0x30   // Request firmware info for ESB OTA
+#define ESB_PONG_FLAG_OTA_ABORT 0x31        // Abort ESB OTA update
+#define ESB_PONG_FLAG_OTA_SUPPRESS 0x32     // Suppress tracker during OTA (reduce poll rate)
+#define ESB_PONG_FLAG_OTA_UNSUPPRESS 0x33   // Resume normal poll rate after OTA
 
 // Raw data collection packet types
 #define ESB_RAW_IMU_TYPE    0x10  // Raw IMU data (float, with piggybacked mag)
 #define ESB_RAW_MAG_TYPE    0x11  // Raw magnetometer data (float, reserved)
 #define ESB_RAW_META_TYPE   0x12  // Metadata (ODR, range, sensor IDs - sent once)
+
+// ESB OTA packet types (used during firmware update over ESB)
+#define ESB_OTA_DATA_TYPE       0x20  // OTA firmware data (receiver → tracker)
+#define ESB_OTA_STATUS_TYPE     0x21  // OTA status report (tracker → receiver)
+#define ESB_OTA_FW_INFO_TYPE    0x22  // Firmware info report (tracker → receiver)
+#define ESB_OTA_BEGIN_TYPE      0x23  // Begin OTA session (receiver → tracker)
+#define ESB_OTA_VERIFY_TYPE     0x24  // Request CRC verification (receiver → tracker)
+#define ESB_OTA_ACTIVATE_TYPE   0x25  // Activate new firmware (receiver → tracker)
 
 void event_handler(struct esb_evt const *event);
 int clocks_start(void);
