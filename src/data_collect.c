@@ -38,7 +38,7 @@ static const struct device *cdc_dev;
 static bool cdc_ready;
 
 /* Ring buffer for CDC output to decouple ISR-context writes from USB.
- * 16 KB holds ~287 frames (57 bytes each) ≈ 717 ms at 400 Hz. */
+ * 16 KB holds ~284 frames (57 bytes each) ≈ 716 ms at 400 Hz. */
 #define DATA_COLLECT_BUF_SIZE 16384
 static uint8_t dc_buf[DATA_COLLECT_BUF_SIZE];
 static volatile uint32_t dc_buf_head;
@@ -253,4 +253,3 @@ void data_collect_write(const uint8_t *data, uint8_t len, uint8_t rssi)
 	/* Trigger flush */
 	k_work_submit(&dc_flush_work);
 }
-

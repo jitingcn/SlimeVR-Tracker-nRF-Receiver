@@ -23,6 +23,7 @@
 #include "globals.h"
 #include "hid.h"
 #include "connection/esb.h"
+#include "esb_ota.h"
 
 #include <limits.h>
 #include <zephyr/kernel.h>
@@ -407,6 +408,13 @@ static void read_report(struct k_work *work)
 		ret = hid_int_ep_read(hdev, ep_read_buffer, sizeof(ep_read_buffer), &read);
 		if (ret != 0) {
 			LOG_ERR("hid_int_ep_read: %d", ret);
+		} else if (read > 0) {
+			/* Dispatch HID OUT reports */
+			uint8_t report_type = ep_read_buffer[0];
+			if (report_type >= 0xF0 && report_type <= 0xF7) {
+				/* OTA command from PC */
+				esb_ota_relay_process_hid(ep_read_buffer, read);
+			}
 		}
 	}
 }
@@ -573,7 +581,10 @@ void hid_write_packet_n(uint8_t *data, uint8_t rssi)
 
 	memcpy(&report.data, data, sizeof(report)); // all data can be passed through
 
-	if (data[0] != 1 && data[0] != 4) { // packet 1 and 4 are full precision quat and accel/mag, no room for rssi
+	/* Types 1, 4: full-precision quat+accel — no room for RSSI.
+	 * Types 0xF0-0xF7: OTA reports use all 16 bytes — no room for RSSI. */
+	if (data[0] != 1 && data[0] != 4 &&
+	    !(data[0] >= 0xF0 && data[0] <= 0xF7)) {
 		uint8_t tracker_id = data[1];
 		uint8_t smoothed_rssi = rssi_smooth_update(tracker_id, (int8_t)rssi);
 		report.data[15] = smoothed_rssi;

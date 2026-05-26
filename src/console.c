@@ -35,6 +35,7 @@
 #include "connection/esb.h"
 #include "connection/rssi_scan.h"
 #include "data_collect.h"
+#include "esb_ota.h"
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -236,6 +237,9 @@ static void print_help(void)
 		"  collect <id>               Start raw sensor data collection from tracker\n"
 		"  collect off                Stop data collection\n"
 		"  collect                    Show data collection status\n"
+		"  ota                        Show ESB OTA update status\n"
+		"  ota info <id>              Query firmware info from tracker\n"
+		"  ota abort                  Abort active OTA session\n"
 		"  meow                       Meow!\n"
 		"  help                       Show this help message\n"
 		"\n"
@@ -337,6 +341,7 @@ static void console_thread(void)
 
 	uint8_t command_meow[] = "meow";
 	uint8_t command_collect[] = "collect";
+	uint8_t command_ota[] = "ota";
 
 	while (1) {
 		uint8_t *line = console_getline();
@@ -1009,6 +1014,32 @@ static void console_thread(void)
 #else
 			printk("Data collection not available (build with CONFIG_DATA_COLLECT=y)\n");
 #endif
+		}
+		else if (memcmp(line, command_ota, sizeof(command_ota) - 1) == 0) {
+			if (!arg) {
+				/* "ota" with no args → show status */
+				esb_ota_relay_console_cmd(0, "status");
+			} else if (strcmp((char *)arg, "abort") == 0 ||
+				   strcmp((char *)arg, "cancel") == 0) {
+				if (arg2) {
+					int id = atoi((char *)arg2);
+					esb_ota_relay_console_cmd((uint8_t)id, "abort");
+				} else {
+					/* Abort all OTA targets */
+					esb_ota_relay_console_cmd(0xFF, "abort");
+				}
+			} else if (strcmp((char *)arg, "status") == 0) {
+				esb_ota_relay_console_cmd(0, "status");
+			} else if (strcmp((char *)arg, "info") == 0) {
+				if (arg2) {
+					int id = atoi((char *)arg2);
+					esb_ota_relay_console_cmd((uint8_t)id, "info");
+				} else {
+					printk("Usage: ota info <tracker_id>\n");
+				}
+			} else {
+				printk("OTA commands: ota, ota info <id>, ota abort, ota status\n");
+			}
 		}
 		else {
 			printk("Unknown command\n");
