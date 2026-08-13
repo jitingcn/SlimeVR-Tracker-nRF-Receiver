@@ -220,6 +220,8 @@ jobs:
                   {boardname: "foxdongle_uf2/nrf52840", filename: "SlimeNRF_FoxDongle_Receiver_DataCollect_CDC", with_data_collect_cdc: true},
                   {boardname: "foxpromicro_rfek_uf2/nrf52840", filename: "SlimeNRF_FoxProMicro_RFEK_Receiver"},
                   {boardname: "foxpromicro_rfek_uf2/nrf52840", filename: "SlimeNRF_FoxProMicro_RFEK_Receiver_DataCollect_CDC", with_data_collect_cdc: true},
+                  {boardname: "estenova_r1_uf2/nrf52840", filename: "SlimeNRF_Estenova_Receiver"},
+                  {boardname: "estenova_r1_uf2/nrf52840", filename: "SlimeNRF_Estenova_Receiver_DataCollect_CDC", with_data_collect_cdc: true},
                 ]
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,21 @@
+identifier: estenova_r1_uf2/nrf52840
+name: estenova_r1_uf2
+vendor: estenova
+type: mcu
+arch: arm
+ram: 256
+flash: 1042
+toolchain:
+  - zephyr
+  - gnuarmemb
+  - xtools
+supported:
+  - adc
+  - usb_device
+  - ble
+  - pwm
+  - spi
+  - watchdog
+  - counter
+  - netif:openthread
+  - gpio
