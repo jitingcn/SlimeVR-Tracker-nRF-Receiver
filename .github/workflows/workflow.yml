@@ -207,6 +207,8 @@ jobs:
                   {boardname: "aerorx_r1_uf2/nrf52840", filename: "SlimeNRF_AeroRX_R1_Receiver"},
                   {boardname: "aerorx_r1_uf2/nrf52840", filename: "SlimeNRF_AeroRX_R1_Receiver_DataCollect_CDC", with_data_collect_cdc: true},
                   {boardname: "nekonya_uf2/nrf52833", filename: "SlimeNRF_NekoNya_Receiver"},
+                  {boardname: "dawnrx_2_uf2/nrf52833", filename: "SlimeNRF_Dawn_Tracker_Receiver_2"},
+                  {boardname: "dawnrx_2_uf2/nrf52833", filename: "SlimeNRF_Dawn_Tracker_Receiver_2_DataCollect_CDC", with_data_collect_cdc: true},
                   {boardname: "foxdongle33_uf2/nrf52833", filename: "SlimeNRF_FoxDongle33_Receiver"},
                   {boardname: "foxdongle33_uf2/nrf52833", filename: "SlimeNRF_FoxDongle33_Receiver_DataCollect_CDC", with_data_collect_cdc: true},
                   {boardname: "foxdongle_uf2/nrf52840", filename: "SlimeNRF_FoxDongle_Receiver"},

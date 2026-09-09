@@ -1,0 +1,20 @@
+# Copyright (c) 2024 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+config BOARD_DAWNRX_2_UF2
+	select SOC_NRF52833_QDAA
+
+if BOARD_DAWNRX_2_UF2
+
+config BOARD_SERIAL_BACKEND_CDC_ACM
+	bool "USB CDC"
+	default y
+
+config BOARD_ENABLE_FEM
+	bool "FEM enabled"
+	default y
+	select MPSL_FEM_GENERIC_TWO_CTRL_PINS_SUPPORT
+	help
+	  Enable the SKY66112-11 front-end module.
+
+endif # BOARD_DAWNRX_2_UF2
