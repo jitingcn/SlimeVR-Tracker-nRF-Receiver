@@ -25,6 +25,12 @@
 #define SCAN_TIMER_ID CONFIG_ESB_SYS_TIMER_INSTANCE
 #endif
 static nrfx_timer_t scan_timer = NRFX_TIMER_INSTANCE(NRF_TIMER_INST_GET(SCAN_TIMER_ID));
+/* MPSL keeps the event pointers until the matching configuration clear, which
+ * can happen long after prepare() returns. Automatic storage would hand it a
+ * reused stack frame, so the registered configuration must have static
+ * lifetime. */
+static mpsl_fem_event_t scan_activate_event;
+static mpsl_fem_event_t scan_deactivate_event;
 static bool timer_owned;
 static bool fem_owned;
 static bool cleanup_fault;
@@ -95,9 +101,11 @@ int rssi_scan_fem_prepare(void)
 		.type = MPSL_FEM_EVENT_TYPE_GENERIC,
 		.event.generic.event = nrf_radio_event_address_get(NRF_RADIO, NRF_RADIO_EVENT_DISABLED),
 	};
+	scan_activate_event = activate;
+	scan_deactivate_event = deactivate;
 	mpsl_fem_enable();
 	fem_owned = true;
-	err = mpsl_fem_lna_configuration_set(&activate, &deactivate);
+	err = mpsl_fem_lna_configuration_set(&scan_activate_event, &scan_deactivate_event);
 	if (err) goto fail;
 	nrf_timer_cc_set(scan_timer.p_reg, NRF_TIMER_CC_CHANNEL3, FEM_SETTLED_US);
 	nrf_timer_shorts_set(scan_timer.p_reg,
