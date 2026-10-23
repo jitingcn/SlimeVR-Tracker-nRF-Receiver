@@ -216,6 +216,8 @@ jobs:
                   {boardname: "foxdongle33_uf2/nrf52833", filename: "SlimeNRF_FoxDongle33_Receiver_DataCollect_CDC", with_data_collect_cdc: true},
                   {boardname: "foxdongle_uf2/nrf52840", filename: "SlimeNRF_FoxDongle_Receiver"},
                   {boardname: "foxdongle_uf2/nrf52840", filename: "SlimeNRF_FoxDongle_Receiver_DataCollect_CDC", with_data_collect_cdc: true},
+                  {boardname: "foxdongleneo_uf2/nrf52840", filename: "SlimeNRF_FoxDongleNEO_Receiver"},
+                  {boardname: "foxdongleneo_uf2/nrf52840", filename: "SlimeNRF_FoxDongleNEO_Receiver_DataCollect_CDC", with_data_collect_cdc: true},
                   {boardname: "foxpromicro_rfek_uf2/nrf52840", filename: "SlimeNRF_FoxProMicro_RFEK_Receiver"},
                   {boardname: "foxpromicro_rfek_uf2/nrf52840", filename: "SlimeNRF_FoxProMicro_RFEK_Receiver_DataCollect_CDC", with_data_collect_cdc: true},
                   {boardname: "estenova_r1_uf2/nrf52840", filename: "SlimeNRF_Estenova_Receiver"},
