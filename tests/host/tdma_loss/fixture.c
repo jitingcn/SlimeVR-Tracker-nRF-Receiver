@@ -116,7 +116,7 @@ static void repeat(unsigned ticks, uint32_t received, uint32_t gaps)
 
 static void fast_recovery(void)
 {
-	repeat(29, 200, 0);
+	repeat(9, 200, 0);
 	assert(tdma_cap_level == 3);
 	tick(200, 0);
 	assert(tdma_cap_level == 2);
@@ -124,70 +124,99 @@ static void fast_recovery(void)
 
 static void slow_probe(void)
 {
-	repeat(119, 196, 4);
+	repeat(59, 185, 15);
 	assert(tdma_cap_level == 3);
-	tick(196, 4);
+	tick(185, 15);
 	assert(tdma_cap_level == 2);
 }
 
 static void sparse_recovery(void)
 {
-	/* 24-25 received+gap samples/tick, ~2% loss, qualifies every 5 ticks. */
-	for (unsigned i = 0; i < 119; i++) {
-		tick(24, i % 2);
+	for (unsigned i = 0; i < 59; i++) {
+		tick(23, 1 + i % 2);
 	}
 	assert(tdma_cap_level == 3);
-	tick(24, 1);
+	tick(23, 2);
 	assert(tdma_cap_level == 2);
 	tdma_published_cap_level = 2;
 
-	/* 40 samples/tick, 2.5% loss, qualifies every 3 ticks. */
-	repeat(119, 39, 1);
+	repeat(59, 37, 3);
 	assert(tdma_cap_level == 2);
-	tick(39, 1);
+	tick(37, 3);
 	assert(tdma_cap_level == 1);
 }
 
 static void idle_breaks_evidence(void)
 {
-	repeat(119, 196, 4);
+	repeat(59, 185, 15);
 	repeat(180, 0, 0);
 	assert(tdma_cap_level == 3);
-	tick(196, 4);
+	tick(185, 15);
 	assert(tdma_cap_level == 3);
-	repeat(119, 196, 4);
+	repeat(59, 185, 15);
 	assert(tdma_cap_level == 2);
 }
 
 static void loss_blocks_probe(void)
 {
-	repeat(119, 196, 4);
-	tick(180, 20);
-	repeat(119, 196, 4);
+	repeat(59, 185, 15);
+	tick(150, 50);
+	repeat(59, 185, 15);
 	assert(tdma_cap_level == 3);
-	repeat(4, 180, 20);
+	repeat(4, 150, 50);
 	assert(tdma_cap_level == 3);
-	tick(180, 20);
+	tick(150, 50);
 	assert(tdma_cap_level == 4);
 }
 
 static void threshold_boundaries(void)
 {
-	repeat(120, 190, 10); /* Exactly 5%: neither direction. */
+	repeat(60, 160, 40);
 	assert(tdma_cap_level == 3);
-	repeat(30, 198, 2); /* Exactly 1%: no fast recovery. */
+	tdma_loss_reset_windows();
+	repeat(60, 180, 20);
 	assert(tdma_cap_level == 3);
-	repeat(5, 1899, 101); /* 5.05% must not truncate to the neutral band. */
+	tdma_loss_reset_windows();
+	repeat(60, 170, 30);
+	assert(tdma_cap_level == 3);
+
+	tdma_loss_reset_windows();
+	repeat(10, 190, 10);
+	assert(tdma_cap_level == 3);
+	repeat(49, 190, 10);
+	assert(tdma_cap_level == 3);
+	tick(190, 10);
+	assert(tdma_cap_level == 2);
+
+	tdma_cap_level = tdma_published_cap_level = 3;
+	tdma_loss_reset_windows();
+	repeat(9, 1901, 99);
+	assert(tdma_cap_level == 3);
+	tick(1901, 99);
+	assert(tdma_cap_level == 2);
+
+	tdma_cap_level = tdma_published_cap_level = 3;
+	tdma_loss_reset_windows();
+	repeat(59, 1801, 199);
+	assert(tdma_cap_level == 3);
+	tick(1801, 199);
+	assert(tdma_cap_level == 2);
+
+	tdma_cap_level = tdma_published_cap_level = 3;
+	tdma_loss_reset_windows();
+	repeat(4, 1599, 401);
+	assert(tdma_cap_level == 3);
+	tick(1599, 401);
 	assert(tdma_cap_level == 4);
 }
 
 static void counter_reset(void)
 {
-	repeat(29, 200, 0);
+	repeat(9, 200, 0);
 	decision_received[3] = 0;
 	tick(200, 0);
 	assert(tdma_cap_level == 3);
-	repeat(29, 200, 0);
+	repeat(9, 200, 0);
 	assert(tdma_cap_level == 3);
 	tick(200, 0);
 	assert(tdma_cap_level == 2);
@@ -199,7 +228,7 @@ static void counter_wrap(void)
 	tdma_prev_recv[3] = decision_received[3];
 	tick(200, 0); /* Counter wrap is a discarded discontinuity, not huge loss. */
 	assert(tdma_cap_level == 3);
-	repeat(29, 200, 0);
+	repeat(9, 200, 0);
 	assert(tdma_cap_level == 3);
 	tick(200, 0);
 	assert(tdma_cap_level == 2);
@@ -207,11 +236,11 @@ static void counter_wrap(void)
 
 static void restart_breaks_evidence(void)
 {
-	repeat(29, 200, 0);
+	repeat(9, 200, 0);
 	tracker_stats[3].restart_events++;
 	tick(200, 0);
 	assert(tdma_cap_level == 3);
-	repeat(29, 200, 0);
+	repeat(9, 200, 0);
 	assert(tdma_cap_level == 3);
 	tick(200, 0);
 	assert(tdma_cap_level == 2);
@@ -241,38 +270,38 @@ static void sequence_wrap(void)
 
 static void pending_publication(void)
 {
-	repeat(120, 196, 4);
+	repeat(60, 185, 15);
 	assert(tdma_cap_level == 2);
-	repeat(180, 196, 4);
+	repeat(180, 185, 15);
 	assert(tdma_cap_level == 2);
 	tdma_published_cap_level = 2;
-	repeat(119, 196, 4);
+	repeat(59, 185, 15);
 	assert(tdma_cap_level == 2);
-	tick(196, 4);
+	tick(185, 15);
 	assert(tdma_cap_level == 1);
 }
 
 static void excluded_modes(void)
 {
-	repeat(119, 196, 4);
+	repeat(59, 185, 15);
 	collecting = true;
-	repeat(180, 196, 4);
+	repeat(180, 185, 15);
 	collecting = false;
 	batching = true;
-	repeat(180, 196, 4);
+	repeat(180, 185, 15);
 	batching = false;
 	ota = true;
-	repeat(180, 196, 4);
+	repeat(180, 185, 15);
 	ota = false;
 	test_all_state_valid = 1;
 	test_all_enabled = 1;
-	repeat(180, 196, 4);
+	repeat(180, 185, 15);
 	test_all_enabled = 0;
 	assert(tdma_cap_level == 3);
 	tick(0, 0); /* Common baseline after leaving the excluded mode. */
-	repeat(119, 196, 4);
+	repeat(59, 185, 15);
 	assert(tdma_cap_level == 3);
-	tick(196, 4);
+	tick(185, 15);
 	assert(tdma_cap_level == 2);
 }
 
@@ -386,24 +415,24 @@ static void blackout_reanchor(void)
 
 static void blackout_loss_evidence(void)
 {
-	repeat(29, 200, 0);
+	repeat(9, 200, 0);
 	esb_rx_discontinuity();
 	tick(200, 0);
 	assert(tdma_cap_level == 3);
-	repeat(29, 200, 0);
+	repeat(9, 200, 0);
 	assert(tdma_cap_level == 3);
 	tick(200, 0);
 	assert(tdma_cap_level == 2);
 	tdma_published_cap_level = 2;
 	channel_change_pending = 1;
-	repeat(150, 180, 20);
+	repeat(150, 150, 50);
 	assert(tdma_cap_level == 2);
 	channel_change_pending = 0;
 	esb_rx_discontinuity();
-	tick(180, 20);
-	repeat(4, 180, 20);
+	tick(150, 50);
+	repeat(4, 150, 50);
 	assert(tdma_cap_level == 2);
-	tick(180, 20);
+	tick(150, 50);
 	assert(tdma_cap_level == 3);
 }
 
@@ -445,7 +474,7 @@ static void decision_short_boundary(void)
 		assert(check_packet_sequence(3, seq) == 4);
 		assert(check_packet_sequence(3, (uint8_t)(seq - 1)) == 2);
 		assert(check_packet_sequence(3, (uint8_t)(seq + 21)) == 1);
-		for (unsigned n = 0; n < 120; ++n)
+		for (unsigned n = 0; n < 60; ++n)
 			assert(check_packet_sequence(3, (uint8_t)(last_packet_sequence[3] + 1)) == 0);
 		now += 1000;
 		tdma_loss_controller_tick(now);

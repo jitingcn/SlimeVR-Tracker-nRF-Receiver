@@ -109,11 +109,12 @@ bool esb_channel_is_allowed(uint8_t channel)
  * per tracker; sticks is the widest even width keeping opp >= cap. */
 static const uint16_t tdma_cap_ladder[] = {220, 180, 150, 130, 115};
 #define TDMA_CAP_LEVEL_MAX (ARRAY_SIZE(tdma_cap_ladder) - 1U)
-#define TDMA_LOSS_TRIGGER_PERMILLE 50  /* >5% aggregate gap loss */
+#define TDMA_LOSS_TRIGGER_PERMILLE 200
 #define TDMA_LOSS_TRIGGER_TICKS 5      /* 5 qualified, nonempty stats ticks */
-#define TDMA_LOSS_RECOVER_PERMILLE 10  /* <1% aggregate gap loss */
-#define TDMA_LOSS_RECOVER_TICKS 30     /* fast recovery after 30 qualified ticks */
-#define TDMA_LOSS_PROBE_TICKS 120      /* slow recovery probe after 120 ticks below 5% */
+#define TDMA_LOSS_RECOVER_PERMILLE 50
+#define TDMA_LOSS_RECOVER_TICKS 10
+#define TDMA_LOSS_PROBE_PERMILLE 100
+#define TDMA_LOSS_PROBE_TICKS 60
 #define TDMA_LOSS_MIN_SAMPLES 100      /* pool sparse ticks until enough evidence */
 #define TDMA_LOSS_RECONFIG_MIN_MS 15000 /* min spacing between ladder steps */
 #define TDMA_SYNC_EXTRAP_MAX_TICKS (10u * 32768u) /* skip frozen-skew extrapolation beyond this PING age */
@@ -982,8 +983,6 @@ static void tdma_sync_stats_reset(void)
 /* Aggregate normal/composite sequence-gap loss, excluding raw capture.
  * Pool consecutive nonempty 1 s stats ticks until at least 100 samples exist;
  * classify the whole pool and credit its ticks, never an idle interval.
- * >5% for 5 qualified ticks steps down; <1% for 30 steps up. Below 5%
- * for 120 ticks permits one slower probe, avoiding permanent 1–5% lock-in.
  * Publication/debounce stays owned by tdma_recalculate(). */
 static void tdma_loss_controller_update(int64_t now)
 {
@@ -1086,7 +1085,7 @@ static void tdma_loss_controller_update(int64_t now)
 	uint64_t scaled_gaps = (uint64_t)pool_gaps * 1000U;
 	bool above_trigger = scaled_gaps > (uint64_t)TDMA_LOSS_TRIGGER_PERMILLE * pool_samples;
 	bool below_recover = scaled_gaps < (uint64_t)TDMA_LOSS_RECOVER_PERMILLE * pool_samples;
-	bool below_trigger = scaled_gaps < (uint64_t)TDMA_LOSS_TRIGGER_PERMILLE * pool_samples;
+	bool below_probe = scaled_gaps < (uint64_t)TDMA_LOSS_PROBE_PERMILLE * pool_samples;
 	uint32_t loss_permille = scaled_gaps / pool_samples;
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 	tdma_loss_last_permille = loss_permille;
@@ -1096,7 +1095,7 @@ static void tdma_loss_controller_update(int64_t now)
 	tdma_loss_recover_streak_ticks
 		= below_recover ? MIN(tdma_loss_recover_streak_ticks + credited_ticks, TDMA_LOSS_RECOVER_TICKS) : 0;
 	tdma_loss_probe_streak_ticks
-		= below_trigger ? MIN(tdma_loss_probe_streak_ticks + credited_ticks, TDMA_LOSS_PROBE_TICKS) : 0;
+		= below_probe ? MIN(tdma_loss_probe_streak_ticks + credited_ticks, TDMA_LOSS_PROBE_TICKS) : 0;
 
 	if (tdma_loss_trigger_streak_ticks >= TDMA_LOSS_TRIGGER_TICKS && tdma_cap_level < TDMA_CAP_LEVEL_MAX) {
 		tdma_cap_level++;
