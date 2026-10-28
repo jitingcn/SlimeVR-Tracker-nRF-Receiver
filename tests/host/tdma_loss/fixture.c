@@ -84,6 +84,8 @@ static int tdma_shadow_pending_join_mask, tdma_shadow_pending_leave_mask;
 static uint8_t tdma_config_epoch, tdma_dynamic_slot_ticks, tdma_dynamic_active_count;
 static uint32_t tdma_config_packed[MAX_TRACKERS];
 static int64_t tdma_last_reconfig_time;
+static bool tdma_initial_done, tdma_initial_started;
+static uint32_t tdma_initial_ping_mask;
 static uint8_t stored_trackers = 4;
 static void test_all_note_layout(uint32_t old, uint32_t next, int64_t at) {}
 static void test_all_update_effective(uint8_t count, int64_t at, bool reset) {}

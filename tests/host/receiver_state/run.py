@@ -45,10 +45,11 @@ g_last_ping_rx_time_diff_ticks g_last_ping_rx_time_diff_valid g_ping_isr_rx_tick
 g_ping_isr_rx_ticks_valid g_last_isr_rx_ticks g_last_isr_rx_valid g_bias_ppb_valid
 g_bias_ppb g_bias_ref_offset g_bias_ref_ticks g_last_ping_isr_rx_ticks_raw
 g_ping_dirty_streak g_ping_reject_count g_extrap_skip_count
-tdma_shadow_last_seen_ms tdma_shadow_join_since_ms'''.split()
+tdma_shadow_last_seen_ms tdma_shadow_join_since_ms tdma_initial_ping_at_ms'''.split()
 slot_masks = '''test_all_confirmed_mask channel_target_mask tdma_shadow_ever_ping_mask
 tdma_shadow_ever_data_mask tdma_shadow_live_evidence_mask tdma_shadow_desired_mask
-tdma_shadow_pending_join_mask tdma_shadow_pending_leave_mask'''.split()
+tdma_shadow_pending_join_mask tdma_shadow_pending_leave_mask
+tdma_initial_allowed_mask tdma_initial_ping_mask'''.split()
 scalars = '''tdma_shadow_desired_changed_at_ms tracker_store_ready esb_clearing
 esb_pairing tdma_last_reconfig_time test_all_state_valid test_all_enabled
 test_all_requested_tps test_all_effective_tps test_all_generation'''.split()

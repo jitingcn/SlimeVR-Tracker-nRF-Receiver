@@ -259,6 +259,17 @@ static atomic_t tdma_shadow_pending_join_mask = ATOMIC_INIT(0);
 static atomic_t tdma_shadow_pending_leave_mask = ATOMIC_INIT(0);
 static atomic_t tdma_shadow_desired_changed_at_ms = ATOMIC_INIT(0);
 
+/* Only the first layout after restoring an existing roster gets a short
+ * coalescing window. All state below is protected by irq_lock. */
+#define TDMA_INITIAL_COHORT_MS 100U
+static K_SEM_DEFINE(tdma_initial_wake, 0, 1);
+static uint32_t tdma_initial_allowed_mask;
+static uint32_t tdma_initial_ping_mask;
+static uint32_t tdma_initial_ping_at_ms[MAX_TRACKERS];
+static uint32_t tdma_initial_deadline_ms;
+static bool tdma_initial_started;
+static bool tdma_initial_done;
+
 static void tdma_shadow_observe(uint8_t tracker_id, enum tdma_shadow_evidence evidence)
 {
 	if (tracker_id >= stored_trackers || tracker_id >= MAX_TRACKERS) {
@@ -353,6 +364,93 @@ static void tdma_shadow_update(uint32_t now_ms)
 	if (evicted_mask) {
 		LOG_WRN("SHADOW evict mask=0x%04x now=%u (grace=%u)",
 			(unsigned int)evicted_mask, now_ms, TDMA_SHADOW_LEAVE_GRACE_MS);
+	}
+}
+
+/* Called only after the PING's ID and CRC checks. A repeated PING updates
+ * freshness but cannot extend the first probe's collection deadline. */
+static void tdma_initial_observe(uint8_t tracker_id)
+{
+	if (tracker_id >= stored_trackers || tracker_id >= MAX_TRACKERS) {
+		return;
+	}
+	bool wake = false;
+	uint32_t now_ms = k_uptime_get_32();
+	unsigned int key = irq_lock();
+	uint32_t bit = BIT(tracker_id);
+	if (!tdma_initial_done && (tdma_initial_allowed_mask & bit)) {
+		if (!tdma_initial_started) {
+			tdma_initial_started = true;
+			/* Include PINGs stamped exactly 100 ms after the first one. */
+			tdma_initial_deadline_ms = now_ms + TDMA_INITIAL_COHORT_MS + 1U;
+			wake = true;
+		}
+		if ((int32_t)(tdma_initial_deadline_ms - now_ms) > 0) {
+			tdma_initial_ping_mask |= bit;
+			tdma_initial_ping_at_ms[tracker_id] = now_ms;
+		}
+	}
+	irq_unlock(key);
+	if (wake) {
+		k_sem_give(&tdma_initial_wake);
+	}
+}
+
+static uint32_t tdma_initial_wait_ms(uint32_t maximum_ms)
+{
+	unsigned int key = irq_lock();
+	if (tdma_initial_started && !tdma_initial_done) {
+		int32_t remaining = (int32_t)(tdma_initial_deadline_ms - k_uptime_get_32());
+		maximum_ms = remaining > 0 ? MIN(maximum_ms, (uint32_t)remaining) : 0;
+	}
+	irq_unlock(key);
+	return maximum_ms;
+}
+
+static bool tdma_initial_due(uint32_t now_ms)
+{
+	unsigned int key = irq_lock();
+	bool due = tdma_initial_started && !tdma_initial_done
+		&& (int32_t)(now_ms - tdma_initial_deadline_ms) >= 0;
+	irq_unlock(key);
+	return due;
+}
+
+/* The stats owner holds tracker_store_lock. Seed only the initially saved IDs
+ * with fresh, CRC-valid PING evidence, then use the ordinary compact layout
+ * publisher. A failed/stale cohort is re-armed by a later valid PING. */
+static void tdma_initial_process(uint32_t now_ms)
+{
+	unsigned int key = irq_lock();
+	if (!tdma_initial_started || tdma_initial_done
+	    || (int32_t)(now_ms - tdma_initial_deadline_ms) < 0) {
+		irq_unlock(key);
+		return;
+	}
+	uint32_t candidates = tdma_initial_ping_mask & tdma_initial_allowed_mask;
+	uint32_t selected = 0;
+	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
+		uint32_t bit = BIT(i);
+		int32_t age_ms = (int32_t)(now_ms - tdma_initial_ping_at_ms[i]);
+		if ((candidates & bit) && age_ms < TDMA_SHADOW_FRESH_MS) {
+			selected |= bit;
+			atomic_set(&tdma_shadow_join_since_ms[i], 0);
+		}
+	}
+	tdma_initial_started = false;
+	tdma_initial_ping_mask = 0;
+	if (selected) {
+		uint32_t previous = (uint32_t)atomic_get(&tdma_shadow_desired_mask);
+		atomic_or(&tdma_shadow_desired_mask, (atomic_val_t)selected);
+		atomic_and(&tdma_shadow_pending_join_mask, (atomic_val_t)~selected);
+		if ((previous | selected) != previous) {
+			atomic_set(&tdma_shadow_desired_changed_at_ms, (atomic_val_t)now_ms);
+		}
+		tdma_initial_done = true;
+	}
+	irq_unlock(key);
+	if (selected) {
+		tdma_recalculate();
 	}
 }
 
@@ -538,6 +636,7 @@ static uint8_t tdma_slot_ticks_for(uint8_t active_count)
 	return (uint8_t)MAX(sticks, TDMA_BASE_SLOT_TICKS);
 }
 
+
 /**
  * Recalculate dynamic TDMA parameters based on active trackers.
  * Called periodically from esb_stats_thread (non-ISR context).
@@ -578,6 +677,7 @@ static void tdma_recalculate(void)
 	}
 	uint8_t slot_ticks = tdma_slot_ticks_for(active_count);
 	bool test_all_layout = atomic_get(&test_all_enabled) != 0;
+
 
 	/* No layout update is needed when a ladder level maps to the same physical
 	 * width (for example many-tracker layouts already pinned at 16 ticks).
@@ -621,6 +721,10 @@ static void tdma_recalculate(void)
 	 * Reset diagnostics outside the short atomic layout publication. */
 	tdma_sync_stats_reset();
 	unsigned int key = irq_lock();
+	/* Any ordinary first publication also closes the cold-only fast path. */
+	tdma_initial_done = true;
+	tdma_initial_started = false;
+	tdma_initial_ping_mask = 0;
 	tdma_config_epoch++;
 	uint8_t epoch = tdma_config_epoch;
 
@@ -1563,9 +1667,15 @@ static void esb_stats_thread(void)
 	last_tps_print_time = k_uptime_get();
 
 	while (1) {
-		k_msleep(TPS_MONITOR_INTERVAL_MS);
+		uint32_t wait_ms = tdma_initial_wait_ms(TPS_MONITOR_INTERVAL_MS);
+		(void)k_sem_take(&tdma_initial_wake, K_MSEC(wait_ms));
 
 		uint64_t now = (uint64_t)k_uptime_get();
+		if (tdma_initial_due((uint32_t)now)) {
+			k_mutex_lock(&tracker_store_lock, K_FOREVER);
+			tdma_initial_process(k_uptime_get_32());
+			k_mutex_unlock(&tracker_store_lock);
+		}
 
 		// Update TPS for each tracker
 		for (int i = 0; i < MAX_TRACKERS; i++) {
@@ -2392,6 +2502,9 @@ void event_handler(struct esb_evt const *event)
 						break;
 					}
 					tdma_shadow_observe(tracker_id, TDMA_SHADOW_EVIDENCE_PING);
+					if (rx_payload.pipe == 1 + (tracker_id % 7)) {
+						tdma_initial_observe(tracker_id);
+					}
 
 					uint32_t tracker_estimated_server_ticks
 						= ((uint32_t)rx_payload.data[3] << 24) | ((uint32_t)rx_payload.data[4] << 16)
@@ -3166,6 +3279,10 @@ static void tracker_slot_reset(uint8_t id)
 	g_ping_reject_count[id] = 0;
 	g_extrap_skip_count[id] = 0;
 	channel_target_mask &= ~BIT(id);
+	/* A removed/reused ID is not a member of the saved-at-boot cohort. */
+	tdma_initial_allowed_mask &= ~BIT(id);
+	tdma_initial_ping_mask &= ~BIT(id);
+	tdma_initial_ping_at_ms[id] = 0;
 	tdma_shadow_forget_tracker(id);
 	esb_auto_loss_invalidate();
 	hid_reset_rssi_smooth(id);
@@ -4466,6 +4583,10 @@ static int tracker_store_restore(void)
 		unsigned int key = irq_lock();
 		memcpy(stored_tracker_addr, addresses, sizeof(stored_tracker_addr));
 		stored_trackers = count;
+		tdma_initial_allowed_mask = count > 0 ? BIT(count) - 1U : 0;
+		tdma_initial_ping_mask = 0;
+		tdma_initial_started = false;
+		tdma_initial_done = count == 0;
 		tracker_store_ready = true;
 		irq_unlock(key);
 	}
@@ -4498,19 +4619,6 @@ static void esb_thread(void)
 
 	LOG_INF("%d/%d devices stored", tracker_count, MAX_TRACKERS);
 
-	/* Start with no active layout. Stored pairings are not evidence that trackers
-	 * are online; advertising a stored-count layout after receiver reboot makes
-	 * running trackers adopt a 14-slot clock domain before the first active scan.
-	 * Valid PINGs populate last_ping_time[], then tdma_recalculate() publishes the
-	 * first real layout on the next stats tick. Until then PONG config bytes are 0
-	 * and reboot-aware trackers send unslotted recovery PINGs. */
-	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
-		tdma_config_packed[i] = 0;
-	}
-	tdma_dynamic_active_count = 0;
-	tdma_dynamic_slot_ticks = 0;
-	tdma_active_mask = 0;
-	LOG_INF("TDMA initial: awaiting online tracker evidence");
 
 	// Cache receiver device address for ISR pairing responses
 	uint64_t *dev_addr = (uint64_t *)NRF_FICR->DEVICEADDR;
