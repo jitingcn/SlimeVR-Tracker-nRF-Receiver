@@ -14,8 +14,14 @@
 LOG_MODULE_REGISTER(led, LOG_LEVEL_INF);
 
 static void led_thread(void);
+/* The strip worker also executes synchronous SPI/driver and error-log paths. */
+#if CONFIG_LED_STRIP
+#define LED_THREAD_STACK_SIZE 1024
+#else
+#define LED_THREAD_STACK_SIZE 512
+#endif
 /* below ESB_THREAD_PRIORITY so LED cannot preempt radio */
-K_THREAD_DEFINE(led_thread_id, 512, led_thread, NULL, NULL, NULL, LED_THREAD_PRIORITY, 0, 0);
+K_THREAD_DEFINE(led_thread_id, LED_THREAD_STACK_SIZE, led_thread, NULL, NULL, NULL, LED_THREAD_PRIORITY, 0, 0);
 
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 
@@ -90,12 +96,20 @@ static const struct pwm_dt_spec pwm_led1 = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led1));
 static const struct pwm_dt_spec pwm_led2 = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led2));
 #endif
 
-static enum sys_led_pattern current_led_pattern;
-static int current_priority;
-
 #if LED_EXISTS || LED_STRIP_EXISTS
+static enum sys_led_pattern current_led_pattern = SYS_LED_PATTERN_OFF;
+static int current_priority = SYS_LED_PATTERN_DEPTH;
 static enum sys_led_pattern led_patterns[SYS_LED_PATTERN_DEPTH] = {[0 ... (SYS_LED_PATTERN_DEPTH - 1)] = SYS_LED_PATTERN_OFF};
+static struct k_spinlock led_state_lock;
+static K_SEM_DEFINE(led_changed, 0, 1);
+static uint32_t led_generation = 1;
+static uint32_t led_off_generation;
+/* After boot-time pin initialization, only the LED thread accesses hardware. */
 static int led_pattern_state;
+
+/* A reboot requests OFF_FORCE immediately before resetting.  Do not wait
+ * indefinitely if the LED device or its worker cannot make progress. */
+#define LED_OFF_WAIT_MS 100
 
 static int led_pin_init(void)
 {
@@ -133,37 +147,31 @@ static int led_pin_init(void)
 
 SYS_INIT(led_pin_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
-static void led_pin_reset(void)
+static bool led_pin_reset(void)
 {
+	bool ok = true;
 	LOG_DBG("led_pin_reset");
 	#if LED_EXISTS
-	gpio_pin_configure_dt(&led, GPIO_DISCONNECTED);
+	ok &= gpio_pin_configure_dt(&led, GPIO_DISCONNECTED) == 0;
 	#endif
 #if LED0_EXISTS
-	gpio_pin_configure_dt(&led0, GPIO_DISCONNECTED);
+	ok &= gpio_pin_configure_dt(&led0, GPIO_DISCONNECTED) == 0;
 #endif
 #if LED1_EXISTS
-	gpio_pin_configure_dt(&led1, GPIO_DISCONNECTED);
+	ok &= gpio_pin_configure_dt(&led1, GPIO_DISCONNECTED) == 0;
 #endif
 #if LED2_EXISTS
-	gpio_pin_configure_dt(&led2, GPIO_DISCONNECTED);
+	ok &= gpio_pin_configure_dt(&led2, GPIO_DISCONNECTED) == 0;
 #endif
 #if LED3_EXISTS
-	gpio_pin_configure_dt(&led3, GPIO_DISCONNECTED);
+	ok &= gpio_pin_configure_dt(&led3, GPIO_DISCONNECTED) == 0;
 #endif
+	if (!ok) {
+		LOG_ERR("Failed to disconnect LED pins");
+	}
+	return ok;
 }
 
-static void led_suspend(void)
-{
-	LOG_DBG("led_suspend");
-	led_pin_reset();
-}
-
-static void led_resume(void)
-{
-	LOG_DBG("led_resume");
-	led_pin_init();
-}
 
 #if LED_STRIP_EXISTS
 #define LED_RGB_COLOR
@@ -263,54 +271,79 @@ static void led_pin_set(enum sys_led_color color, int brightness_pptt, int value
 	gpio_pin_set_dt(&led, value_pptt > 5000);
 #endif
 }
+
+/* Caller holds led_state_lock. OFF yields to lower priorities, while
+ * OFF_FORCE is an active selection which masks them. */
+static bool led_select_locked(enum sys_led_pattern pattern, int priority)
+{
+	led_patterns[priority] = pattern;
+	for (priority = 0; priority < SYS_LED_PATTERN_DEPTH; priority++) {
+		if (led_patterns[priority] != SYS_LED_PATTERN_OFF) {
+			break;
+		}
+	}
+	pattern = priority < SYS_LED_PATTERN_DEPTH ? led_patterns[priority] : SYS_LED_PATTERN_OFF;
+	if (pattern == current_led_pattern && priority == current_priority) {
+		return false;
+	}
+	current_led_pattern = pattern;
+	current_priority = priority;
+	led_generation++;
+	return true;
+}
+
+/* A completed one-shot may only clear the selection it actually rendered. */
+static void led_finish_oneshot(uint32_t generation, int priority, enum sys_led_pattern finish)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_state_lock);
+	bool changed = generation == led_generation && priority == current_priority
+		&& led_select_locked(finish, priority);
+	k_spin_unlock(&led_state_lock, key);
+	if (changed) {
+		k_sem_give(&led_changed);
+	}
+}
 #endif
 
 void set_led(enum sys_led_pattern led_pattern, int priority)
 {
-	LOG_DBG("set_led: current_led_pattern %d, current_priority %d", current_led_pattern, current_priority);
 	LOG_DBG("set_led: pattern %d, priority %d", led_pattern, priority);
 #if LED_EXISTS || LED_STRIP_EXISTS
-	if (led_pattern <= SYS_LED_PATTERN_OFF && k_current_get() == led_thread_id)
-		led_patterns[current_priority] = led_pattern;
-	else
-		led_patterns[priority] = led_pattern;
-	for (priority = 0; priority < SYS_LED_PATTERN_DEPTH; priority++)
-	{
-		if (led_patterns[priority] == SYS_LED_PATTERN_OFF)
-			continue;
-		led_pattern = led_patterns[priority];
-		break;
+	k_spinlock_key_t key = k_spin_lock(&led_state_lock);
+	bool changed = led_select_locked(led_pattern, priority);
+	uint32_t generation = led_generation;
+	bool wait_for_off = led_pattern == SYS_LED_PATTERN_OFF_FORCE
+		&& current_led_pattern == SYS_LED_PATTERN_OFF_FORCE && current_priority == priority;
+	k_spin_unlock(&led_state_lock, key);
+
+	if (changed) {
+		k_sem_give(&led_changed);
 	}
-	if (led_pattern == current_led_pattern && led_pattern > SYS_LED_PATTERN_OFF)
-		return;
-	current_led_pattern = led_pattern;
-	current_priority = priority;
-	led_pattern_state = 0;
-	if (current_led_pattern <= SYS_LED_PATTERN_OFF)
-	{
-#if LED_STRIP_EXISTS
-		led_pin_set(SYS_LED_COLOR_DEFAULT, 0, 0);
-#endif
-		led_suspend();
-		k_thread_suspend(led_thread_id);
-		LOG_DBG("set_led: suspended led_thread_id");
+
+	/* Most requests are asynchronous and are safe even from an ISR. A
+	 * thread requesting forced-off waits only for the worker's black frame:
+	 * sys_request_system_reboot() resets immediately after this call. Never
+	 * wait from an ISR or from the hardware-owning thread itself. */
+	if (wait_for_off && !k_is_in_isr() && k_current_get() != led_thread_id) {
+		int64_t deadline = k_uptime_get() + LED_OFF_WAIT_MS;
+		while (true) {
+			key = k_spin_lock(&led_state_lock);
+			bool applied = led_off_generation == generation;
+			bool superseded = led_generation != generation;
+			k_spin_unlock(&led_state_lock, key);
+			if (applied) {
+				break;
+			}
+			if (superseded || k_uptime_get() >= deadline) {
+				LOG_ERR("LED forced-off was not applied before reboot");
+				break;
+			}
+			k_msleep(1);
+		}
 	}
-	else if (k_current_get() != led_thread_id) // do not suspend if called from thread
-	{
-		k_thread_suspend(led_thread_id);
-		LOG_DBG("set_led: suspended led_thread_id");
-		led_resume();
-		k_thread_resume(led_thread_id);
-		k_wakeup(led_thread_id);
-		LOG_DBG("set_led: resumed led_thread_id");
-	}
-	else
-	{
-		led_resume();
-		k_thread_resume(led_thread_id);
-		k_wakeup(led_thread_id);
-		LOG_DBG("set_led: resumed led_thread_id");
-	}
+#else
+	ARG_UNUSED(led_pattern);
+	ARG_UNUSED(priority);
 #endif
 }
 
@@ -320,38 +353,64 @@ static void led_thread(void)
 	LOG_WRN("LED GPIO does not exist");
 	return;
 #else
+	uint32_t active_generation = 0;
 	while (1)
 	{
-		LOG_DBG("led_thread: current_led_pattern %d", current_led_pattern);
-		switch (current_led_pattern)
+		k_spinlock_key_t key = k_spin_lock(&led_state_lock);
+		enum sys_led_pattern pattern = current_led_pattern;
+		int priority = current_priority;
+		uint32_t generation = led_generation;
+		k_spin_unlock(&led_state_lock, key);
+
+		if (active_generation != generation) {
+			active_generation = generation;
+			led_pattern_state = 0;
+			if (pattern <= SYS_LED_PATTERN_OFF) {
+				bool off_applied = true;
+#if LED_STRIP_EXISTS
+				off_applied = led_strip_set_rgb(0, 0, 0) == 0;
+#endif
+				off_applied &= led_pin_reset();
+				/* Do not acknowledge a failed or obsolete black frame. */
+				key = k_spin_lock(&led_state_lock);
+				if (off_applied && generation == led_generation) {
+					led_off_generation = generation;
+				}
+				k_spin_unlock(&led_state_lock, key);
+			} else {
+				led_pin_init();
+			}
+		}
+
+		int wait_ms = -1;
+		switch (pattern)
 		{
 		case SYS_LED_PATTERN_ON:
 			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 10000);
-			k_thread_suspend(led_thread_id);
 			break;
 		case SYS_LED_PATTERN_SHORT:
 			led_pattern_state = (led_pattern_state + 1) % 2;
 			led_pin_set(SYS_LED_COLOR_PAIRING, 10000, led_pattern_state * 10000);
-			k_msleep(led_pattern_state == 1 ? 100 : 900);
+			wait_ms = led_pattern_state == 1 ? 100 : 900;
 			break;
 		case SYS_LED_PATTERN_LONG:
 			led_pattern_state = (led_pattern_state + 1) % 2;
 			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, led_pattern_state * 10000);
-			k_msleep(500);
+			wait_ms = 500;
 			break;
 		case SYS_LED_PATTERN_FLASH:
 			led_pattern_state = (led_pattern_state + 1) % 2;
 			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, led_pattern_state * 10000);
-			k_msleep(200);
+			wait_ms = 200;
 			break;
 
 		case SYS_LED_PATTERN_ONESHOT_POWERON:
 			led_pattern_state++;
 			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, !(led_pattern_state % 2) * 10000);
 			if (led_pattern_state == 7)
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+				led_finish_oneshot(generation, priority, SYS_LED_PATTERN_OFF);
 			else
-				k_msleep(200);
+				wait_ms = 200;
 			break;
 		case SYS_LED_PATTERN_ONESHOT_POWEROFF:
 			if (led_pattern_state++ > 0)
@@ -359,42 +418,39 @@ static void led_thread(void)
 			else
 				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 0);
 			if (led_pattern_state == 202)
-				set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
+				led_finish_oneshot(generation, priority, SYS_LED_PATTERN_OFF_FORCE);
 			else if (led_pattern_state == 1)
-				k_msleep(250);
+				wait_ms = 250;
 			else
-				k_msleep(5);
+				wait_ms = 5;
 			break;
 		case SYS_LED_PATTERN_ONESHOT_PROGRESS:
 			led_pattern_state++;
 			led_pin_set(SYS_LED_COLOR_SUCCESS, 10000, !(led_pattern_state % 2) * 10000);
 			if (led_pattern_state == 5)
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+				led_finish_oneshot(generation, priority, SYS_LED_PATTERN_OFF);
 			else
-				k_msleep(200);
+				wait_ms = 200;
 			break;
 		case SYS_LED_PATTERN_ONESHOT_COMPLETE:
 			led_pattern_state++;
 			led_pin_set(SYS_LED_COLOR_SUCCESS, 10000, !(led_pattern_state % 2) * 10000);
 			if (led_pattern_state == 9)
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+				led_finish_oneshot(generation, priority, SYS_LED_PATTERN_OFF);
 			else
-				k_msleep(200);
+				wait_ms = 200;
 			break;
 
 		case SYS_LED_PATTERN_ON_PERSIST:
 			led_pin_set(SYS_LED_COLOR_SUCCESS, 2000, 10000);
-			k_thread_suspend(led_thread_id);
 			break;
 		case SYS_LED_PATTERN_LONG_PERSIST:
 			led_pattern_state = (led_pattern_state + 1) % 2;
 			led_pin_set(SYS_LED_COLOR_CHARGING, 2000, led_pattern_state * 10000);
-			k_msleep(500);
+			wait_ms = 500;
 			break;
 		case SYS_LED_PATTERN_PULSE_PERSIST:
 			led_pattern_state = (led_pattern_state + 1) % 1000;
-//			float led_value = sinf(led_pattern_state * (M_PI / 1000));
-//			led_pin_set(SYS_LED_COLOR_CHARGING, 10000, led_value * 10000);
 			int led_value = led_pattern_state > 500 ? 1000 - led_pattern_state : led_pattern_state;
 			if (led_value < 200)
 				led_value = (led_value) * 30;
@@ -405,38 +461,47 @@ static void led_thread(void)
 			else
 				led_value = (led_value - 400) * 5 + 9500;
 			led_pin_set(SYS_LED_COLOR_CHARGING, 10000, led_value);
-			k_msleep(5);
+			wait_ms = 5;
 			break;
-		case SYS_LED_PATTERN_ACTIVE_PERSIST: // off duration first because the device may turn on multiple times rapidly and waste battery power
+		case SYS_LED_PATTERN_ACTIVE_PERSIST:
 			led_pattern_state = (led_pattern_state + 1) % 2;
 			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, !led_pattern_state * 10000);
-			k_msleep(led_pattern_state ? 9700 : 300);
+			wait_ms = led_pattern_state ? 9700 : 300;
 			break;
 
-		case SYS_LED_PATTERN_ERROR_A: // TODO: should this use 20% duty cycle?
+		case SYS_LED_PATTERN_ERROR_A:
 			led_pattern_state = (led_pattern_state + 1) % 10;
 			led_pin_set(SYS_LED_COLOR_ERROR, 10000, (led_pattern_state < 4 && led_pattern_state % 2) * 10000);
-			k_msleep(500);
+			wait_ms = 500;
 			break;
 		case SYS_LED_PATTERN_ERROR_B:
 			led_pattern_state = (led_pattern_state + 1) % 10;
 			led_pin_set(SYS_LED_COLOR_ERROR, 10000, (led_pattern_state < 6 && led_pattern_state % 2) * 10000);
-			k_msleep(500);
+			wait_ms = 500;
 			break;
 		case SYS_LED_PATTERN_ERROR_C:
 			led_pattern_state = (led_pattern_state + 1) % 10;
 			led_pin_set(SYS_LED_COLOR_ERROR, 10000, (led_pattern_state < 8 && led_pattern_state % 2) * 10000);
-			k_msleep(500);
+			wait_ms = 500;
 			break;
 		case SYS_LED_PATTERN_ERROR_D:
 			led_pattern_state = (led_pattern_state + 1) % 2;
 			led_pin_set(SYS_LED_COLOR_ERROR, 10000, led_pattern_state * 10000);
-			k_msleep(500);
+			wait_ms = 500;
 			break;
 
 		default:
-			LOG_DBG("led_thread: suspending led_thread_id");
-			k_thread_suspend(led_thread_id);
+			break;
+		}
+
+		/* Discard a notification already reflected in the snapshot, then
+		 * recheck under the lock so a concurrent change cannot be lost. */
+		(void)k_sem_take(&led_changed, K_NO_WAIT);
+		key = k_spin_lock(&led_state_lock);
+		bool unchanged = generation == led_generation;
+		k_spin_unlock(&led_state_lock, key);
+		if (unchanged) {
+			(void)k_sem_take(&led_changed, wait_ms < 0 ? K_FOREVER : K_MSEC(wait_ms));
 		}
 	}
 #endif
