@@ -12,7 +12,7 @@ import tempfile
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--source-root', type=Path, default=Path(__file__).resolve().parents[3])
-parser.add_argument('--case', action='append', choices=['begin_timeout', 'abort_timeout', 'verify_timeout', 'complete', 'activation_error', 'abort', 'data_payload', 'crc_settings_first', 'crc_settings_later', 'crc_settings_ok'])
+parser.add_argument('--case', action='append', choices=['begin_timeout', 'abort_timeout', 'verify_timeout', 'complete', 'activation_error', 'abort', 'data_payload', 'crc_settings_first', 'crc_settings_later', 'crc_settings_ok', 'verify_enqueue_error', 'activate_enqueue_error', 'admission_complete', 'admission_error', 'activation_eligibility'])
 args = parser.parse_args()
 source = (args.source_root / 'src/receiver_ota.c').read_text()
 # Keep production declarations and every lifecycle function, replacing only the
@@ -22,11 +22,15 @@ source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.M)
 start = source.index('static void rcv_ota_send_fw_info(void)\n{')
 end = source.index('/* ── STATUS', start)
 source = source[:start] + 'static void rcv_ota_send_fw_info(void) {}\n\n' + source[end:]
+source = source.replace(
+    'static void rcv_ota_send_status(void)\n{',
+    'static void rcv_ota_send_status(void)\n{\n\tif (status_entry_hook) status_entry_hook();',
+)
 fixtures = Path(__file__).with_name('fixture.c').read_text()
 prelude, tests = fixtures.split('/* PRODUCTION_SOURCE */')
 tests = tests.replace('int main(', Path(__file__).with_name('data_payload_cases.c').read_text() + '\nint main(', 1)
 tests = tests.replace('/* CRC_SETTINGS_CASES */', Path(__file__).with_name('crc_settings_cases.c').read_text())
-cases = args.case or ['begin_timeout', 'abort_timeout', 'verify_timeout', 'complete', 'activation_error', 'abort', 'data_payload', 'crc_settings_first', 'crc_settings_later', 'crc_settings_ok']
+cases = args.case or ['begin_timeout', 'abort_timeout', 'verify_timeout', 'complete', 'activation_error', 'abort', 'data_payload', 'crc_settings_first', 'crc_settings_later', 'crc_settings_ok', 'verify_enqueue_error', 'activate_enqueue_error', 'admission_complete', 'admission_error', 'activation_eligibility']
 protocol = (Path(__file__).resolve().parents[3] / 'src/esb_ota.h').read_text()
 constants = '\n'.join(re.findall(r'^#define (?:OTA_|HID_OTA_)[^\n]+', protocol, re.M))
 with tempfile.TemporaryDirectory(prefix='receiver-ota-writer-') as directory:
@@ -43,6 +47,6 @@ with tempfile.TemporaryDirectory(prefix='receiver-ota-writer-') as directory:
         for case in cases:
             if case.startswith('crc_settings_') != bool(uf2):
                 continue
-            if not mcuboot and case in ('complete', 'activation_error'):
+            if not mcuboot and case in ('complete', 'activation_error', 'admission_complete', 'admission_error'):
                 continue
             subprocess.run([str(executable), case], check=True, timeout=20)

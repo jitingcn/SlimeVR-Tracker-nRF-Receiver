@@ -32,7 +32,15 @@ bool receiver_ota_is_active(void);
  * Process a HID OUT report for receiver self-OTA.
  * Called from HID read work handler (thread context) when tracker_id == 0xFE.
  *
- * @param data   HID report data (64 bytes)
+ * DATA carries fixed 60-byte image chunks after its 4-byte header. The final
+ * chunk may contain exactly the remaining image bytes or use a padded 64-byte
+ * report; padding is ignored. Short non-final chunks are not admitted.
+ *
+ * VERIFY and ACTIVATE duplicates report current status without enqueueing again.
+ * ACTIVATE requires completed verification. Command enqueue failure reports
+ * OTA_STATUS_ERROR; ACTIVATING is published only when the writer enters activation.
+ *
+ * @param data   HID report data (up to 64 bytes)
  * @param len    Report length
  */
 void receiver_ota_process_hid(const uint8_t *data, size_t len);

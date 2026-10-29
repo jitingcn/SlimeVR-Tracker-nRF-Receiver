@@ -140,6 +140,7 @@ enum rcv_ota_state {
 	RCV_OTA_READY,
 	RCV_OTA_RECEIVING,
 	RCV_OTA_VERIFYING,
+	RCV_OTA_ACTIVATE_PENDING,
 	RCV_OTA_ACTIVATING,
 	RCV_OTA_COMPLETE,
 	RCV_OTA_ERROR,
@@ -338,6 +339,7 @@ static void rcv_ota_send_status(void)
 	case RCV_OTA_RECEIVING:  status_code = OTA_STATUS_RECEIVING; break;
 	case RCV_OTA_VERIFYING:  status_code = rcv_ota.error_code ?
 		rcv_ota.error_code : OTA_STATUS_RECEIVING; break;
+	case RCV_OTA_ACTIVATE_PENDING: status_code = OTA_STATUS_RECEIVING; break;
 	case RCV_OTA_ACTIVATING: status_code = OTA_STATUS_ACTIVATING; break;
 	case RCV_OTA_COMPLETE:   status_code = OTA_STATUS_COMPLETE; break;
 	case RCV_OTA_ERROR:      status_code = rcv_ota.error_code; break;
@@ -716,7 +718,11 @@ static void rcv_ota_handle_verify(void)
 
 	/* Submit verify command to writer thread (processed after all pages) */
 	uint8_t cmd = WRITER_CMD_VERIFY;
-	k_msgq_put(&page_write_msgq, &cmd, K_MSEC(5000));
+	if (k_msgq_put(&page_write_msgq, &cmd, K_MSEC(5000)) != 0) {
+		rcv_ota.state = RCV_OTA_ERROR;
+		rcv_ota.error_code = OTA_STATUS_ERROR;
+		rcv_ota_send_status();
+	}
 	/* Writer thread will send STATUS when done */
 }
 
@@ -724,19 +730,23 @@ static void rcv_ota_handle_verify(void)
 
 static void rcv_ota_handle_activate(void)
 {
-	if (rcv_ota.error_code != OTA_STATUS_VERIFY_OK) {
+	if (rcv_ota.state != RCV_OTA_VERIFYING ||
+	    rcv_ota.error_code != OTA_STATUS_VERIFY_OK) {
 		LOG_ERR("RCV OTA: cannot activate without verify OK");
 		rcv_ota_send_status();
 		return;
 	}
 
 	LOG_WRN("RCV OTA: activate requested");
-	rcv_ota.state = RCV_OTA_ACTIVATING;
-	rcv_ota_send_status();
+	rcv_ota.state = RCV_OTA_ACTIVATE_PENDING;
 
 	/* Submit activate command to writer thread */
 	uint8_t cmd = WRITER_CMD_ACTIVATE;
-	k_msgq_put(&page_write_msgq, &cmd, K_MSEC(5000));
+	if (k_msgq_put(&page_write_msgq, &cmd, K_MSEC(5000)) != 0) {
+		rcv_ota.state = RCV_OTA_ERROR;
+		rcv_ota.error_code = OTA_STATUS_ERROR;
+		rcv_ota_send_status();
+	}
 	/* Writer thread will do CRC16 + flash copy + reset */
 }
 
@@ -919,6 +929,8 @@ static void rcv_ota_do_verify(void)
 static void rcv_ota_do_activate(void)
 {
 	LOG_WRN("RCV OTA: activating new firmware...");
+	rcv_ota.state = RCV_OTA_ACTIVATING;
+	rcv_ota_send_status();
 
 #if RCV_OTA_USE_MCUBOOT
 	int err = boot_request_upgrade(BOOT_UPGRADE_TEST);

@@ -13,6 +13,7 @@ static bool crc_settings_case(const char *name) {
     fail_read_call=failure;
     memset(&prepared_bl_settings,0xa5,sizeof(prepared_bl_settings));
     struct bootloader_settings unpublished=prepared_bl_settings;
+    rcv_ota.state=RCV_OTA_VERIFYING;
     rcv_ota.error_code=OTA_STATUS_VERIFY_OK;
     command(HID_OTA_ACTIVATE);
     pthread_mutex_lock(&gate_lock);

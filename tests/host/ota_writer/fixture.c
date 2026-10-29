@@ -64,7 +64,12 @@ static uint32_t crc32_ieee_update(uint32_t c,const uint8_t *p,size_t n) {
     c=~c; while(n--) { c^=*p++; for(int i=0;i<8;i++) c=(c>>1)^((0-(c&1))&0xEDB88320); } return ~c;
 }
 static uint8_t last_status[16];
-static void hid_write_packet_n(const uint8_t *p,int n) { memcpy(last_status,p,16); }
+static void (*status_observer)(const uint8_t *);
+static void (*status_entry_hook)(void);
+static void hid_write_packet_n(const uint8_t *p,int n) {
+    memcpy(last_status,p,16);
+    if(status_observer) status_observer(p);
+}
 struct k_sem { pthread_mutex_t lock; int count; };
 static unsigned slot_resets;
 static void k_sem_reset(struct k_sem *s) { pthread_mutex_lock(&s->lock); s->count=0; slot_resets++; pthread_mutex_unlock(&s->lock); }
@@ -74,10 +79,18 @@ static int k_sem_take(struct k_sem *s,int timeout) {
 }
 struct k_msgq { pthread_mutex_t lock; pthread_cond_t wake; uint8_t data[4]; unsigned count,first; };
 static unsigned purges;
+static int fail_command=-1;
+static unsigned command_puts[256];
+static void (*before_put)(uint8_t), (*after_put)(uint8_t);
 static void k_msgq_purge(struct k_msgq *q) { pthread_mutex_lock(&q->lock); q->count=q->first=0; purges++; pthread_mutex_unlock(&q->lock); }
 static int k_msgq_put(struct k_msgq *q,const uint8_t *p,int timeout) {
+    if(before_put) before_put(*p);
+    command_puts[*p]++;
+    if(*p==fail_command) return -ENOMSG;
     pthread_mutex_lock(&q->lock); if(q->count==4) { pthread_mutex_unlock(&q->lock); return -ENOMSG; }
-    q->data[(q->first+q->count++)%4]=*p; pthread_cond_signal(&q->wake); pthread_mutex_unlock(&q->lock); return 0;
+    q->data[(q->first+q->count++)%4]=*p; pthread_cond_signal(&q->wake); pthread_mutex_unlock(&q->lock);
+    if(after_put) after_put(*p);
+    return 0;
 }
 static int k_msgq_get(struct k_msgq *q,uint8_t *p,int timeout) {
     pthread_mutex_lock(&q->lock); while(!q->count) pthread_cond_wait(&q->wake,&q->lock);
@@ -210,11 +223,98 @@ static void verify_timeout(void) {
     begin(512); assert(rcv_ota.state==RCV_OTA_READY && rcv_ota.image_size==512); command(HID_OTA_ABORT);
 }
 static void activation(bool error) {
-    begin(256); rcv_ota.error_code=OTA_STATUS_VERIFY_OK; upgrade_error=error?-EIO:0;
+    begin(256); rcv_ota.state=RCV_OTA_VERIFYING;
+    rcv_ota.error_code=OTA_STATUS_VERIFY_OK; upgrade_error=error?-EIO:0;
     command(HID_OTA_ACTIVATE);
     pthread_mutex_lock(&gate_lock); while(!thread_exited) pthread_cond_wait(&gate_cond,&gate_lock); pthread_mutex_unlock(&gate_lock);
     assert(rcv_ota.state==(error?RCV_OTA_ERROR:RCV_OTA_COMPLETE)); assert(reboots==!error);
     begin(512); assert(joins==1 && creates==2 && rcv_ota.state==RCV_OTA_READY); command(HID_OTA_ABORT);
+}
+static bool verify_status_waiting, release_verify_status, verify_status_sent;
+static unsigned activation_entries;
+static void wait_for_exit(void) {
+    pthread_mutex_lock(&gate_lock);
+    while(!thread_exited) pthread_cond_wait(&gate_cond,&gate_lock);
+    pthread_mutex_unlock(&gate_lock);
+}
+static void pause_verified_status(void) {
+    if(!pthread_equal(pthread_self(),rcv_ota_writer_thread.id) ||
+       rcv_ota.state!=RCV_OTA_VERIFYING || rcv_ota.error_code!=OTA_STATUS_VERIFY_OK) return;
+    pthread_mutex_lock(&gate_lock);
+    verify_status_waiting=true; pthread_cond_broadcast(&gate_cond);
+    while(!release_verify_status) pthread_cond_wait(&gate_cond,&gate_lock);
+    pthread_mutex_unlock(&gate_lock);
+}
+static void observe_admission_status(const uint8_t *p) {
+    if(p[2]==OTA_STATUS_RECEIVING && pthread_equal(pthread_self(),rcv_ota_writer_thread.id)) {
+        pthread_mutex_lock(&gate_lock);
+        verify_status_sent=true; pthread_cond_broadcast(&gate_cond);
+        pthread_mutex_unlock(&gate_lock);
+    }
+    if(p[2]==OTA_STATUS_ACTIVATING && !activation_entries) {
+        assert(pthread_equal(pthread_self(),rcv_ota_writer_thread.id));
+        activation_entries++;
+        unsigned old_puts=command_puts[WRITER_CMD_ACTIVATE];
+        command(HID_OTA_ACTIVATE);
+        assert(command_puts[WRITER_CMD_ACTIVATE]==old_puts);
+    }
+}
+static void pending_interleave(uint8_t cmd) {
+    if(cmd!=WRITER_CMD_ACTIVATE) return;
+    assert(rcv_ota.state==RCV_OTA_ACTIVATE_PENDING);
+    assert(command_puts[cmd]==0);
+    command(HID_OTA_ACTIVATE);
+    assert(last_status[2]==OTA_STATUS_RECEIVING && command_puts[cmd]==0);
+    command(HID_OTA_VERIFY);
+    assert(command_puts[WRITER_CMD_VERIFY]==1);
+    pthread_mutex_lock(&gate_lock);
+    release_verify_status=true; pthread_cond_broadcast(&gate_cond);
+    while(!verify_status_sent) pthread_cond_wait(&gate_cond,&gate_lock);
+    pthread_mutex_unlock(&gate_lock);
+    assert(last_status[2]==OTA_STATUS_RECEIVING && activation_entries==0);
+}
+static void complete_before_return(uint8_t cmd) {
+    if(cmd==WRITER_CMD_ACTIVATE) wait_for_exit();
+}
+static void admission_race(bool error) {
+    begin(256); memset(staging,0x33,256);
+    rcv_ota.image_crc32=crc32_ieee_update(0,staging,256); rcv_ota.bytes_written=256;
+    status_entry_hook=pause_verified_status; status_observer=observe_admission_status;
+    command(HID_OTA_VERIFY);
+    pthread_mutex_lock(&gate_lock);
+    while(!verify_status_waiting) pthread_cond_wait(&gate_cond,&gate_lock);
+    pthread_mutex_unlock(&gate_lock);
+    command(HID_OTA_VERIFY);
+    assert(command_puts[WRITER_CMD_VERIFY]==1 && last_status[2]==OTA_STATUS_VERIFY_OK);
+    before_put=pending_interleave; after_put=complete_before_return; upgrade_error=error?-EIO:0;
+    command(HID_OTA_ACTIVATE);
+    assert(activation_entries==1 && command_puts[WRITER_CMD_ACTIVATE]==1);
+    assert(rcv_ota.state==(error?RCV_OTA_ERROR:RCV_OTA_COMPLETE));
+    assert(last_status[2]==(error?OTA_STATUS_FLASH_ERROR:OTA_STATUS_COMPLETE));
+    command(HID_OTA_ACTIVATE);
+    assert(command_puts[WRITER_CMD_ACTIVATE]==1 && page_write_msgq.count==0);
+    before_put=after_put=NULL; status_entry_hook=NULL; status_observer=NULL;
+    command(HID_OTA_ABORT);
+}
+static void command_failure(bool activate) {
+    begin(256); rcv_ota.bytes_written=256;
+    if(activate) { rcv_ota.state=RCV_OTA_VERIFYING; rcv_ota.error_code=OTA_STATUS_VERIFY_OK; }
+    fail_command=activate?WRITER_CMD_ACTIVATE:WRITER_CMD_VERIFY;
+    command(activate?HID_OTA_ACTIVATE:HID_OTA_VERIFY);
+    assert(rcv_ota.state==RCV_OTA_ERROR && rcv_ota.error_code==OTA_STATUS_ERROR);
+    assert(last_status[2]==OTA_STATUS_ERROR && page_write_msgq.count==0);
+    command(activate?HID_OTA_ACTIVATE:HID_OTA_VERIFY);
+    assert(command_puts[fail_command]==1 && last_status[2]==OTA_STATUS_ERROR);
+    fail_command=-1; command(HID_OTA_ABORT);
+}
+static void activation_eligibility(void) {
+    begin(256); rcv_ota.error_code=OTA_STATUS_VERIFY_OK;
+    command(HID_OTA_ACTIVATE);
+    assert(rcv_ota.state==RCV_OTA_READY && command_puts[WRITER_CMD_ACTIVATE]==0);
+    rcv_ota.state=RCV_OTA_VERIFYING; rcv_ota.error_code=0;
+    command(HID_OTA_ACTIVATE);
+    assert(rcv_ota.state==RCV_OTA_VERIFYING && command_puts[WRITER_CMD_ACTIVATE]==0);
+    command(HID_OTA_ABORT);
 }
 /* CRC_SETTINGS_CASES */
 int main(int argc,char **argv) {
@@ -225,6 +325,11 @@ int main(int argc,char **argv) {
     else if(!strcmp(argv[1],"verify_timeout")) verify_timeout();
     else if(!strcmp(argv[1],"complete")) activation(false);
     else if(!strcmp(argv[1],"activation_error")) activation(true);
+    else if(!strcmp(argv[1],"verify_enqueue_error")) command_failure(false);
+    else if(!strcmp(argv[1],"activate_enqueue_error")) command_failure(true);
+    else if(!strcmp(argv[1],"admission_complete")) admission_race(false);
+    else if(!strcmp(argv[1],"admission_error")) admission_race(true);
+    else if(!strcmp(argv[1],"activation_eligibility")) activation_eligibility();
     else if(!strcmp(argv[1],"data_payload")) data_payload_cases();
     else if(!strcmp(argv[1],"abort")) { command(HID_OTA_ABORT); assert(joins==0); begin(256); command(HID_OTA_ABORT); assert(joins==1 && rcv_ota.state==RCV_OTA_IDLE); begin(512); command(HID_OTA_ABORT); assert(joins==2 && creates==2); }
     else abort();
