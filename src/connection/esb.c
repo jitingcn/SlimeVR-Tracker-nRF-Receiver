@@ -164,7 +164,6 @@ static inline uint32_t tdma_pack_config(uint8_t slot, uint8_t total, uint8_t slo
 
 /* Forward declaration — defined after last_ping_time / PING_TIMEOUT_MS */
 static void tdma_recalculate(bool forced);
-static void tdma_stats_reset(void);
 static void tdma_sync_stats_reset(void);
 
 static void tdma_loss_controller_tick(int64_t now);
@@ -945,11 +944,6 @@ struct tdma_stats {
 
 static struct tdma_stats g_tdma_stats[MAX_TRACKERS] = {0};
 
-static void tdma_stats_reset(void)
-{
-	memset(g_tdma_stats, 0, sizeof(g_tdma_stats));
-}
-
 /* Last observed time-sync error from PING (rx_ticks - expected_rx_ticks), per tracker.
  * Used only for diagnostics to understand TDMA phase offset on receiver side.
  *
@@ -999,7 +993,7 @@ static uint32_t g_extrap_skip_count[MAX_TRACKERS] = {0}; /* extrapolations skipp
 static void tdma_sync_stats_reset(void)
 {
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-	tdma_stats_reset();
+	memset(g_tdma_stats, 0, sizeof(g_tdma_stats));
 	memset(g_last_ping_rx_time_diff_valid, 0, sizeof(g_last_ping_rx_time_diff_valid));
 	memset(g_bias_ppb_valid, 0, sizeof(g_bias_ppb_valid));
 	memset(g_last_ping_isr_rx_ticks_raw, 0, sizeof(g_last_ping_isr_rx_ticks_raw));
