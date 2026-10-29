@@ -70,9 +70,15 @@ functions = [function(name) for name in (
 # Extract the real event-path ID/CRC checks and its shadow/coalescing calls.
 marker = source.index('// Check for PING control packet and respond with PONG')
 begin = source.index('\t\t\t\t\tuint8_t tracker_id = rx_payload.data[1];', marker)
-end = source.index('\n\t\t\t\t\tuint32_t tracker_estimated_server_ticks', begin)
-functions.append('static bool host_validated_ping(void) {\n'
+end = source.index('\n\t\t\t\t\t// Calculate signed ticks difference', begin)
+functions.append('static uint32_t sys_get_be32(const uint8_t *p) {\n'
+                 'return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | '
+                 '((uint32_t)p[2] << 8) | p[3];\n}\n'
+                 '#define account_ping_clock(id, expected, current) '
+                 '((void)(id), (void)(expected), (void)(current))\n'
+                 'static bool host_validated_ping(void) {\n'
                  'if (rx_payload.length != ESB_PING_LEN || rx_payload.data[0] != ESB_PING_TYPE) return false;\n'
+                 'uint32_t current_rx_ticks = 0;\n'
                  'bool accepted = false; do {\n' + source[begin:end]
                  + '\naccepted = true;\n} while (0); return accepted;\n}')
 owner = function('esb_stats_thread')

@@ -1955,9 +1955,10 @@ static void esb_ack_handler_cb(
 				cmd = ESB_PONG_FLAG_NORMAL;
 			}
 		}
-		/* Save accurate RADIO ISR timestamp for clock_bias computation in event_handler. */
-		g_ping_isr_rx_ticks[tracker_id] = rx_ticks;
-		g_ping_isr_rx_ticks_valid[tracker_id] = true;
+		if (pipe_id == 1U + (tracker_id % 7)) {
+			g_ping_isr_rx_ticks[tracker_id] = rx_ticks;
+			g_ping_isr_rx_ticks_valid[tracker_id] = true;
+		}
 
 		ack_payload->pipe = 1 + (tracker_id % 7);
 		ack_payload->length = ESB_PONG_LEN;
@@ -2114,6 +2115,124 @@ static int composite_body_length(uint8_t type)
 	}
 }
 
+static void account_ping_clock(uint8_t tracker_id, uint32_t expected_rx_ticks, uint32_t current_rx_ticks)
+{
+	struct tdma_stats *stats = &g_tdma_stats[tracker_id];
+
+	/* Use RADIO ISR timestamp to avoid EVENT_IRQ scheduling jitter. */
+	uint32_t isr_rx_ticks
+		= g_ping_isr_rx_ticks_valid[tracker_id] ? g_ping_isr_rx_ticks[tracker_id] : current_rx_ticks;
+	int32_t rx_time_diff_ticks = (int32_t)(isr_rx_ticks - expected_rx_ticks);
+
+	/* The tracker estimates TX start, but the ISR samples after the complete
+	 * PING. Remove the 13-byte 2 Mbps on-air time. Retransmissions have an
+	 * additional retry interval and are excluded by the clean-PING gate. */
+	int32_t prev_bias = g_last_ping_rx_time_diff_valid[tracker_id]
+		? g_last_ping_rx_time_diff_ticks[tracker_id] : 0;
+	#define PING_TX_START_TO_RX_TICKS 5
+
+	bool clean_ping;
+	if (!g_last_ping_rx_time_diff_valid[tracker_id]) {
+		clean_ping = true;
+	} else if (rx_time_diff_ticks <= g_last_ping_rx_time_diff_ticks[tracker_id]
+					     + PING_TX_START_TO_RX_TICKS + 2) {
+		g_ping_dirty_streak[tracker_id] = 0;
+		clean_ping = true;
+	} else {
+		g_ping_reject_count[tracker_id]++;
+		if (++g_ping_dirty_streak[tracker_id] >= PING_CLEAN_REACQUIRE_STREAK) {
+			g_ping_dirty_streak[tracker_id] = 0;
+			g_bias_ppb_valid[tracker_id] = 0;
+			prev_bias = 0;
+			clean_ping = true;
+		} else {
+			clean_ping = false;
+		}
+	}
+	if (clean_ping) {
+		g_last_ping_rx_time_diff_ticks[tracker_id] = rx_time_diff_ticks - PING_TX_START_TO_RX_TICKS;
+		g_last_ping_rx_time_diff_valid[tracker_id] = true;
+	}
+
+	if (clean_ping && prev_bias != 0) {
+		if (!g_bias_ppb_valid[tracker_id]) {
+			g_bias_ref_offset[tracker_id] = g_last_ping_rx_time_diff_ticks[tracker_id];
+			g_bias_ref_ticks[tracker_id] = isr_rx_ticks;
+			g_bias_ppb[tracker_id] = 0;
+			g_bias_ppb_valid[tracker_id] = 1;
+		} else {
+			uint32_t elapsed = isr_rx_ticks - g_bias_ref_ticks[tracker_id];
+			if (elapsed >= 32768u) {
+				int32_t new_bias = g_last_ping_rx_time_diff_ticks[tracker_id];
+				int64_t total_drift = (int64_t)(new_bias - g_bias_ref_offset[tracker_id]);
+				int32_t raw_ppb = (int32_t)(total_drift * 1000000000LL / elapsed);
+				if (g_bias_ppb_valid[tracker_id] > 1) {
+					g_bias_ppb[tracker_id] += (raw_ppb - g_bias_ppb[tracker_id]) / 4;
+				} else {
+					g_bias_ppb[tracker_id] = raw_ppb;
+					g_bias_ppb_valid[tracker_id] = 2;
+				}
+			}
+			if (elapsed > 60u * 32768u) {
+				g_bias_ref_offset[tracker_id] = g_last_ping_rx_time_diff_ticks[tracker_id];
+				g_bias_ref_ticks[tracker_id] = isr_rx_ticks;
+			}
+		}
+	}
+	if (clean_ping) {
+		g_last_ping_isr_rx_ticks_raw[tracker_id] = isr_rx_ticks;
+	}
+
+#if TDMA_ENABLED
+	if (stats->count > 0 && esb_get_stats_detailed_enabled()) {
+		uint64_t rx_time_diff_us = k_ticks_to_us_floor64(
+			(rx_time_diff_ticks < 0 ? -rx_time_diff_ticks : rx_time_diff_ticks)
+		);
+		int64_t mean = stats->sum_offset / stats->count;
+		int64_t mean_sq = mean * mean;
+		uint64_t variance = 0;
+		if (stats->sum_sq_offset / stats->count >= (uint64_t)mean_sq) {
+			variance = (stats->sum_sq_offset / stats->count) - (uint64_t)mean_sq;
+		}
+		uint32_t std_dev = 0;
+		if (variance > 0) {
+			uint64_t s = variance / 2;
+			if (s > 0) {
+				uint64_t x = s;
+				uint64_t y = (x + variance / x) / 2;
+				while (y < x) {
+					x = y;
+					y = (x + variance / x) / 2;
+				}
+				std_dev = (uint32_t)x;
+			} else {
+				std_dev = (uint32_t)variance;
+			}
+		}
+
+		if (stats->violations > 12) {
+			LOG_WRN(
+				"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld StdDev=%u EMA=%d "
+				"Range=[%d,%d] RxDiff=%s%llu us",
+				tracker_id,
+				stats->count,
+				stats->violations,
+				mean,
+				std_dev,
+				stats->phase_initialized ? (stats->phase_ema_q8 >> 8) : 0,
+				stats->min_offset,
+				stats->max_offset,
+				rx_time_diff_ticks >= 0 ? "+" : "-",
+				rx_time_diff_us
+			);
+		}
+	}
+#else
+	ARG_UNUSED(rx_time_diff_ticks);
+	ARG_UNUSED(stats);
+#endif
+}
+
 void event_handler(struct esb_evt const *event)
 {
 	switch (event->evt_id) {
@@ -2254,151 +2373,6 @@ void event_handler(struct esb_evt const *event)
 					rx_payload.data[2]
 				);
 
-				// TDMA Slot Check for PING
-				uint8_t tracker_id = rx_payload.data[1];
-
-				// Parse new PING fields (added in protocol update)
-				uint32_t expected_rx_ticks = ((uint32_t)rx_payload.data[3] << 24) | ((uint32_t)rx_payload.data[4] << 16)
-										   | ((uint32_t)rx_payload.data[5] << 8) | ((uint32_t)rx_payload.data[6]);
-
-				if (tracker_id < MAX_TRACKERS) {
-					// Update stats
-					struct tdma_stats *stats = &g_tdma_stats[tracker_id];
-
-					/* Use RADIO ISR timestamp for clock_bias: avoids EVENT_IRQ scheduling
-					 * jitter (10-25 ticks) that would inflate bias and cause false violations. */
-					uint32_t isr_rx_ticks
-						= g_ping_isr_rx_ticks_valid[tracker_id] ? g_ping_isr_rx_ticks[tracker_id] : current_rx_ticks;
-					int32_t rx_time_diff_ticks = (int32_t)(isr_rx_ticks - expected_rx_ticks);
-
-					/* `expected_rx_ticks` is the tracker's estimate at TX start, while
-					 * `isr_rx_ticks` is sampled after the complete PING arrived. Remove
-					 * the deterministic 13-byte 2 Mbps on-air time before using the
-					 * measurement as a clock-domain bias for ordinary ADDRESS timestamps.
-					 * Retransmitted PINGs are excluded: their extra retry interval is not
-					 * clock error. */
-					int32_t prev_bias = g_last_ping_rx_time_diff_valid[tracker_id]
-						? g_last_ping_rx_time_diff_ticks[tracker_id] : 0;
-					#define PING_TX_START_TO_RX_TICKS 5
-
-					/* Accept a PING whose offset did not step upward beyond the last
-					 * accepted level plus the deterministic airtime margin. Without a
-					 * bound, one sustained upward excursion ratchets this gate shut
-					 * forever: every later PING is rejected, freezing bias/skew/age
-					 * bookkeeping and poisoning drift extrapolation while ordinary
-					 * data keeps flowing. After a bounded rejection streak, accept
-					 * the new offset level and restart skew acquisition. */
-					bool clean_ping;
-					if (!g_last_ping_rx_time_diff_valid[tracker_id]) {
-						clean_ping = true;
-					} else if (rx_time_diff_ticks <= g_last_ping_rx_time_diff_ticks[tracker_id]
-									     + PING_TX_START_TO_RX_TICKS + 2) {
-						g_ping_dirty_streak[tracker_id] = 0;
-						clean_ping = true;
-					} else {
-						g_ping_reject_count[tracker_id]++;
-						if (++g_ping_dirty_streak[tracker_id] >= PING_CLEAN_REACQUIRE_STREAK) {
-							g_ping_dirty_streak[tracker_id] = 0;
-							g_bias_ppb_valid[tracker_id] = 0;
-							prev_bias = 0;
-							clean_ping = true;
-						} else {
-							clean_ping = false;
-						}
-					}
-					if (clean_ping) {
-						g_last_ping_rx_time_diff_ticks[tracker_id]
-							= rx_time_diff_ticks - PING_TX_START_TO_RX_TICKS;
-						g_last_ping_rx_time_diff_valid[tracker_id] = true;
-					}
-
-					/* Update clock bias drift rate using long-baseline ppb
-					 * estimation.  Keep a reference point and measure total
-					 * drift over ≥1s baselines to average out RTT noise. */
-					if (clean_ping && prev_bias != 0) {
-						if (!g_bias_ppb_valid[tracker_id]) {
-							g_bias_ref_offset[tracker_id] = g_last_ping_rx_time_diff_ticks[tracker_id];
-							g_bias_ref_ticks[tracker_id] = isr_rx_ticks;
-							g_bias_ppb[tracker_id] = 0;
-							g_bias_ppb_valid[tracker_id] = 1;
-						} else {
-							uint32_t elapsed = isr_rx_ticks - g_bias_ref_ticks[tracker_id];
-							if (elapsed >= 32768u) {
-								int32_t new_bias = g_last_ping_rx_time_diff_ticks[tracker_id];
-								int64_t total_drift = (int64_t)(new_bias - g_bias_ref_offset[tracker_id]);
-								int32_t raw_ppb = (int32_t)(total_drift * 1000000000LL / elapsed);
-								if (g_bias_ppb_valid[tracker_id] > 1) {
-									g_bias_ppb[tracker_id] += (raw_ppb - g_bias_ppb[tracker_id]) / 4;
-								} else {
-									g_bias_ppb[tracker_id] = raw_ppb;
-									g_bias_ppb_valid[tracker_id] = 2;
-								}
-							}
-							if (elapsed > 60u * 32768u) {
-								g_bias_ref_offset[tracker_id] = g_last_ping_rx_time_diff_ticks[tracker_id];
-								g_bias_ref_ticks[tracker_id] = isr_rx_ticks;
-							}
-						}
-					}
-					if (clean_ping) {
-						g_last_ping_isr_rx_ticks_raw[tracker_id] = isr_rx_ticks;
-					}
-
-					/*
-					 * TDMA window log (Newton sqrt + UART) stays OFF the EVENT IRQ
-					 * path unless detailed stats are enabled — otherwise every PING
-					 * stretches IRQ latency and risks ESB RX FIFO overflow.
-					 */
-#if TDMA_ENABLED
-					if (stats->count > 0 && esb_get_stats_detailed_enabled()) {
-						uint64_t rx_time_diff_us = k_ticks_to_us_floor64(
-							(rx_time_diff_ticks < 0 ? -rx_time_diff_ticks : rx_time_diff_ticks)
-						);
-						int64_t mean = stats->sum_offset / stats->count;
-						int64_t mean_sq = mean * mean;
-						uint64_t variance = 0;
-						if (stats->sum_sq_offset / stats->count >= (uint64_t)mean_sq) {
-							variance = (stats->sum_sq_offset / stats->count) - (uint64_t)mean_sq;
-						}
-						uint32_t std_dev = 0;
-						if (variance > 0) {
-							uint64_t s = variance / 2;
-							if (s > 0) {
-								uint64_t x = s;
-								uint64_t y = (x + variance / x) / 2;
-								while (y < x) {
-									x = y;
-									y = (x + variance / x) / 2;
-								}
-								std_dev = (uint32_t)x;
-							} else {
-								std_dev = (uint32_t)variance;
-							}
-						}
-
-						if (stats->violations > 12) {
-							LOG_WRN(
-								"TDMA Stats ID=%u Count=%u Viol=%u Mean=%lld StdDev=%u EMA=%d "
-								"Range=[%d,%d] RxDiff=%s%llu us",
-								tracker_id,
-								stats->count,
-								stats->violations,
-								mean,
-								std_dev,
-								stats->phase_initialized ? (stats->phase_ema_q8 >> 8) : 0,
-								stats->min_offset,
-								stats->max_offset,
-								rx_time_diff_ticks >= 0 ? "+" : "-",
-								rx_time_diff_us
-							);
-						}
-					}
-#else
-					ARG_UNUSED(rx_time_diff_ticks);
-					ARG_UNUSED(stats);
-#endif
-				}
-
 				// Check for PING control packet and respond with PONG
 				if (rx_payload.data[0] == ESB_PING_TYPE) {
 					uint8_t tracker_id = rx_payload.data[1];
@@ -2438,15 +2412,13 @@ void event_handler(struct esb_evt const *event)
 						);
 						break;
 					}
+					uint32_t expected_rx_ticks = sys_get_be32(&rx_payload.data[3]);
 					if (rx_payload.pipe == 1 + (tracker_id % 7)) {
+						account_ping_clock(tracker_id, expected_rx_ticks, current_rx_ticks);
 						tdma_shadow_observe(tracker_id, TDMA_SHADOW_EVIDENCE_PING);
 					}
-
-					uint32_t tracker_estimated_server_ticks
-						= ((uint32_t)rx_payload.data[3] << 24) | ((uint32_t)rx_payload.data[4] << 16)
-						| ((uint32_t)rx_payload.data[5] << 8) | ((uint32_t)rx_payload.data[6]);
 					// Calculate signed ticks difference
-					int32_t ticks_diff = (int32_t)current_rx_ticks - (int32_t)tracker_estimated_server_ticks;
+					int32_t ticks_diff = (int32_t)current_rx_ticks - (int32_t)expected_rx_ticks;
 					// Get absolute value for conversion to microseconds
 					uint32_t ticks_diff_abs = (uint32_t)(ticks_diff < 0 ? -ticks_diff : ticks_diff);
 					LOG_DBG(
