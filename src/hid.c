@@ -486,12 +486,6 @@ void hid_reset_rssi_smooth(uint8_t tracker_id)
 	}
 }
 
-// 重置所有tracker的RSSI平滑状态
-void hid_reset_all_rssi_smooth(void)
-{
-	memset(rssi_states, 0, sizeof(rssi_states));
-}
-
 /* Below ESB_THREAD_PRIORITY; must not compete with radio housekeeping. */
 K_THREAD_DEFINE(hid_dropped_reports_logging_thread, 256, hid_dropped_reports_logging, NULL, NULL, NULL, HID_DROPPED_REPORTS_LOGGING_PRIORITY, 0, 0);
 

@@ -34,6 +34,5 @@ uint32_t hid_get_total_drop_count(void);
 uint32_t hid_get_total_tracker_drop_count(uint8_t tracker_id);
 
 void hid_reset_rssi_smooth(uint8_t tracker_id);
-void hid_reset_all_rssi_smooth(void);
 
 #endif

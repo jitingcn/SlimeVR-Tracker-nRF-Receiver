@@ -34,6 +34,8 @@ prefix = r'''
 #include <string.h>
 #include <limits.h>
 #define MAX_TRACKERS 16
+#define RCV_HID_TYPE_CMD_ACK 251
+#define RCV_HID_TYPE_CMD 254
 #define RCV_HID_TYPE_DEVICE_ADDR 255
 #define ATOMIC_INIT(x) (x)
 typedef int32_t atomic_t;
@@ -66,11 +68,21 @@ static void *checked_memcpy(void *dst, const void *src, size_t n) {
     return memcpy(dst, src, n);
 }
 #define memcpy checked_memcpy
+static uint8_t enqueued_packet[16];
+static uint32_t enqueued_generation;
+static unsigned int enqueued_count;
+static bool hid_enqueue_packet(const uint8_t data[16], uint32_t generation) {
+    memcpy(enqueued_packet, data, sizeof(enqueued_packet));
+    enqueued_generation=generation;
+    enqueued_count++;
+    return true;
+}
 '''
 functions = '\n'.join(function(source, name) for name in (
     'packet_device_addr', 'hid_fill_padding', 'hid_stats_record_reports',
     'hid_stats_update_idle_if_needed', 'hid_stats_snapshot', 'rssi_smooth_update',
-    'hid_reset_rssi_smooth', 'hid_reset_all_rssi_smooth'))
+    'hid_reset_rssi_smooth', 'hid_type_byte1_is_tracker_id',
+    'hid_type_has_rssi_slot', 'hid_write_packet_n'))
 # The historical address formatter returned void. Preserve its exact body and
 # callers; only the test's direct boolean assertions need a signature adapter.
 if re.search(r'^static void packet_device_addr\s*\(', source, re.M):
@@ -84,6 +96,17 @@ static bool legacy_packet_device_addr_result(uint8_t *report, uint16_t id) {
 checks = r'''
 #undef memcpy
 static int floor256(int x) { return x >= 0 ? x/256 : -((-x+255)/256); }
+static void assert_rssi_report(uint8_t tracker_id, int8_t rssi, uint8_t expected) {
+    uint8_t packet[16] = {0};
+    packet[1]=tracker_id;
+    packet[2]=0xA5;
+    packet[15]=0x55;
+    unsigned int before=enqueued_count;
+    hid_write_packet_n(packet, (uint8_t)rssi);
+    assert(enqueued_count==before+1 && enqueued_generation==0);
+    assert(enqueued_packet[0]==0 && enqueued_packet[1]==tracker_id);
+    assert(enqueued_packet[2]==0xA5 && enqueued_packet[15]==expected);
+}
 static void test_rssi(void) {
     for (int first=INT8_MIN; first<=INT8_MAX; first++) {
         hid_reset_rssi_smooth(0);
@@ -96,8 +119,22 @@ static void test_rssi(void) {
         }
     }
     assert(rssi_smooth_update(MAX_TRACKERS, -99) == (uint8_t)-99);
-    hid_reset_all_rssi_smooth();
-    for (int i=0; i<MAX_TRACKERS; i++) assert(!rssi_states[i].initialized);
+    hid_reset_rssi_smooth(0);
+    hid_reset_rssi_smooth(15);
+    assert_rssi_report(0, -80, 176);
+    assert_rssi_report(15, -40, 216);
+    assert_rssi_report(0, -60, 179);
+    assert_rssi_report(15, -60, 212);
+    hid_reset_rssi_smooth(0);
+    assert_rssi_report(0, -100, 156);
+    assert_rssi_report(15, -60, 208);
+    hid_reset_rssi_smooth(MAX_TRACKERS);
+    assert_rssi_report(MAX_TRACKERS, -99, 157);
+    assert_rssi_report(0, -60, 163);
+    assert_rssi_report(15, -60, 206);
+    hid_reset_rssi_smooth(15);
+    assert_rssi_report(15, -30, 226);
+    assert_rssi_report(0, -60, 170);
 }
 static void test_window(uint64_t start) {
     memset(&hid_stats, 0, sizeof(hid_stats));
