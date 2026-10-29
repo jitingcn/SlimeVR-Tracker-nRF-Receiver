@@ -2861,7 +2861,7 @@ void event_handler(struct esb_evt const *event)
 					}
 					break;
 				}
-				esb_receive_composite(&rx_payload, current_rx_ticks);
+				LOG_ERR("Wrong packet length: %d", rx_payload.length);
 			} break;
 			}
 		}
