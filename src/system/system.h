@@ -18,7 +18,6 @@
 #define TRACKER_ROSTER 260 // Versioned, atomic tracker roster
 
 uint8_t reboot_counter_read(void);
-void reboot_counter_write(uint8_t reboot_counter);
 
 int sys_write_checked(uint16_t id, const void *data, size_t len);
 void sys_read(uint16_t id, void* data, size_t len);

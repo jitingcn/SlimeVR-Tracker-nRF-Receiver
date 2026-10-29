@@ -413,10 +413,6 @@ static void button_thread(void)
 }
 #endif
 
-void reboot_counter_write(uint8_t reboot_counter) {
-	nvs_write(&fs, RBT_CNT_ID, &reboot_counter, sizeof(reboot_counter));
-}
-
 int sys_write_checked(uint16_t id, const void *data, size_t len)
 {
 	if (sys_nvs_init()) {
