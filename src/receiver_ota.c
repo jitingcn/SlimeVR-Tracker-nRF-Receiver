@@ -374,7 +374,7 @@ static void rcv_ota_handle_begin(const uint8_t *data, size_t len)
 	/* nRF5 OpenDFU bootloader sets ACL write-protection on the app region,
 	 * preventing in-place flash copy.  Reject receiver self-OTA early. */
 #if CONFIG_BOARD_HAS_NRF5_BOOTLOADER && !CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
-	LOG_ERR("RCV OTA: self-update blocked — nRF5 OpenDFU bootloader ACL "
+	LOG_ERR("RCV OTA: self-update blocked - nRF5 OpenDFU bootloader ACL "
 		"write-protects app region. Use DFU/SWD to update this receiver.");
 	rcv_ota.state = RCV_OTA_ERROR;
 	rcv_ota.error_code = OTA_STATUS_ERROR;
@@ -500,7 +500,7 @@ static void rcv_ota_handle_begin(const uint8_t *data, size_t len)
 	}
 #endif
 	if (flash_base != 0 && flash_base > RCV_OTA_FLASH_BASE) {
-		LOG_ERR("RCV OTA: flash base 0x%X > running base 0x%X — "
+		LOG_ERR("RCV OTA: flash base 0x%X > running base 0x%X - "
 			"target firmware requires SoftDevice not present",
 			flash_base, RCV_OTA_FLASH_BASE);
 		rcv_ota.state = RCV_OTA_ERROR;
