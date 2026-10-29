@@ -11,6 +11,8 @@
 #define LOG_DBG(...) ((void)0)
 #define LOG_ERR(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
+#define TDMA_ENABLED 0
+#define ARG_UNUSED(x) ((void)(x))
 #define TPS_CALCULATION_INTERVAL_MS 1000
 #define ESB_RF_CHANNEL_DEFAULT 255
 #define ESB_RF_CHANNEL_ZERO_ENC 128
@@ -137,6 +139,26 @@ static uint8_t pending_sens_auto_axis[MAX_TRACKERS];
 static uint16_t pending_sens_auto_revolutions[MAX_TRACKERS];
 static uint32_t g_last_isr_rx_ticks[MAX_TRACKERS], g_ping_isr_rx_ticks[MAX_TRACKERS];
 static bool g_last_isr_rx_valid[MAX_TRACKERS], g_ping_isr_rx_ticks_valid[MAX_TRACKERS];
+struct tdma_stats { uint32_t count; };
+static struct tdma_stats g_tdma_stats[MAX_TRACKERS];
+static int32_t g_last_ping_rx_time_diff_ticks[MAX_TRACKERS];
+static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS];
+static uint8_t g_bias_ppb_valid[MAX_TRACKERS], g_ping_dirty_streak[MAX_TRACKERS];
+static int32_t g_bias_ppb[MAX_TRACKERS], g_bias_ref_offset[MAX_TRACKERS];
+static uint32_t g_bias_ref_ticks[MAX_TRACKERS], g_last_ping_isr_rx_ticks_raw[MAX_TRACKERS];
+static uint32_t g_ping_reject_count[MAX_TRACKERS], pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
+static uint8_t last_ping_counter[MAX_TRACKERS], last_pong_queued_counter[MAX_TRACKERS], echo_counter[MAX_TRACKERS];
+static bool ping_counter_initialized[MAX_TRACKERS];
+static uint64_t last_ping_time[MAX_TRACKERS];
+static esb_remote_confirm_cb_t remote_confirm_cb;
+enum tdma_shadow_evidence { TDMA_SHADOW_EVIDENCE_PING, TDMA_SHADOW_EVIDENCE_DATA };
+static void tdma_shadow_observe(uint8_t id, enum tdma_shadow_evidence evidence) {}
+static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return ticks; }
+static void test_all_invalidate_tracker(uint8_t id, int64_t at) {}
+static const char *esb_pong_flag_name(uint8_t flag) { return "command"; }
+static uint32_t sys_get_be32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
 static bool pairing_new_devices_blocked, ota_target, ota_payload;
 static uint8_t receiver_device_addr[6] = {1, 2, 3, 4, 5, 6};
 static int channel_get_error;
@@ -186,6 +208,12 @@ static void reset(unsigned count) {
     memset(abort_pending, 0, sizeof(abort_pending));
     memset(metadata_active_mask, 0, sizeof(metadata_active_mask));
     memset(metadata_pending_mask, 0, sizeof(metadata_pending_mask));
+    memset(echo_counter, 0, sizeof(echo_counter));
+    memset(ping_counter_initialized, 0, sizeof(ping_counter_initialized));
+    memset(last_ping_time, 0, sizeof(last_ping_time));
+    memset(g_last_ping_rx_time_diff_valid, 0, sizeof(g_last_ping_rx_time_diff_valid));
+    memset(g_bias_ppb_valid, 0, sizeof(g_bias_ppb_valid));
+    memset(g_ping_dirty_streak, 0, sizeof(g_ping_dirty_streak));
     memset(tdma_config_packed, 0, sizeof(tdma_config_packed));
     ota_target = ota_payload = pairing_new_devices_blocked = false;
     channel_get_error = 0;

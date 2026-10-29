@@ -1,15 +1,19 @@
-/* SDK/HW leaves are modeled; all selected production functions are inserted by
- * run_radio.py. Tracker processing beyond private ingress is a counted sentinel.
- * No RF timing, RTOS scheduling, or unbounded SDK DISABLED wait proof is implied. */
+/* SDK/HW leaves are modeled; selected production functions are inserted by
+ * run_radio.py. No RF timing, RTOS scheduling or unbounded SDK wait proof. */
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include "connection/tracker_event_protocol.h"
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #define ARG_UNUSED(x) ((void)(x))
+#define BIT(n) (1u << (n))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define TDMA_ENABLED 0
+#define TEST_ALL_JOIN_CONFIG_GRACE_MS 1500
 #define MAX_TRACKERS 8
 #define K_NO_WAIT 0
 #define CONFIG_RADIO_TX_POWER 0
@@ -28,16 +32,21 @@
 #define ESB_DEFAULT_CONFIG {0}
 #define AC_FRAME_SIZE 16
 
+/* PROTOCOL CONSTANTS */
+
 typedef int atomic_t;
+typedef int atomic_val_t;
 static int atomic_get(const atomic_t *value) { return *value; }
 static void atomic_set(atomic_t *value, int next) { *value = next; }
+static void atomic_or(atomic_t *value, int bits) { *value |= bits; }
+static void atomic_and(atomic_t *value, int bits) { *value &= bits; }
 static bool atomic_cas(atomic_t *value, int old, int next)
 {
     if (*value != old) return false;
     *value = next;
     return true;
 }
-struct esb_payload { uint8_t length, pipe; bool noack; uint8_t data[64]; };
+struct esb_payload { uint8_t length, pipe; bool noack; int8_t rssi; uint8_t data[64]; };
 struct esb_evt { int evt_id; unsigned tx_attempts; };
 struct esb_config {
     int protocol, mode, tx_output_power, retransmit_delay, tx_mode;
@@ -52,10 +61,11 @@ static bool esb_initialized, esb_radio_fault;
 static uint8_t receiver_rf_channel, base_addr_0[4], base_addr_1[4], addr_prefix[8];
 static struct esb_payload rx_payload;
 static unsigned info_logs, error_logs, warning_logs;
-#define LOG_INF(...) ((void)++info_logs)
-#define LOG_ERR(...) ((void)++error_logs)
-#define LOG_WRN(...) ((void)++warning_logs)
-#define LOG_DBG(...) ((void)0)
+static void host_log(const char *format, ...) { (void)format; }
+#define LOG_INF(...) (++info_logs, host_log(__VA_ARGS__))
+#define LOG_ERR(...) (++error_logs, host_log(__VA_ARGS__))
+#define LOG_WRN(...) (++warning_logs, host_log(__VA_ARGS__))
+#define LOG_DBG(...) host_log(__VA_ARGS__)
 static unsigned downstream_ack, downstream_pose, downstream_pairing, downstream_command;
 static unsigned init_calls, disable_calls, write_calls, start_calls, rx_start_calls;
 static unsigned sequence_clock, restored_at, released_at;
@@ -72,6 +82,80 @@ static struct esb_payload sent_payload, incoming;
 static bool incoming_ready;
 static const struct esb_payload *dma_payload;
 static unsigned status_errors;
+#if TEST_FEATURE_ON
+static unsigned irq_lock(void) { return 0; }
+static void irq_unlock(unsigned key) { (void)key; }
+#endif
+static int64_t k_uptime_get(void) { return 1234; }
+static uint32_t k_uptime_get_32(void) { return 1234; }
+static int k_msgq_put(void *queue, const void *item, int timeout);
+struct pairing_event { uint8_t packet[8]; };
+static int esb_pairing_msgq;
+static bool esb_pairing, pairing_new_devices_blocked;
+static uint8_t stored_trackers = MAX_TRACKERS;
+struct tdma_stats { uint32_t count; };
+static struct tdma_stats g_tdma_stats[MAX_TRACKERS];
+static int32_t g_last_ping_rx_time_diff_ticks[MAX_TRACKERS];
+static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS];
+static uint32_t g_ping_isr_rx_ticks[MAX_TRACKERS];
+static bool g_ping_isr_rx_ticks_valid[MAX_TRACKERS];
+static uint8_t g_bias_ppb_valid[MAX_TRACKERS], g_ping_dirty_streak[MAX_TRACKERS];
+static int32_t g_bias_ppb[MAX_TRACKERS], g_bias_ref_offset[MAX_TRACKERS];
+static uint32_t g_bias_ref_ticks[MAX_TRACKERS], g_last_ping_isr_rx_ticks_raw[MAX_TRACKERS];
+static uint32_t g_ping_reject_count[MAX_TRACKERS], pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
+static uint8_t last_ping_counter[MAX_TRACKERS], last_pong_queued_counter[MAX_TRACKERS];
+static bool ping_counter_initialized[MAX_TRACKERS], sequence_initialized[MAX_TRACKERS];
+static uint64_t last_ping_time[MAX_TRACKERS];
+static uint32_t decision_ready_mask, decision_fence_mask;
+static struct packet_stats { uint32_t restart_events; uint8_t status_received, status_lost; } tracker_stats[MAX_TRACKERS];
+static atomic_t test_all_state_valid, test_all_enabled, test_all_confirmed_mask, test_all_ready_after_ms[MAX_TRACKERS];
+static uint8_t tracker_remote_command[MAX_TRACKERS], pending_cmd_arg[MAX_TRACKERS];
+static uint16_t tracker_test_on_tps[MAX_TRACKERS], metadata_active_token[MAX_TRACKERS];
+static uint8_t metadata_active_mask[MAX_TRACKERS], metadata_active_chunk[MAX_TRACKERS];
+static uint16_t last_raw_seq[MAX_TRACKERS];
+static bool last_raw_valid[MAX_TRACKERS];
+static uint8_t last_pose[16];
+static unsigned data_evidence;
+static void (*remote_confirm_cb)(uint8_t, uint8_t);
+enum tdma_shadow_evidence { TDMA_SHADOW_EVIDENCE_PING, TDMA_SHADOW_EVIDENCE_DATA };
+static void tdma_shadow_observe(uint8_t id, enum tdma_shadow_evidence evidence)
+{ (void)id; if (evidence == TDMA_SHADOW_EVIDENCE_DATA) ++data_evidence; }
+static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return ticks; }
+static uint16_t test_all_wire_tps(void) { return 0; }
+static void test_all_invalidate_tracker(uint8_t id, int64_t at) { (void)id; (void)at; }
+static const char *esb_pong_flag_name(uint8_t flag) { (void)flag; return "command"; }
+static void remote_wom_receive(uint8_t id, uint8_t flag, const uint8_t *data, uint8_t counter)
+{ (void)id; (void)flag; (void)data; (void)counter; ++downstream_command; }
+static uint32_t sys_get_be32(const uint8_t *p)
+{ return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
+static uint16_t sys_get_be16(const uint8_t *p) { return ((uint16_t)p[0] << 8) | p[1]; }
+static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *p, size_t n)
+{
+    while (n--) {
+        crc ^= *p++;
+        for (unsigned i = 0; i < 8; ++i)
+            crc = (uint8_t)((crc << 1) ^ ((crc & 0x80) ? 0x07 : 0));
+    }
+    return crc;
+}
+static int esb_find_tracker(uint64_t address) { (void)address; return -1; }
+static void tdma_check_slot(uint8_t id, uint32_t ticks, int8_t rssi) { (void)id; (void)ticks; (void)rssi; }
+static int check_packet_sequence(uint8_t id, uint8_t sequence) { (void)id; (void)sequence; return 0; }
+static void hid_write_packet_n(const uint8_t *packet, int8_t rssi)
+{ (void)rssi; memcpy(last_pose, packet, 16); ++downstream_pose; }
+static bool tracker_events_receive(const uint8_t *packet, uint8_t length, uint32_t now)
+{ struct tracker_event e; (void)now; return tracker_event_decode(packet, length, &e); }
+static bool data_collect_is_target(uint8_t id) { (void)id; return false; }
+static bool data_collect_batch_is_target(uint8_t id) { (void)id; return false; }
+static void data_collect_write(const uint8_t *packet, uint8_t length, int8_t rssi)
+{ (void)packet; (void)length; (void)rssi; ++downstream_pose; }
+static void esb_ota_relay_process_tracker_packet(const uint8_t *packet, uint8_t length)
+{ (void)packet; (void)length; ++downstream_command; }
+static void esb_send_remote_command(uint8_t id, uint8_t command)
+{ tracker_remote_command[id] = command; ++downstream_command; }
+static int k_msgq_get(void *queue, void *item, int timeout)
+{ (void)queue; (void)item; (void)timeout; return -ENOMSG; }
+
 
 void event_handler(const struct esb_evt *event);
 static void esb_ack_handler_cb(const uint8_t *, uint8_t, uint32_t,
@@ -202,22 +286,27 @@ static struct observation queued;
 static unsigned queue_calls;
 static int observations;
 static bool queue_full;
-static unsigned irq_lock(void) { return 0; }
-static void irq_unlock(unsigned key) { (void)key; }
 static uint32_t auto_channel_generation(void) { return 7; }
-static int64_t k_uptime_get(void) { return 1234; }
-static int k_msgq_put(void *queue, const void *item, int timeout)
-{
-    assert(queue == &observations && timeout == K_NO_WAIT);
-    queue_calls++;
-    if (queue_full) return -ENOMSG;
-    memcpy(&queued, item, sizeof(queued));
-    return 0;
-}
 /* ACTUAL_RECEIVE_ON */
 #else
 /* ACTUAL_RECEIVE_OFF */
 #endif
+static int k_msgq_put(void *queue, const void *item, int timeout)
+{
+    assert(timeout == K_NO_WAIT);
+#if TEST_FEATURE_ON
+    if (queue == &observations) {
+        ++queue_calls;
+        if (queue_full) return -ENOMSG;
+        memcpy(&queued, item, sizeof(queued));
+        return 0;
+    }
+#endif
+    assert(queue == &esb_pairing_msgq);
+    (void)item;
+    ++downstream_pairing;
+    return 0;
+}
 /* ACTUAL_ACK */
 /* ACTUAL_EVENT */
 /* ACTUAL_LIFECYCLE */
@@ -243,6 +332,7 @@ static void reset(void)
     dma_payload = NULL;
     downstream_ack = downstream_pose = downstream_pairing = downstream_command = 0;
     incoming_ready = false;
+    data_evidence = 0;
 }
 static void frame_make(uint8_t frame[16])
 {
@@ -327,12 +417,15 @@ static void test_ingress(void)
 #endif
     /* Ordinary packets must reach the downstream boundary, not be swallowed. */
     frame[0] = 1;
+    frame[1] = 0;
+    frame[16] = 0x42;
     bool has_payload = true, suppress = true;
     struct esb_payload ack = {0};
-    esb_ack_handler_cb(frame, 16, 1, &ack, &has_payload, &suppress);
-    receive_frame(frame, 16, 1);
+    esb_ack_handler_cb(frame, 17, 1, &ack, &has_payload, &suppress);
+    receive_frame(frame, 17, 1);
     assert(downstream_ack == 1 && !has_payload && !suppress);
-    assert(downstream_pose == 1 && downstream_pairing == 1 && downstream_command == 1);
+    assert(downstream_pose == 1 && downstream_pairing == 0 && downstream_command == 0);
+    assert(data_evidence == 1 && memcmp(last_pose, frame, 16) == 0);
 }
 static void test_commit_logging(void)
 {

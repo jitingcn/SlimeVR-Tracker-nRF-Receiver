@@ -173,8 +173,8 @@ def main():
             'tdma_loss_reset_windows', 'tdma_pack_config', 'tdma_shadow_observe',
             'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked',
             'tdma_slot_ticks_for', 'tdma_recalculate'))
-        lengths = esb[esb.index('static int composite_body_length('):esb.index('void event_handler(')]
-        composite = esb[esb.index('handle_composite_packet:'):esb.index('\n\t\t\t} break;', esb.index('handle_composite_packet:'))]
+        lengths = function(esb, 'composite_body_length')
+        composite = function(esb, 'esb_receive_composite')
         clear = function(esb, 'esb_clear')
         (path/'esb_event_paths.inc').write_text(
             membership + '\n' + lengths + '''
@@ -184,9 +184,7 @@ static void tracked_tdma_shadow_observe(uint8_t tracker, enum tdma_shadow_eviden
     tdma_shadow_observe(tracker, kind);
 }
 #define tdma_shadow_observe tracked_tdma_shadow_observe
-static void composite_receive(void) { do { switch (0) { case 0: {
-''' + composite.replace('handle_composite_packet:', '')
-            + '\n} break; } } while (0); }\n#undef tdma_shadow_observe\n' + clear)
+''' + composite + '\n#undef tdma_shadow_observe\n' + clear)
         binary = path/'test'
         command = shlex.split(os.environ.get('CC','cc')) + [
             '-std=c11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',

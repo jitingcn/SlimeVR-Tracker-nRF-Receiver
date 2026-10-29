@@ -44,11 +44,11 @@ def function(name):
 
 
 constants = '\n'.join(re.findall(
-    r'^#define (?:PING_TIMEOUT_MS|TDMA_SHADOW_\w+|TDMA_MEMBERSHIP_COHORT_MS|'
+    r'^#define (?:PING_TIMEOUT_MS|PING_CLEAN_REACQUIRE_STREAK|TDMA_SHADOW_\w+|TDMA_MEMBERSHIP_COHORT_MS|'
     r'TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|SLOT_ROTATION|'
     r'RECONFIG_MIN_MS|LOSS_RECONFIG_MIN_MS|CAP_LEVEL_MAX))\b[^\n]*', source, re.MULTILINE))
 constants += '\n' + '\n'.join(re.findall(
-    r'^#define ESB_PING_(?:LEN|TYPE|COMMAND_MASK)\b[^\n]*', header, re.MULTILINE))
+    r'^#define ESB_(?:PING|PONG)_\w+\b[^\n]*', header, re.MULTILINE))
 variables = '''tdma_cap_ladder tdma_config_packed tdma_config_epoch
     tdma_dynamic_active_count tdma_dynamic_slot_ticks tdma_active_mask
     tdma_last_reconfig_time tdma_last_reconfig_valid tdma_cap_level tdma_published_cap_level
@@ -67,20 +67,16 @@ functions = [function(name) for name in (
     'tdma_membership_wait_ms', 'tdma_slot_ticks_for', 'tdma_recalculate',
     'tracker_store_restore',
 )]
-# Extract the real event-path ID/CRC checks and its shadow/coalescing calls.
-marker = source.index('// Check for PING control packet and respond with PONG')
-begin = source.index('\t\t\t\t\tuint8_t tracker_id = rx_payload.data[1];', marker)
-end = source.index('\n\t\t\t\t\t// Calculate signed ticks difference', begin)
 functions.append('static uint32_t sys_get_be32(const uint8_t *p) {\n'
                  'return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | '
-                 '((uint32_t)p[2] << 8) | p[3];\n}\n'
-                 '#define account_ping_clock(id, expected, current) '
-                 '((void)(id), (void)(expected), (void)(current))\n'
-                 'static bool host_validated_ping(void) {\n'
+                 '((uint32_t)p[2] << 8) | p[3];\n}\n')
+functions.extend(function(name) for name in ('account_ping_clock', 'esb_receive_ping'))
+functions.append('static bool host_validated_ping(void) {\n'
                  'if (rx_payload.length != ESB_PING_LEN || rx_payload.data[0] != ESB_PING_TYPE) return false;\n'
-                 'uint32_t current_rx_ticks = 0;\n'
-                 'bool accepted = false; do {\n' + source[begin:end]
-                 + '\naccepted = true;\n} while (0); return accepted;\n}')
+                 'uint8_t id = rx_payload.data[1];\n'
+                 'uint32_t errors = id < MAX_TRACKERS ? crc_error_count[id] : 0;\n'
+                 'esb_receive_ping(&rx_payload, 0);\n'
+                 'return id < MAX_TRACKERS && crc_error_count[id] == errors;\n}')
 owner = function('esb_stats_thread')
 early_wake = extract_block(owner, r'^[ \t]*if \(\(int64_t\)now < next_monitor_time\)\s*\{')
 functions.append('static void host_early_owner_wake(uint64_t now, int64_t next_monitor_time) {\n'

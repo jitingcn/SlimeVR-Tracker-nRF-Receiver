@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "connection/tracker_event_protocol.h"
 
 #define MAX_TRACKERS 16
 #define BIT(n) (1U << (n))
@@ -14,11 +15,16 @@
 #define TDMA_BASE_SLOT_TICKS 16
 #define TDMA_SLOT_TICKS_MAX_LEVEL0 64
 #define TDMA_SLOT_ROTATION 0
-#define LOG_INF(...)
-#define LOG_WRN(...)
-#define LOG_DBG(...)
+static void log_message(const char *format, ...) { (void)format; }
+#define LOG_INF(...) log_message(__VA_ARGS__)
+#define LOG_WRN(...) log_message(__VA_ARGS__)
+#define LOG_DBG(...) log_message(__VA_ARGS__)
+#define LOG_ERR(...) log_message(__VA_ARGS__)
 #define TPS_CALCULATION_INTERVAL_MS 1000
 #define ATOMIC_INIT(x) (x)
+#define TDMA_ENABLED 0
+#define ESB_COMPOSITE_TYPE 0xfe
+#define TEST_ALL_JOIN_CONFIG_GRACE_MS 1500
 #define K_SEM_DEFINE(name, initial, maximum) struct fixture_sem name = {initial}
 
 typedef int32_t atomic_t;
@@ -37,7 +43,7 @@ static uint8_t last_packet_sequence[MAX_TRACKERS];
 static bool sequence_initialized[MAX_TRACKERS];
 static int tdma_rx_discontinuity_pending, channel_change_pending;
 static int atomic_set(int *value, int next) { int old = *value; *value = next; return old; }
-struct payload { uint8_t data[64]; unsigned length; uint8_t pipe; };
+struct esb_payload { uint8_t data[64]; uint8_t length, pipe; int8_t rssi; };
 static int atomic_or(int *value, int bits) { int old = *value; *value |= bits; return old; }
 static int atomic_and(int *value, int bits) { int old = *value; *value &= bits; return old; }
 static unsigned sched_depth;
@@ -101,6 +107,44 @@ static void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth =
 static void k_sem_give(struct fixture_sem *sem) { assert(!irq_depth); sem->count = 1; }
 static void hid_reset_rssi_smooth(uint8_t id) { assert(irq_depth == 0); }
 static void tdma_sync_stats_reset(void) {}
+struct tdma_stats { uint32_t count; };
+static struct tdma_stats g_tdma_stats[MAX_TRACKERS];
+static int32_t g_last_ping_rx_time_diff_ticks[MAX_TRACKERS];
+static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS];
+static uint32_t g_ping_isr_rx_ticks[MAX_TRACKERS];
+static bool g_ping_isr_rx_ticks_valid[MAX_TRACKERS];
+static uint8_t g_bias_ppb_valid[MAX_TRACKERS], g_ping_dirty_streak[MAX_TRACKERS];
+static int32_t g_bias_ppb[MAX_TRACKERS], g_bias_ref_offset[MAX_TRACKERS];
+static uint32_t g_bias_ref_ticks[MAX_TRACKERS], g_last_ping_isr_rx_ticks_raw[MAX_TRACKERS];
+static uint32_t g_ping_reject_count[MAX_TRACKERS], pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
+static uint64_t last_ping_time[MAX_TRACKERS];
+static atomic_t test_all_confirmed_mask, test_all_ready_after_ms[MAX_TRACKERS];
+static uint8_t tracker_remote_command[MAX_TRACKERS], pending_cmd_arg[MAX_TRACKERS];
+static uint16_t tracker_test_on_tps[MAX_TRACKERS], metadata_active_token[MAX_TRACKERS];
+static uint8_t metadata_active_mask[MAX_TRACKERS], metadata_active_chunk[MAX_TRACKERS];
+static void (*remote_confirm_cb)(uint8_t, uint8_t);
+static uint32_t sys_get_be32(const uint8_t *p)
+{
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *p, size_t n)
+{
+	while (n--) {
+		crc ^= *p++;
+		for (unsigned i = 0; i < 8; ++i)
+			crc = (uint8_t)((crc << 1) ^ ((crc & 0x80) ? 0x07 : 0));
+	}
+	return crc;
+}
+static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return ticks; }
+static uint16_t test_all_wire_tps(void) { return 0; }
+static void remote_wom_receive(uint8_t id, uint8_t flag, const uint8_t *data, uint8_t counter) {}
+static const char *esb_pong_flag_name(uint8_t flag) { return "command"; }
+static void tdma_check_slot(uint8_t id, uint32_t ticks, int8_t rssi) {}
+static bool tracker_events_receive(const uint8_t *data, uint8_t length, uint32_t at) { return false; }
+static unsigned fixture_pose_count;
+static void hid_write_packet_n(const uint8_t *packet, int8_t rssi) { ++fixture_pose_count; }
+
 
 /* PRODUCTION BODIES */
 
@@ -386,6 +430,7 @@ static void sequence_lifetime(void)
 
 static void blackout_reanchor(void)
 {
+	stored_trackers = MAX_TRACKERS;
 	const unsigned offsets[] = {0, 1, 80, 81, 192, 193, 220, 255, 256, 257};
 	for (unsigned o = 0; o < ARRAY_SIZE(offsets); ++o) {
 		for (unsigned t = 0; t < MAX_TRACKERS; ++t) {
@@ -397,9 +442,11 @@ static void blackout_reanchor(void)
 		assert(auto_loss_reset_epoch != epoch);
 		for (unsigned t = 0; t < MAX_TRACKERS; ++t) {
 			uint8_t seq = (uint8_t)(100 + offsets[o]);
-			struct payload p = {.length = 20, .pipe = 1 + t % 7};
+			struct esb_payload p = {.length = 20, .pipe = 1 + t % 7};
+			p.data[0] = ESB_COMPOSITE_TYPE; p.data[1] = t; p.data[2] = 2;
+			p.data[3] = 0; p.data[17] = 0x99;
 			p.data[t & 1 ? 19 : 16] = seq;
-			bool (*admit)(uint8_t, struct payload) = t & 1 ? composite_admit : normal_admit;
+			bool (*admit)(uint8_t, struct esb_payload) = t & 1 ? composite_admit : normal_admit;
 			uint32_t gaps = tracker_stats[t].total_gaps;
 			uint32_t restarts = tracker_stats[t].restart_events;
 			assert(admit(t, p));
@@ -421,7 +468,7 @@ static void blackout_reanchor(void)
 
 static void ingress_membership(void)
 {
-	struct payload p = {.length = 20, .pipe = 1};
+	struct esb_payload p = {.length = 20, .pipe = 1};
 	p.data[16] = 10;
 	assert(normal_admit(1, p)); /* Forwarded, but wrong-pipe evidence is ignored. */
 	assert(!atomic_get(&tdma_shadow_pending_join_mask));
@@ -433,6 +480,8 @@ static void ingress_membership(void)
 	assert(tdma_membership_deadline_armed && tdma_membership_wake.count == 1);
 	uint32_t deadline = tdma_membership_deadline_ms;
 	now += 10;
+	p.data[0] = ESB_COMPOSITE_TYPE; p.data[1] = 2; p.data[2] = 2;
+	p.data[3] = 0; p.data[17] = 0x99;
 	p.pipe = 1;
 	p.data[19] = 40;
 	assert(composite_admit(2, p));

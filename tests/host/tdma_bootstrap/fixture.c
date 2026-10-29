@@ -11,6 +11,8 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define ATOMIC_INIT(x) (x)
+#define TDMA_ENABLED 0
+#define ARG_UNUSED(x) ((void)(x))
 #define K_FOREVER 0
 static void log_message(const char *format, ...) { (void)format; }
 #define LOG_INF(...) log_message(__VA_ARGS__)
@@ -99,7 +101,7 @@ static void test_all_update_effective(uint8_t slots, int64_t at, bool layout_cha
     ++effective_updates;
     last_effective_slots = slots;
 }
-static struct { uint8_t data[13], length, pipe; } rx_payload;
+static struct esb_payload { uint8_t data[13], length, pipe; } rx_payload;
 static uint32_t pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
 static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t length)
 {
@@ -110,6 +112,33 @@ static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t length)
     }
     return crc;
 }
+struct tdma_stats { uint32_t count; };
+static struct tdma_stats g_tdma_stats[MAX_TRACKERS];
+static int32_t g_last_ping_rx_time_diff_ticks[MAX_TRACKERS];
+static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS];
+static uint32_t g_ping_isr_rx_ticks[MAX_TRACKERS];
+static bool g_ping_isr_rx_ticks_valid[MAX_TRACKERS];
+static uint8_t g_bias_ppb_valid[MAX_TRACKERS], g_ping_dirty_streak[MAX_TRACKERS];
+static int32_t g_bias_ppb[MAX_TRACKERS], g_bias_ref_offset[MAX_TRACKERS];
+static uint32_t g_bias_ref_ticks[MAX_TRACKERS], g_last_ping_isr_rx_ticks_raw[MAX_TRACKERS];
+static uint32_t g_ping_reject_count[MAX_TRACKERS];
+static uint8_t last_ping_counter[MAX_TRACKERS], last_pong_queued_counter[MAX_TRACKERS];
+static bool ping_counter_initialized[MAX_TRACKERS], sequence_initialized[MAX_TRACKERS];
+static uint64_t last_ping_time[MAX_TRACKERS];
+static uint32_t decision_ready_mask, decision_fence_mask;
+static struct { uint32_t restart_events; } tracker_stats[MAX_TRACKERS];
+static atomic_t test_all_state_valid, test_all_confirmed_mask;
+static uint8_t tracker_remote_command[MAX_TRACKERS], pending_cmd_arg[MAX_TRACKERS];
+static uint16_t tracker_test_on_tps[MAX_TRACKERS], metadata_active_token[MAX_TRACKERS];
+static uint8_t metadata_active_mask[MAX_TRACKERS], metadata_active_chunk[MAX_TRACKERS];
+static void (*remote_confirm_cb)(uint8_t, uint8_t);
+static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return ticks; }
+static void test_all_invalidate_tracker(uint8_t id, int64_t at) { (void)id; (void)at; }
+static uint16_t test_all_wire_tps(void) { return 0; }
+static void remote_wom_receive(uint8_t id, uint8_t flag, const uint8_t *data, uint8_t counter)
+{ (void)id; (void)flag; (void)data; (void)counter; }
+static const char *esb_pong_flag_name(uint8_t flag) { (void)flag; return "command"; }
+
 
 /* PRODUCTION DECLARATIONS */
 /* PRODUCTION FUNCTIONS */
@@ -139,6 +168,14 @@ static void reset_fixture(uint8_t count, uint64_t time)
     loss_invalidations = membership_notifications = effective_updates = 0;
     last_notified_mask = 0; last_effective_slots = 0;
     memset(pipe_mismatch_count, 0, sizeof(pipe_mismatch_count));
+    memset(ping_counter_initialized, 0, sizeof(ping_counter_initialized));
+    memset(last_ping_counter, 0, sizeof(last_ping_counter));
+    memset(last_ping_time, 0, sizeof(last_ping_time));
+    memset(last_pong_queued_counter, 0, sizeof(last_pong_queued_counter));
+    memset(g_last_ping_rx_time_diff_valid, 0, sizeof(g_last_ping_rx_time_diff_valid));
+    memset(g_ping_isr_rx_ticks_valid, 0, sizeof(g_ping_isr_rx_ticks_valid));
+    memset(g_bias_ppb_valid, 0, sizeof(g_bias_ppb_valid));
+    memset(g_ping_dirty_streak, 0, sizeof(g_ping_dirty_streak));
     memset(crc_error_count, 0, sizeof(crc_error_count));
 }
 

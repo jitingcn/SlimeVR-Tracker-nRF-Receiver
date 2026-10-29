@@ -56,16 +56,23 @@ for line in header.splitlines():
     match = re.match(r"#define (ESB_(?:(?:PING|PONG|RAW|OTA|CHANNEL_CONFIRM|WOM_TIMEOUT)_\w+|WOM_ENTER))\s+", line)
     if match and not re.search(r"#define\s+" + match[1] + r"\b", prelude):
         defines.append(line)
+defines.extend(re.findall(r'^#define (?:PING_TIMEOUT_MS|PING_CLEAN_REACQUIRE_STREAK)\b[^\n]*',
+                          source, re.MULTILINE))
 prelude = "\n".join(defines) + "\n" + prelude
 production += "\n" + extract.function(source, "esb_ack_handler_cb")
-start = source.index("if (ping_ack_flag != ESB_PONG_FLAG_NORMAL")
-production += "\nstatic void echo(uint8_t tracker_id, uint8_t ping_ack_flag) {\n"
-production += "struct payload rx_payload = {0};\n"
-production += "rx_payload.data[7] = ping_ack_flag;\n"
-start_mask = source.index("uint8_t ping_ack_flag = rx_payload.data[7]")
-production += source[start_mask:source.index(";", start_mask) + 1].replace(
-    "uint8_t ping_ack_flag =", "ping_ack_flag =") + "\n"
-production += extract.block(source, start) + "\n}\n"
+production += "\n" + extract.function(source, "account_ping_clock")
+production += "\n" + extract.function(source, "esb_receive_ping")
+production += """
+static void echo(uint8_t tracker_id, uint8_t flag) {
+    struct esb_payload packet = {.length = ESB_PING_LEN, .pipe = 1 + tracker_id % 7};
+    packet.data[0] = ESB_PING_TYPE;
+    packet.data[1] = tracker_id;
+    packet.data[2] = ++echo_counter[tracker_id];
+    packet.data[7] = flag;
+    packet.data[ESB_PING_LEN - 1] = crc8_ccitt(0x07, packet.data, ESB_PING_LEN - 1);
+    esb_receive_ping(&packet, (uint32_t)now);
+}
+"""
 control = (ROOT / "src/rcv_cmd.c").read_text()
 production += "\nuint8_t rcv_cmd_collect_stop(void);\nuint8_t rcv_cmd_collect_batch_stop(void);\n"
 production += "\n".join(extract.function(control, name) for name in (

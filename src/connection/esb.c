@@ -2233,6 +2233,392 @@ static void account_ping_clock(uint8_t tracker_id, uint32_t expected_rx_ticks, u
 #endif
 }
 
+static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_ticks)
+{
+	uint8_t tracker_id = payload->data[1];
+	uint8_t counter = payload->data[2];
+
+	uint8_t ping_ack_flag = payload->data[7] & ESB_PING_COMMAND_MASK;
+
+	/* ack_handler clamps; this path must too before any [MAX_TRACKERS] index. */
+	if (tracker_id >= MAX_TRACKERS) {
+		return;
+	}
+
+	if (payload->pipe != 1 + (tracker_id % 7)) {
+		pipe_mismatch_count[tracker_id]++;
+		LOG_DBG(
+			"PING pipe mismatch (x%u): id=%u, expected "
+			"pipe=%u got pipe=%u",
+			pipe_mismatch_count[tracker_id],
+			tracker_id,
+			1 + (tracker_id % 7),
+			payload->pipe
+		);
+	}
+
+	// check crc for PING
+	uint8_t crc_calc = crc8_ccitt(0x07, payload->data, ESB_PING_LEN - 1);
+	if (payload->data[ESB_PING_LEN - 1] != crc_calc) {
+		// CRC error - only log warning if consecutive errors occur
+		crc_error_count[tracker_id]++;
+
+		LOG_DBG(
+			"PING CRC mismatch (x%u): id=%u expected %02X got %02X",
+			crc_error_count[tracker_id],
+			tracker_id,
+			crc_calc,
+			payload->data[ESB_PING_LEN - 1]
+		);
+		return;
+	}
+	uint32_t expected_rx_ticks = sys_get_be32(&payload->data[3]);
+	if (payload->pipe == 1 + (tracker_id % 7)) {
+		account_ping_clock(tracker_id, expected_rx_ticks, event_ticks);
+		tdma_shadow_observe(tracker_id, TDMA_SHADOW_EVIDENCE_PING);
+	}
+	// Calculate signed ticks difference
+	int32_t ticks_diff = (int32_t)event_ticks - (int32_t)expected_rx_ticks;
+	// Get absolute value for conversion to microseconds
+	uint32_t ticks_diff_abs = (uint32_t)(ticks_diff < 0 ? -ticks_diff : ticks_diff);
+	LOG_DBG(
+		"Tracker %u PING ctr=%u ticks_offset=%s%d us",
+		tracker_id,
+		counter,
+		ticks_diff >= 0 ? "+" : "-",          // Add sign to the log
+		k_ticks_to_us_floor32(ticks_diff_abs) // Convert absolute tick difference to microseconds
+	);
+
+	// First PING received for this tracker - accept directly, no sequence check
+	if (!ping_counter_initialized[tracker_id]) {
+		ping_counter_initialized[tracker_id] = true;
+		last_ping_counter[tracker_id] = counter;
+		last_ping_time[tracker_id] = k_uptime_get();
+		last_pong_queued_counter[tracker_id] = 0xFF; // Mark as not queued
+		LOG_DBG("First PING from tracker %u, ctr=%u, initializing", tracker_id, counter);
+		// Continue processing, send PONG
+	} else {
+		// Already initialized, perform sequence check
+		uint64_t current_time = k_uptime_get();
+		bool is_duplicate = false;
+		bool is_out_of_order = false;
+		bool is_large_gap = false;
+		bool is_tracker_restart = false;
+
+		// Check for timeout - if no PING received for more than 5 seconds, reset expectation
+		if (last_ping_time[tracker_id] > 0
+			&& (current_time - last_ping_time[tracker_id]) > PING_TIMEOUT_MS) {
+			LOG_WRN(
+				"PING timeout (%llu ms), resetting tracker %u counter tracking",
+				current_time - last_ping_time[tracker_id],
+				tracker_id
+			);
+			last_ping_counter[tracker_id] = counter;
+			last_ping_time[tracker_id] = current_time;
+			last_pong_queued_counter[tracker_id] = 0xFF;
+			if (atomic_get(&test_all_state_valid)) {
+				test_all_invalidate_tracker(tracker_id, (int64_t)current_time);
+			}
+			// Continue processing this PING
+		} else {
+			// Calculate difference
+			int counter_diff = (int)counter - (int)last_ping_counter[tracker_id];
+			if (counter_diff < 0) {
+				counter_diff += 256; // Handle wrap-around
+			}
+
+			if (counter_diff == 0) {
+				// Duplicate packet
+				is_duplicate = true;
+			} else if (counter_diff >= 1 && counter_diff <= 100) {
+				// Normal progression (possible packet loss)
+				if (counter_diff > 5) {
+					is_large_gap = true;
+				}
+			} else if (counter_diff > 128) {
+				// Possibly backward or wrap-around
+				int backward_amount = 256 - counter_diff;
+
+				if (backward_amount <= 10) {
+					// Small backward step - truly out of order
+					is_out_of_order = true;
+				} else if (counter < 5) {
+					// Large backward step and small counter - possibly a restart
+					is_tracker_restart = true;
+					LOG_DBG(
+						"Tracker restart detected: id=%u old_ctr=%u new_ctr=%u (backward=%d)",
+						tracker_id,
+						last_ping_counter[tracker_id],
+						counter,
+						backward_amount
+					);
+				} else {
+					// Large backward step but counter not small - long packet loss + wrap-around
+					is_large_gap = true;
+					LOG_DBG(
+						"Long packet loss with wraparound: id=%u last=%u new=%u (backward=%d, "
+						"accepting)",
+						tracker_id,
+						last_ping_counter[tracker_id],
+						counter,
+						backward_amount
+					);
+				}
+			} else {
+				// counter_diff is between 101-128 - large packet loss
+				is_large_gap = true;
+			}
+
+			// Update timestamp
+			last_ping_time[tracker_id] = current_time;
+		}
+
+		// Handle various cases
+		if (is_tracker_restart) {
+			// Tracker restarted, reset counter tracking
+			last_ping_counter[tracker_id] = counter;
+			// Reset PONG queue tracking
+			last_pong_queued_counter[tracker_id] = 0xFF;
+			/* The first data sequence after reboot is unrelated to
+			 * the old stream; retain totals but re-anchor admission. */
+			sequence_initialized[tracker_id] = false;
+			decision_ready_mask &= ~BIT(tracker_id);
+			decision_fence_mask |= BIT(tracker_id);
+			tracker_stats[tracker_id].restart_events++;
+			if (atomic_get(&test_all_state_valid)) {
+				test_all_invalidate_tracker(tracker_id, (int64_t)current_time);
+			}
+			// Continue processing this PING, send PONG
+		} else if (is_duplicate) {
+			// Same counter as last time - likely a retransmit
+			LOG_DBG("Duplicate PING detected: id=%u ctr=%u (retransmit or retry)", tracker_id, counter);
+
+			// Check if we already queued a PONG for this counter
+			if (counter == last_pong_queued_counter[tracker_id]) {
+				LOG_DBG("PONG already queued for ctr=%u, skipping duplicate queue", counter);
+				// Don't queue again, tracker will get PONG on next packet
+				return;
+			}
+		} else if (is_out_of_order) {
+			// Out-of-order PING - this is an old packet that arrived late
+			// Don't process it to avoid sending stale PONG
+			int backward_amount = 256 - ((int)counter - (int)last_ping_counter[tracker_id] + 256) % 256;
+			LOG_WRN(
+				"Out-of-order PING: id=%u ctr=%u (expected >%u, -%d backward), SKIPPING",
+				tracker_id,
+				counter,
+				last_ping_counter[tracker_id],
+				backward_amount
+			);
+			// Don't update last_ping_counter, don't queue PONG
+			return;
+		} else if (is_large_gap) {
+			// Large gap detected - possible packet loss
+			int counter_diff = (int)counter - (int)last_ping_counter[tracker_id];
+			if (counter_diff < 0) {
+				counter_diff += 256;
+			}
+			if (counter_diff > 10) {
+				LOG_WRN(
+					"Large PING counter gap: id=%u last=%u new=%u (gap=%d)",
+					tracker_id,
+					last_ping_counter[tracker_id],
+					counter,
+					counter_diff
+				);
+			}
+		}
+
+		// Update last seen counter (only if not out-of-order and not skipped)
+		if (!is_out_of_order) {
+			last_ping_counter[tracker_id] = counter;
+		}
+	} // End of else branch for ping_counter_initialized
+
+	remote_wom_receive(tracker_id, ping_ack_flag, &payload->data[8], counter);
+	if (ping_ack_flag == ESB_PONG_FLAG_METADATA_REQUEST) {
+		uint16_t echoed_token = ((uint16_t)payload->data[10] << 8) | payload->data[11];
+		bool metadata_matches = metadata_active_mask[tracker_id] != 0 &&
+			payload->data[8] == metadata_active_mask[tracker_id] &&
+			payload->data[9] == metadata_active_chunk[tracker_id] &&
+			echoed_token == metadata_active_token[tracker_id];
+		if (metadata_matches) {
+			metadata_active_mask[tracker_id] = 0;
+			LOG_DBG("Tracker %u confirmed metadata token=%u", tracker_id, echoed_token);
+		}
+	}
+	if (ping_ack_flag != ESB_PONG_FLAG_NORMAL &&
+	    ping_ack_flag != ESB_PONG_FLAG_WOM_CONTROL &&
+	    ping_ack_flag != ESB_PING_FLAG_WOM_RESULT &&
+	    ping_ack_flag != ESB_PING_FLAG_WOM_ERROR) {
+		uint16_t ping_ack_tps = ping_ack_flag == ESB_PONG_FLAG_TEST_MODE_ON
+			? ((uint16_t)payload->data[8] << 8) | payload->data[9] : 0;
+		bool test_payload_matches = ping_ack_flag != ESB_PONG_FLAG_TEST_MODE_ON
+			|| ping_ack_tps == tracker_test_on_tps[tracker_id];
+		bool batch_payload_matches = ping_ack_flag != ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
+			|| payload->data[8] == pending_cmd_arg[tracker_id];
+		if (tracker_remote_command[tracker_id] == ping_ack_flag
+		    && test_payload_matches && batch_payload_matches) {
+			tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
+			/* Confirmations are frequent under load — keep UART off EVENT IRQ. */
+			LOG_DBG(
+				"Tracker %u confirmed command %s (0x%02X)",
+				tracker_id,
+				esb_pong_flag_name(ping_ack_flag),
+				ping_ack_flag
+			);
+			if (atomic_get(&test_all_state_valid)) {
+				bool confirms_all = ping_ack_flag == ESB_PONG_FLAG_TEST_MODE_OFF
+					&& !atomic_get(&test_all_enabled);
+				confirms_all = confirms_all
+					|| (ping_ack_flag == ESB_PONG_FLAG_TEST_MODE_ON
+						&& atomic_get(&test_all_enabled)
+						&& ping_ack_tps == test_all_wire_tps());
+				if (confirms_all) {
+					atomic_or(&test_all_confirmed_mask, BIT(tracker_id));
+				}
+			}
+			if (remote_confirm_cb) {
+				remote_confirm_cb(tracker_id, ping_ack_flag);
+			}
+
+		}
+	}
+
+	/* PONG is now built by ack_handler in radio ISR context.
+	 * event_handler only needs to track sequence state. */
+	last_pong_queued_counter[tracker_id] = counter;
+}
+
+static void esb_receive_composite(const struct esb_payload *payload, uint32_t event_ticks)
+{
+	/* Composite packet (type ESB_COMPOSITE_TYPE): variable length.
+	 * Format: [ESB_COMPOSITE_TYPE][tracker_id][sub_count][sub_type0][sub_data0...]...[sequence]
+	 * Each sub-packet: 1 byte type + variable data.
+	 */
+	if (payload->length < 5 || payload->data[0] != ESB_COMPOSITE_TYPE) {
+		LOG_ERR("Wrong packet length: %d", payload->length);
+		return;
+	}
+
+	uint8_t tracker_id = payload->data[1];
+	uint8_t sub_count = payload->data[2];
+
+	if (tracker_id >= stored_trackers || tracker_id >= MAX_TRACKERS) {
+		return;
+	}
+
+	/* Validate known records before side effects. Unknown legacy tails
+	 * stop parsing, preserving the known prefix and pose accounting.
+	 * A reachable E0 must still be a valid, exact final record. */
+	int scan = 3;
+	int event_pos = 0;
+	int frame_end = payload->length - 1;
+	bool valid = sub_count != 0;
+	bool unknown_tail = false;
+	for (int i = 0; valid && i < sub_count; i++) {
+		if (scan >= frame_end) {
+			valid = false;
+			break;
+		}
+		uint8_t type = payload->data[scan++];
+		int body_len = composite_body_length(type);
+		if (body_len < 0) {
+			unknown_tail = true;
+			break;
+		}
+		if (scan + body_len > frame_end) {
+			valid = false;
+			break;
+		}
+		if (type == TRACKER_EVENT_ESB_TYPE) {
+			struct tracker_event decoded;
+			valid = i == sub_count - 1
+				&& tracker_event_decode_body(tracker_id, &payload->data[scan],
+				                            body_len, &decoded);
+			event_pos = scan;
+		}
+		scan += body_len;
+	}
+	if (!valid || (!unknown_tail && scan != frame_end)) {
+		return;
+	}
+	if (event_pos != 0) {
+		uint8_t event_packet[TRACKER_EVENT_ESB_LEN] = {
+			TRACKER_EVENT_ESB_TYPE, tracker_id
+		};
+		memcpy(&event_packet[2], &payload->data[event_pos], TRACKER_EVENT_BODY_LEN);
+		tracker_events_receive(event_packet, sizeof(event_packet), k_uptime_get_32());
+		/* Event retries have their own sequence and are not pose evidence. */
+		if (--sub_count == 0) {
+			return;
+		}
+	}
+	tdma_check_slot(tracker_id, event_ticks, payload->rssi);
+
+	LOG_DBG("Received composite packet from tracker %d with %d sub-packets", tracker_id, sub_count);
+
+	/* Sequence byte is at the very end of the composite packet */
+	uint8_t received_sequence = payload->data[payload->length - 1];
+	int seq_result = check_packet_sequence(tracker_id, received_sequence);
+	if (payload->pipe == 1 + (tracker_id % 7)) {
+		tdma_shadow_observe(tracker_id, TDMA_SHADOW_EVIDENCE_DATA);
+	}
+	/* seq_result: 0=normal, 1=potential loss, 2=out of order, 3=reboot, 4=duplicate */
+	if (seq_result == 4) {
+		LOG_WRN("TRK %d: Duplicate composite packet seq=%d, dropped", tracker_id, received_sequence);
+		return; /* duplicate */
+	}
+	if (seq_result == 2) {
+		LOG_WRN("TRK %d: Composite packet seq=%d is out-of-order, dropped", tracker_id, received_sequence);
+		return; /* out-of-order */
+	}
+
+	if (seq_result == 3 && atomic_get(&test_all_state_valid)) {
+		/* Same as the normal data path above: drop the sticky
+		 * confirmation and re-arm the grace, leaving any pending
+		 * command publication alone. */
+		atomic_and(&test_all_confirmed_mask, (atomic_val_t)~BIT(tracker_id));
+		atomic_set(
+			&test_all_ready_after_ms[tracker_id],
+			(atomic_val_t)((uint32_t)k_uptime_get() + TEST_ALL_JOIN_CONFIG_GRACE_MS)
+		);
+	}
+
+	/* Parse sub-packets and reconstruct standard 16-byte packets */
+	int pos = 3;                     /* skip header: type, id, sub_count */
+	int end = payload->length - 1; /* exclude sequence byte */
+
+	for (int i = 0; i < sub_count && pos < end; i++) {
+		uint8_t sub_type = payload->data[pos++];
+		int sub_len = composite_body_length(sub_type);
+
+		if (sub_len < 0 || pos + sub_len > end) {
+			break;
+		}
+
+		/* Reconstruct a standard 16-byte packet */
+		uint8_t pkt[16] = {0};
+		pkt[0] = sub_type;
+		pkt[1] = tracker_id;
+		memcpy(&pkt[2], &payload->data[pos], MIN(sub_len, 14));
+
+		/* For status packets (type 3), fill packet loss stats */
+		if (sub_type == 3) {
+			struct packet_stats *stats = &tracker_stats[tracker_id];
+			pkt[4] = stats->status_received;
+			pkt[5] = stats->status_lost;
+			pkt[6] = 0;
+			pkt[7] = 0;
+			stats->status_received = 0;
+			stats->status_lost = 0;
+		}
+
+		hid_write_packet_n(pkt, payload->rssi);
+		pos += sub_len;
+	}
+}
+
 void event_handler(struct esb_evt const *event)
 {
 	switch (event->evt_id) {
@@ -2277,7 +2663,8 @@ void event_handler(struct esb_evt const *event)
 				continue;
 			}
 			if (!discovery && rx_payload.data[0] == ESB_COMPOSITE_TYPE) {
-				goto handle_composite_packet;
+				esb_receive_composite(&rx_payload, current_rx_ticks);
+				continue;
 			}
 			switch (rx_payload.length) {
 			case 1: // ACK packet
@@ -2375,259 +2762,7 @@ void event_handler(struct esb_evt const *event)
 
 				// Check for PING control packet and respond with PONG
 				if (rx_payload.data[0] == ESB_PING_TYPE) {
-					uint8_t tracker_id = rx_payload.data[1];
-					uint8_t counter = rx_payload.data[2];
-
-					uint8_t ping_ack_flag = rx_payload.data[7] & ESB_PING_COMMAND_MASK;
-
-					/* ack_handler clamps; this path must too before any [MAX_TRACKERS] index. */
-					if (tracker_id >= MAX_TRACKERS) {
-						break;
-					}
-
-					if (rx_payload.pipe != 1 + (tracker_id % 7)) {
-						pipe_mismatch_count[tracker_id]++;
-						LOG_DBG(
-							"PING pipe mismatch (x%u): id=%u, expected "
-							"pipe=%u got pipe=%u",
-							pipe_mismatch_count[tracker_id],
-							tracker_id,
-							1 + (tracker_id % 7),
-							rx_payload.pipe
-						);
-					}
-
-					// check crc for PING
-					uint8_t crc_calc = crc8_ccitt(0x07, rx_payload.data, ESB_PING_LEN - 1);
-					if (rx_payload.data[ESB_PING_LEN - 1] != crc_calc) {
-						// CRC error - only log warning if consecutive errors occur
-						crc_error_count[tracker_id]++;
-
-						LOG_DBG(
-							"PING CRC mismatch (x%u): id=%u expected %02X got %02X",
-							crc_error_count[tracker_id],
-							tracker_id,
-							crc_calc,
-							rx_payload.data[ESB_PING_LEN - 1]
-						);
-						break;
-					}
-					uint32_t expected_rx_ticks = sys_get_be32(&rx_payload.data[3]);
-					if (rx_payload.pipe == 1 + (tracker_id % 7)) {
-						account_ping_clock(tracker_id, expected_rx_ticks, current_rx_ticks);
-						tdma_shadow_observe(tracker_id, TDMA_SHADOW_EVIDENCE_PING);
-					}
-					// Calculate signed ticks difference
-					int32_t ticks_diff = (int32_t)current_rx_ticks - (int32_t)expected_rx_ticks;
-					// Get absolute value for conversion to microseconds
-					uint32_t ticks_diff_abs = (uint32_t)(ticks_diff < 0 ? -ticks_diff : ticks_diff);
-					LOG_DBG(
-						"Tracker %u PING ctr=%u ticks_offset=%s%d us",
-						tracker_id,
-						counter,
-						ticks_diff >= 0 ? "+" : "-",          // Add sign to the log
-						k_ticks_to_us_floor32(ticks_diff_abs) // Convert absolute tick difference to microseconds
-					);
-
-					// First PING received for this tracker - accept directly, no sequence check
-					if (!ping_counter_initialized[tracker_id]) {
-						ping_counter_initialized[tracker_id] = true;
-						last_ping_counter[tracker_id] = counter;
-						last_ping_time[tracker_id] = k_uptime_get();
-						last_pong_queued_counter[tracker_id] = 0xFF; // Mark as not queued
-						LOG_DBG("First PING from tracker %u, ctr=%u, initializing", tracker_id, counter);
-						// Continue processing, send PONG
-					} else {
-						// Already initialized, perform sequence check
-						uint64_t current_time = k_uptime_get();
-						bool is_duplicate = false;
-						bool is_out_of_order = false;
-						bool is_large_gap = false;
-						bool is_tracker_restart = false;
-
-						// Check for timeout - if no PING received for more than 5 seconds, reset expectation
-						if (last_ping_time[tracker_id] > 0
-							&& (current_time - last_ping_time[tracker_id]) > PING_TIMEOUT_MS) {
-							LOG_WRN(
-								"PING timeout (%llu ms), resetting tracker %u counter tracking",
-								current_time - last_ping_time[tracker_id],
-								tracker_id
-							);
-							last_ping_counter[tracker_id] = counter;
-							last_ping_time[tracker_id] = current_time;
-							last_pong_queued_counter[tracker_id] = 0xFF;
-							if (atomic_get(&test_all_state_valid)) {
-								test_all_invalidate_tracker(tracker_id, (int64_t)current_time);
-							}
-							// Continue processing this PING
-						} else {
-							// Calculate difference
-							int counter_diff = (int)counter - (int)last_ping_counter[tracker_id];
-							if (counter_diff < 0) {
-								counter_diff += 256; // Handle wrap-around
-							}
-
-							if (counter_diff == 0) {
-								// Duplicate packet
-								is_duplicate = true;
-							} else if (counter_diff >= 1 && counter_diff <= 100) {
-								// Normal progression (possible packet loss)
-								if (counter_diff > 5) {
-									is_large_gap = true;
-								}
-							} else if (counter_diff > 128) {
-								// Possibly backward or wrap-around
-								int backward_amount = 256 - counter_diff;
-
-								if (backward_amount <= 10) {
-									// Small backward step - truly out of order
-									is_out_of_order = true;
-								} else if (counter < 5) {
-									// Large backward step and small counter - possibly a restart
-									is_tracker_restart = true;
-									LOG_DBG(
-										"Tracker restart detected: id=%u old_ctr=%u new_ctr=%u (backward=%d)",
-										tracker_id,
-										last_ping_counter[tracker_id],
-										counter,
-										backward_amount
-									);
-								} else {
-									// Large backward step but counter not small - long packet loss + wrap-around
-									is_large_gap = true;
-									LOG_DBG(
-										"Long packet loss with wraparound: id=%u last=%u new=%u (backward=%d, "
-										"accepting)",
-										tracker_id,
-										last_ping_counter[tracker_id],
-										counter,
-										backward_amount
-									);
-								}
-							} else {
-								// counter_diff is between 101-128 - large packet loss
-								is_large_gap = true;
-							}
-
-							// Update timestamp
-							last_ping_time[tracker_id] = current_time;
-						}
-
-						// Handle various cases
-						if (is_tracker_restart) {
-							// Tracker restarted, reset counter tracking
-							last_ping_counter[tracker_id] = counter;
-							// Reset PONG queue tracking
-							last_pong_queued_counter[tracker_id] = 0xFF;
-							/* The first data sequence after reboot is unrelated to
-							 * the old stream; retain totals but re-anchor admission. */
-							sequence_initialized[tracker_id] = false;
-							decision_ready_mask &= ~BIT(tracker_id);
-							decision_fence_mask |= BIT(tracker_id);
-							tracker_stats[tracker_id].restart_events++;
-							if (atomic_get(&test_all_state_valid)) {
-								test_all_invalidate_tracker(tracker_id, (int64_t)current_time);
-							}
-							// Continue processing this PING, send PONG
-						} else if (is_duplicate) {
-							// Same counter as last time - likely a retransmit
-							LOG_DBG("Duplicate PING detected: id=%u ctr=%u (retransmit or retry)", tracker_id, counter);
-
-							// Check if we already queued a PONG for this counter
-							if (counter == last_pong_queued_counter[tracker_id]) {
-								LOG_DBG("PONG already queued for ctr=%u, skipping duplicate queue", counter);
-								// Don't queue again, tracker will get PONG on next packet
-								break;
-							}
-						} else if (is_out_of_order) {
-							// Out-of-order PING - this is an old packet that arrived late
-							// Don't process it to avoid sending stale PONG
-							int backward_amount = 256 - ((int)counter - (int)last_ping_counter[tracker_id] + 256) % 256;
-							LOG_WRN(
-								"Out-of-order PING: id=%u ctr=%u (expected >%u, -%d backward), SKIPPING",
-								tracker_id,
-								counter,
-								last_ping_counter[tracker_id],
-								backward_amount
-							);
-							// Don't update last_ping_counter, don't queue PONG
-							break;
-						} else if (is_large_gap) {
-							// Large gap detected - possible packet loss
-							int counter_diff = (int)counter - (int)last_ping_counter[tracker_id];
-							if (counter_diff < 0) {
-								counter_diff += 256;
-							}
-							if (counter_diff > 10) {
-								LOG_WRN(
-									"Large PING counter gap: id=%u last=%u new=%u (gap=%d)",
-									tracker_id,
-									last_ping_counter[tracker_id],
-									counter,
-									counter_diff
-								);
-							}
-						}
-
-						// Update last seen counter (only if not out-of-order and not skipped)
-						if (!is_out_of_order) {
-							last_ping_counter[tracker_id] = counter;
-						}
-					} // End of else branch for ping_counter_initialized
-
-					remote_wom_receive(tracker_id, ping_ack_flag, &rx_payload.data[8], counter);
-					if (ping_ack_flag == ESB_PONG_FLAG_METADATA_REQUEST) {
-						uint16_t echoed_token = ((uint16_t)rx_payload.data[10] << 8) | rx_payload.data[11];
-						bool metadata_matches = metadata_active_mask[tracker_id] != 0 &&
-							rx_payload.data[8] == metadata_active_mask[tracker_id] &&
-							rx_payload.data[9] == metadata_active_chunk[tracker_id] &&
-							echoed_token == metadata_active_token[tracker_id];
-						if (metadata_matches) {
-							metadata_active_mask[tracker_id] = 0;
-							LOG_DBG("Tracker %u confirmed metadata token=%u", tracker_id, echoed_token);
-						}
-					}
-					if (ping_ack_flag != ESB_PONG_FLAG_NORMAL &&
-					    ping_ack_flag != ESB_PONG_FLAG_WOM_CONTROL &&
-					    ping_ack_flag != ESB_PING_FLAG_WOM_RESULT &&
-					    ping_ack_flag != ESB_PING_FLAG_WOM_ERROR) {
-						uint16_t ping_ack_tps = ping_ack_flag == ESB_PONG_FLAG_TEST_MODE_ON
-							? ((uint16_t)rx_payload.data[8] << 8) | rx_payload.data[9] : 0;
-						bool test_payload_matches = ping_ack_flag != ESB_PONG_FLAG_TEST_MODE_ON
-							|| ping_ack_tps == tracker_test_on_tps[tracker_id];
-						bool batch_payload_matches = ping_ack_flag != ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
-							|| rx_payload.data[8] == pending_cmd_arg[tracker_id];
-						if (tracker_remote_command[tracker_id] == ping_ack_flag
-						    && test_payload_matches && batch_payload_matches) {
-							tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
-							/* Confirmations are frequent under load — keep UART off EVENT IRQ. */
-							LOG_DBG(
-								"Tracker %u confirmed command %s (0x%02X)",
-								tracker_id,
-								esb_pong_flag_name(ping_ack_flag),
-								ping_ack_flag
-							);
-							if (atomic_get(&test_all_state_valid)) {
-								bool confirms_all = ping_ack_flag == ESB_PONG_FLAG_TEST_MODE_OFF
-									&& !atomic_get(&test_all_enabled);
-								confirms_all = confirms_all
-									|| (ping_ack_flag == ESB_PONG_FLAG_TEST_MODE_ON
-										&& atomic_get(&test_all_enabled)
-										&& ping_ack_tps == test_all_wire_tps());
-								if (confirms_all) {
-									atomic_or(&test_all_confirmed_mask, BIT(tracker_id));
-								}
-							}
-							if (remote_confirm_cb) {
-								remote_confirm_cb(tracker_id, ping_ack_flag);
-							}
-
-						}
-					}
-
-					/* PONG is now built by ack_handler in radio ISR context.
-					 * event_handler only needs to track sequence state. */
-					last_pong_queued_counter[tracker_id] = counter;
+					esb_receive_ping(&rx_payload, current_rx_ticks);
 				}
 				/* Non-PING length-13 OTA types handled at case entry. */
 			} break;
@@ -2726,132 +2861,7 @@ void event_handler(struct esb_evt const *event)
 					}
 					break;
 				}
-			handle_composite_packet:
-				/* Composite packet (type ESB_COMPOSITE_TYPE): variable length.
-				 * Format: [ESB_COMPOSITE_TYPE][tracker_id][sub_count][sub_type0][sub_data0...]...[sequence]
-				 * Each sub-packet: 1 byte type + variable data.
-				 */
-				if (rx_payload.length < 5 || rx_payload.data[0] != ESB_COMPOSITE_TYPE) {
-					LOG_ERR("Wrong packet length: %d", rx_payload.length);
-					break;
-				}
-
-				uint8_t tracker_id = rx_payload.data[1];
-				uint8_t sub_count = rx_payload.data[2];
-
-				if (tracker_id >= stored_trackers || tracker_id >= MAX_TRACKERS) {
-					continue;
-				}
-
-				/* Validate known records before side effects. Unknown legacy tails
-				 * stop parsing, preserving the known prefix and pose accounting.
-				 * A reachable E0 must still be a valid, exact final record. */
-				int scan = 3;
-				int event_pos = 0;
-				int frame_end = rx_payload.length - 1;
-				bool valid = sub_count != 0;
-				bool unknown_tail = false;
-				for (int i = 0; valid && i < sub_count; i++) {
-					if (scan >= frame_end) {
-						valid = false;
-						break;
-					}
-					uint8_t type = rx_payload.data[scan++];
-					int body_len = composite_body_length(type);
-					if (body_len < 0) {
-						unknown_tail = true;
-						break;
-					}
-					if (scan + body_len > frame_end) {
-						valid = false;
-						break;
-					}
-					if (type == TRACKER_EVENT_ESB_TYPE) {
-						struct tracker_event decoded;
-						valid = i == sub_count - 1
-							&& tracker_event_decode_body(tracker_id, &rx_payload.data[scan],
-							                            body_len, &decoded);
-						event_pos = scan;
-					}
-					scan += body_len;
-				}
-				if (!valid || (!unknown_tail && scan != frame_end)) {
-					break;
-				}
-				if (event_pos != 0) {
-					uint8_t event_packet[TRACKER_EVENT_ESB_LEN] = {
-						TRACKER_EVENT_ESB_TYPE, tracker_id
-					};
-					memcpy(&event_packet[2], &rx_payload.data[event_pos], TRACKER_EVENT_BODY_LEN);
-					tracker_events_receive(event_packet, sizeof(event_packet), k_uptime_get_32());
-					/* Event retries have their own sequence and are not pose evidence. */
-					if (--sub_count == 0) {
-						break;
-					}
-				}
-				tdma_check_slot(tracker_id, current_rx_ticks, rx_payload.rssi);
-
-				LOG_DBG("Received composite packet from tracker %d with %d sub-packets", tracker_id, sub_count);
-
-				/* Sequence byte is at the very end of the composite packet */
-				uint8_t received_sequence = rx_payload.data[rx_payload.length - 1];
-				int seq_result = check_packet_sequence(tracker_id, received_sequence);
-				if (rx_payload.pipe == 1 + (tracker_id % 7)) {
-					tdma_shadow_observe(tracker_id, TDMA_SHADOW_EVIDENCE_DATA);
-				}
-				/* seq_result: 0=normal, 1=potential loss, 2=out of order, 3=reboot, 4=duplicate */
-				if (seq_result == 4) {
-					LOG_WRN("TRK %d: Duplicate composite packet seq=%d, dropped", tracker_id, received_sequence);
-					break; /* duplicate */
-				}
-				if (seq_result == 2) {
-					LOG_WRN("TRK %d: Composite packet seq=%d is out-of-order, dropped", tracker_id, received_sequence);
-					break; /* out-of-order */
-				}
-
-				if (seq_result == 3 && atomic_get(&test_all_state_valid)) {
-					/* Same as the normal data path above: drop the sticky
-					 * confirmation and re-arm the grace, leaving any pending
-					 * command publication alone. */
-					atomic_and(&test_all_confirmed_mask, (atomic_val_t)~BIT(tracker_id));
-					atomic_set(
-						&test_all_ready_after_ms[tracker_id],
-						(atomic_val_t)((uint32_t)k_uptime_get() + TEST_ALL_JOIN_CONFIG_GRACE_MS)
-					);
-				}
-
-				/* Parse sub-packets and reconstruct standard 16-byte packets */
-				int pos = 3;                     /* skip header: type, id, sub_count */
-				int end = rx_payload.length - 1; /* exclude sequence byte */
-
-				for (int i = 0; i < sub_count && pos < end; i++) {
-					uint8_t sub_type = rx_payload.data[pos++];
-					int sub_len = composite_body_length(sub_type);
-
-					if (sub_len < 0 || pos + sub_len > end) {
-						break;
-					}
-
-					/* Reconstruct a standard 16-byte packet */
-					uint8_t pkt[16] = {0};
-					pkt[0] = sub_type;
-					pkt[1] = tracker_id;
-					memcpy(&pkt[2], &rx_payload.data[pos], MIN(sub_len, 14));
-
-					/* For status packets (type 3), fill packet loss stats */
-					if (sub_type == 3) {
-						struct packet_stats *stats = &tracker_stats[tracker_id];
-						pkt[4] = stats->status_received;
-						pkt[5] = stats->status_lost;
-						pkt[6] = 0;
-						pkt[7] = 0;
-						stats->status_received = 0;
-						stats->status_lost = 0;
-					}
-
-					hid_write_packet_n(pkt, rx_payload.rssi);
-					pos += sub_len;
-				}
+				esb_receive_composite(&rx_payload, current_rx_ticks);
 			} break;
 			}
 		}

@@ -110,19 +110,10 @@ def production_bodies(source, header=''):
         raise ValueError('Missing production packet_stats structure')
     structure = block(source, structure_start.start()) + ';\n'
 
-    restart_start = re.search(r'\bif\s*\(\s*is_tracker_restart\s*\)\s*\{', source)
-    if restart_start is None:
-        raise ValueError('Missing production tracker restart branch')
-    restart = block(source, restart_start.start())
-    restart_wrapper = '\n'.join((
-        'static void restart_ping(uint8_t tracker_id)',
-        '{',
-        '    bool is_tracker_restart = true;',
-        '    uint8_t counter = 0;',
-        '    uint64_t current_time = now;',
-        restart,
-        '}',
-    ))
+    ping_constants = '\n'.join(re.findall(
+        r'^#define ESB_(?:PING|PONG)_\w+\b[^\n]*', header, re.MULTILINE))
+    ping_constants += '\n' + re.search(
+        r'^#define PING_CLEAN_REACQUIRE_STREAK\b[^\n]*', source, re.MULTILINE).group()
     snapshot = ''
     if header and 'struct esb_auto_loss_snapshot' in header:
         snapshot = '#define ESB_AUTO_LOSS_TRACKERS 16\n'
@@ -136,15 +127,32 @@ def production_bodies(source, header=''):
         snapshot += function(source, 'esb_auto_loss_rebase', optional=True)
         snapshot += function(source, 'esb_reset_all_stats')
 
-    admission = ''
-    for name, marker in (('normal_admit', 'uint8_t received_sequence = rx_payload.data[16];'),
-                         ('composite_admit', 'uint8_t received_sequence = rx_payload.data[rx_payload.length - 1];')):
-        start = source.index(marker)
-        end = source.index('if (seq_result == 3', start)
-        admission += (f'\nstatic bool {name}(uint8_t tracker_id, struct payload rx_payload) {{\n'
-                      'do {\n' + source[start:end] + 'return true;\n} while (0);\nreturn false;\n}\n')
+    start = source.index('uint8_t received_sequence = rx_payload.data[16];')
+    end = source.index('if (seq_result == 3', start)
+    admission = ('\nstatic bool normal_admit(uint8_t tracker_id, struct esb_payload rx_payload) {\n'
+                 'do {\n' + source[start:end] + 'return true;\n} while (0);\nreturn false;\n}\n')
+    admission += '''
+static bool composite_admit(uint8_t tracker_id, struct esb_payload payload) {
+    unsigned before = fixture_pose_count;
+    payload.data[1] = tracker_id;
+    esb_receive_composite(&payload, 0);
+    return fixture_pose_count != before;
+}
+static void restart_ping(uint8_t tracker_id) {
+    struct esb_payload payload = {.length = ESB_PING_LEN, .pipe = 0};
+    payload.data[0] = ESB_PING_TYPE;
+    payload.data[1] = tracker_id;
+    payload.data[ESB_PING_LEN - 1] = crc8_ccitt(0x07, payload.data, ESB_PING_LEN - 1);
+    ping_counter_initialized[tracker_id] = true;
+    last_ping_counter[tracker_id] = 100;
+    last_ping_time[tracker_id] = (uint64_t)now;
+    last_pong_queued_counter[tracker_id] = 0xff;
+    esb_receive_ping(&payload, 0);
+}
+'''
     return '\n'.join((
         constants,
+        ping_constants,
         membership_declarations(source),
         declarations,
         structure,
@@ -155,10 +163,13 @@ def production_bodies(source, header=''):
         function(source, 'tdma_loss_controller_update'),
         function(source, 'tdma_loss_controller_tick'),
         function(source, 'check_packet_sequence'),
-        restart_wrapper,
+        function(source, 'composite_body_length'),
         function(source, 'tdma_pack_config'),
         function(source, 'tdma_slot_ticks_for'),
         membership_bodies(source),
+        function(source, 'account_ping_clock'),
+        function(source, 'esb_receive_ping'),
+        function(source, 'esb_receive_composite'),
         function(source, 'tdma_recalculate'),
         admission,
     ))
@@ -198,7 +209,7 @@ def main():
             '-Wno-unused-variable',
             '-Wno-unused-parameter',
         ]
-        subprocess.run(compiler + flags + [str(generated), '-o', str(binary)], check=True)
+        subprocess.run(compiler + flags + ['-I', str(args.source_root / 'src'), str(generated), '-o', str(binary)], check=True)
         for case in args.case or CASES:
             subprocess.run([str(binary), case], check=True)
             print(f'PASS {case}', flush=True)

@@ -60,7 +60,7 @@ static void tdma_sync_stats_reset(void) { assert(!irq_depth); }
 static void esb_auto_loss_invalidate(void) { assert(irq_depth); }
 static void test_all_note_layout(uint32_t old, uint32_t next, int64_t at) { assert(!irq_depth); }
 static void test_all_update_effective(uint8_t count, int64_t at, bool changed) { assert(!irq_depth); }
-static struct { uint8_t data[72], length, rssi, pipe; } rx_payload;
+static struct esb_payload { uint8_t data[72], length, rssi, pipe; } rx_payload;
 static unsigned current_rx_ticks, sequence_calls, slot_calls, evidence_calls, pose_count;
 static int sequence_result;
 static uint8_t last_sequence, poses[8][16];
@@ -86,36 +86,36 @@ static void composite(void) {
     rx_payload.data[18]=0; memset(rx_payload.data+19,0x22,13);
     rx_payload.data[32]=0x99; rx_payload.data[33]=0xab;
     rx_payload.data[34]=42; rx_payload.length=35;
-    composite_receive();
+    esb_receive_composite(&rx_payload, current_rx_ticks);
     assert(pose_count==2 && poses[0][0]==1 && poses[1][0]==0);
     assert(poses[0][2]==0x11 && poses[1][2]==0x22);
     assert(sequence_calls==1 && last_sequence==42 && slot_calls==1 && evidence_calls==1);
     assert((uint32_t)atomic_get(&tdma_shadow_pending_join_mask)==BIT(2));
     assert((uint32_t)atomic_get(&tdma_shadow_live_evidence_mask)==BIT(2));
     assert(tdma_membership_deadline_armed && tdma_membership_wake.count==1);
-    sequence_result=4; composite_receive(); assert(pose_count==2 && sequence_calls==2);
-    sequence_result=2; composite_receive(); assert(pose_count==2 && sequence_calls==3);
+    sequence_result=4; esb_receive_composite(&rx_payload, current_rx_ticks); assert(pose_count==2 && sequence_calls==2);
+    sequence_result=2; esb_receive_composite(&rx_payload, current_rx_ticks); assert(pose_count==2 && sequence_calls==3);
     sequence_result=0;
     /* Known truncated records and malformed E0 reject the whole frame before
      * pose delivery/accounting, rather than consuming the valid prefix. */
-    rx_payload.data[32]=1; composite_receive();
+    rx_payload.data[32]=1; esb_receive_composite(&rx_payload, current_rx_ticks);
     assert(pose_count==2 && sequence_calls==3);
-    rx_payload.data[32]=TRACKER_EVENT_ESB_TYPE; composite_receive();
+    rx_payload.data[32]=TRACKER_EVENT_ESB_TYPE; esb_receive_composite(&rx_payload, current_rx_ticks);
     assert(pose_count==2 && sequence_calls==3);
     struct tracker_event e=event(1,CAL_EVENT_BEGIN); uint8_t packet[17];
     assert(tracker_event_encode(packet,&e));
     memcpy(rx_payload.data+33,packet+2,15); rx_payload.data[48]=43; rx_payload.length=49;
-    rx_payload.data[47]^=1; composite_receive();
+    rx_payload.data[47]^=1; esb_receive_composite(&rx_payload, current_rx_ticks);
     assert(pose_count==2 && sequence_calls==3);
-    rx_payload.data[47]^=1; rx_payload.data[2]=4; composite_receive();
+    rx_payload.data[47]^=1; rx_payload.data[2]=4; esb_receive_composite(&rx_payload, current_rx_ticks);
     assert(pose_count==2 && sequence_calls==3);
-    rx_payload.data[2]=3; composite_receive(); tracker_events_process(host_now);
+    rx_payload.data[2]=3; esb_receive_composite(&rx_payload, current_rx_ticks); tracker_events_process(host_now);
     assert(pose_count==4 && sequence_calls==4 && last_sequence==43);
     unsigned observed=evidence_calls;
     uint32_t last_seen=(uint32_t)atomic_get(&tdma_shadow_last_seen_ms[2]);
     host_now++;
     rx_payload.pipe=1; /* Wrong pipe still carries poses, but is not admission evidence. */
-    composite_receive();
+    esb_receive_composite(&rx_payload, current_rx_ticks);
     assert(pose_count==6 && sequence_calls==5 && evidence_calls==observed);
     assert((uint32_t)atomic_get(&tdma_shadow_last_seen_ms[2])==last_seen);
 }

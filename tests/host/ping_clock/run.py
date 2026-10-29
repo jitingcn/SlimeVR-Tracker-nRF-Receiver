@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Exercise actual RADIO ACK and 13-byte EVENT dispatch with modeled hardware leaves.
+"""Exercise the actual receiver ACK and complete FIFO event dispatch.
 
-Other packet-length cases, composite handling, RF timing and RTOS scheduling
-are outside this host fixture. --source accepts an unmodified baseline esb.c.
+SDK, scheduler and output leaves are modeled. --source accepts a baseline esb.c.
 """
 
 import argparse
@@ -21,13 +20,14 @@ from c_extract import extract_block
 
 CASES = ('wrong-type', 'bad-crc', 'wrong-pipe', 'out-of-range', 'interleaved-pipe',
          'ota-status', 'ota-info', 'valid', 'valid-dirty', 'reacquire',
-         'event-fallback', 'valid-after-invalid', 'duplicate', 'out-of-order')
+         'event-fallback', 'valid-after-invalid', 'duplicate', 'out-of-order', 'drain')
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source', type=Path, default=ROOT / 'src/connection/esb.c')
 parser.add_argument('--case', action='append', choices=CASES)
 args = parser.parse_args()
 source = args.source.read_text()
 header = (ROOT / 'src/connection/esb.h').read_text()
+auto_source = (ROOT / 'src/connection/auto_channel.c').read_text()
 
 
 def function(name):
@@ -35,18 +35,22 @@ def function(name):
 
 
 constants = '\n'.join(re.findall(
-    r'^#define ESB_(?:PING|PONG|CHANNEL|COMPOSITE|OTA)_\w+\s+[^\n]+', header, re.M))
+    r'^#define ESB_(?:PING|PONG|CHANNEL|COMPOSITE|OTA|RAW)_\w+\s+[^\n]+', header, re.M))
 ack = function('esb_ack_handler_cb').split('\t/* Other packet types:', 1)[0] + '\n}\n'
 event = function('event_handler')
-event = event.split('\t\t\tswitch (rx_payload.length) {', 1)[0]
-ping_case = extract_block(source, r'^[ \t]*case ESB_PING_LEN:\s*\{')
-event += ('\t\t\tswitch (rx_payload.length) {\n' + ping_case + '\n'
-          '\t\t\tbreak;\n\t\t\tdefault: break;\n\t\t\t}\n'
-          '\t\thandle_composite_packet:;\n\t\t}\n\t\tbreak;\n\t}\n\t}\n}\n')
-helper = function('account_ping_clock') if re.search(r'^static void account_ping_clock\s*\(', source, re.M) else ''
+clock = function('account_ping_clock') if re.search(r'^static void account_ping_clock\s*\(', source, re.M) else ''
+lengths = extract_block(source, r'^static int composite_body_length\s*\([^;{}]*\)\s*\{')
+packet_helpers = '\n'.join(function(name) for name in ('esb_receive_ping', 'esb_receive_composite')
+                           if re.search(rf'^static void {name}\s*\(', source, re.M))
 fixture = (HERE / 'fixture.c').read_text()
+auto_channel = extract_block(auto_source, r'^bool auto_channel_is_beacon\s*\([^;{}]*\)\s*\{')
+auto_enabled_source = auto_source[:auto_source.rindex('\nbool auto_channel_receive')]
+auto_channel += '\n' + extract_block(
+    auto_enabled_source, r'^bool auto_channel_receive\s*\([^;{}]*\)\s*\{')
+fixture = fixture.replace('/* ACTUAL AUTO CHANNEL */', auto_channel)
 fixture = fixture.replace('/* PROTOCOL CONSTANTS */', constants)
-fixture = fixture.replace('/* ACTUAL PRODUCTION FUNCTIONS */', '\n\n'.join((helper, ack, event)))
+fixture = fixture.replace('/* ACTUAL PRODUCTION FUNCTIONS */',
+                          '\n\n'.join((lengths, clock, ack, packet_helpers, event)))
 
 with tempfile.TemporaryDirectory(prefix='receiver-ping-clock-') as directory:
     directory = Path(directory)
@@ -57,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix='receiver-ping-clock-') as directory:
     subprocess.run(compiler + [
         '-std=c11', '-g', '-O1', '-Wall', '-Wextra',
         '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-        '-fno-pie', '-no-pie', str(generated), '-o', str(executable),
+        '-fno-pie', '-no-pie', '-I', str(ROOT / 'src'), str(generated), '-o', str(executable),
     ], check=True)
     failures = []
     for case in args.case or CASES:
