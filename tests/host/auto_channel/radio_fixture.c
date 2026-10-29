@@ -12,7 +12,6 @@
 #define ARG_UNUSED(x) ((void)(x))
 #define BIT(n) (1u << (n))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define TDMA_ENABLED 0
 #define TEST_ALL_JOIN_CONFIG_GRACE_MS 1500
 #define MAX_TRACKERS 8
 #define K_NO_WAIT 0
@@ -113,6 +112,9 @@ enum tdma_shadow_evidence { TDMA_SHADOW_EVIDENCE_PING, TDMA_SHADOW_EVIDENCE_DATA
 static void tdma_shadow_observe(uint8_t id, enum tdma_shadow_evidence evidence)
 { (void)id; if (evidence == TDMA_SHADOW_EVIDENCE_DATA) ++data_evidence; }
 static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return ticks; }
+/* SDK conversion and console policy leaves; radio cases keep detail off. */
+static uint64_t k_ticks_to_us_floor64(uint64_t ticks) { return ticks * 1000000 / 32768; }
+static bool esb_get_stats_detailed_enabled(void) { return false; }
 static uint16_t test_all_wire_tps(void) { return 0; }
 static void test_all_invalidate_tracker(uint8_t id, int64_t at) { (void)id; (void)at; }
 static const char *esb_pong_flag_name(uint8_t flag) { (void)flag; return "command"; }

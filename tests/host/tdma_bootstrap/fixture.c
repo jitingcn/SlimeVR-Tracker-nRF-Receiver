@@ -11,7 +11,6 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define ATOMIC_INIT(x) (x)
-#define TDMA_ENABLED 0
 #define ARG_UNUSED(x) ((void)(x))
 #define K_FOREVER 0
 static void log_message(const char *format, ...) { (void)format; }
@@ -124,6 +123,9 @@ static uint16_t tracker_test_on_tps[MAX_TRACKERS], metadata_active_token[MAX_TRA
 static uint8_t metadata_active_mask[MAX_TRACKERS], metadata_active_chunk[MAX_TRACKERS];
 static void (*remote_confirm_cb)(uint8_t, uint8_t);
 static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return ticks; }
+/* SDK conversion and console policy leaves; admission cases keep detail off. */
+static uint64_t k_ticks_to_us_floor64(uint64_t ticks) { return ticks * 1000000 / 32768; }
+static bool esb_get_stats_detailed_enabled(void) { return false; }
 static void test_all_invalidate_tracker(uint8_t id, int64_t at) { (void)id; (void)at; }
 static uint16_t test_all_wire_tps(void) { return 0; }
 static void remote_wom_receive(uint8_t id, uint8_t flag, const uint8_t *data, uint8_t counter)

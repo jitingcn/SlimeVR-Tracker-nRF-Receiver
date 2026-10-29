@@ -98,11 +98,8 @@ bool esb_channel_is_allowed(uint8_t channel)
 // the ~220 TPS of useful demand, so slots are widened for admission-window
 // robustness; the loss controller below trades rate for stability by stepping
 // the per-tracker opportunity cap down a ladder (never below ~115 TPS).
-#define TDMA_ENABLED 1
 #define TDMA_BASE_SLOT_TICKS 16
 #define TDMA_SLOT_TICKS_MAX_LEVEL0 64
-#define TDMA_TOLERANCE_TICKS 3
-#define TDMA_SLOT_ROTATION 0
 #define TDMA_RECONFIG_MIN_MS 1000 /* minimum interval between ordinary membership layouts */
 /* Loss ladder: sustained aggregate sequence-gap loss steps the opportunity
  * cap down; sustained clean loss steps back up. Values are opportunities/s
@@ -657,7 +654,7 @@ static void tdma_recalculate(bool forced)
 		for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
 			uint8_t assigned = 0xFF;
 			if (new_mask & BIT(i)) {
-				assigned = (slot++ + TDMA_SLOT_ROTATION) % active_count;
+				assigned = slot++;
 			}
 			tdma_config_packed[i] = tdma_pack_config(assigned, active_count, slot_ticks, epoch);
 		}
@@ -688,9 +685,8 @@ static void tdma_recalculate(bool forced)
 		uint32_t frame_ticks = (uint32_t)slot_ticks * active_count;
 		uint32_t est_tps = 32768 / frame_ticks;
 		LOG_INF(
-			"TDMA reconfig: mode=ping_guard_v2 reason=%s rotation=%u active=%u slot=%u frame=%u opportunity=%u/trk aggregate=%u/s cap=%u lvl=%u/%u epoch=%u members=0x%04x",
+			"TDMA reconfig: mode=ping_guard_v2 reason=%s active=%u slot=%u frame=%u opportunity=%u/trk aggregate=%u/s cap=%u lvl=%u/%u epoch=%u members=0x%04x",
 			mask_changed ? "membership" : (test_all_layout ? "test_all" : "loss_ladder"),
-			TDMA_SLOT_ROTATION,
 			active_count,
 			slot_ticks,
 			frame_ticks,
@@ -1169,7 +1165,6 @@ static void tdma_loss_controller_tick(int64_t now)
 }
 
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-#if TDMA_ENABLED
 /**
  * Check if a packet from a tracker arrived in its assigned TDMA slot.
  * Uses dynamic parameters from tdma_config_packed[].
@@ -1332,15 +1327,6 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks, int8_t rssi)
 		}
 	}
 }
-#else
-/* When TDMA is disabled, provide a no-op stub */
-static inline void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks, int8_t rssi)
-{
-	ARG_UNUSED(tracker_id);
-	ARG_UNUSED(rx_ticks);
-	ARG_UNUSED(rssi);
-}
-#endif
 #endif
 
 static void esb_stats_thread(void);
@@ -2195,7 +2181,6 @@ static void account_ping_clock(uint8_t tracker_id, uint32_t expected_rx_ticks, u
 		g_last_ping_isr_rx_ticks_raw[tracker_id] = isr_rx_ticks;
 	}
 
-#if TDMA_ENABLED
 	if (stats->count > 0 && esb_get_stats_detailed_enabled()) {
 		uint64_t rx_time_diff_us = k_ticks_to_us_floor64(
 			(rx_time_diff_ticks < 0 ? -rx_time_diff_ticks : rx_time_diff_ticks)
@@ -2239,10 +2224,6 @@ static void account_ping_clock(uint8_t tracker_id, uint32_t expected_rx_ticks, u
 			);
 		}
 	}
-#else
-	ARG_UNUSED(rx_time_diff_ticks);
-	ARG_UNUSED(stats);
-#endif
 }
 #endif
 

@@ -10,8 +10,8 @@
 #define LOG_INF(...) ((void)0)
 #define LOG_DBG(...) ((void)0)
 #define LOG_ERR(...) ((void)0)
-#define LOG_WRN(...) ((void)0)
-#define TDMA_ENABLED 0
+static void host_warning(const char *format, ...) { (void)format; }
+#define LOG_WRN(...) host_warning(__VA_ARGS__)
 #define ARG_UNUSED(x) ((void)(x))
 #define TPS_CALCULATION_INTERVAL_MS 1000
 #define ESB_RF_CHANNEL_DEFAULT 255
@@ -146,6 +146,9 @@ static esb_remote_confirm_cb_t remote_confirm_cb;
 enum tdma_shadow_evidence { TDMA_SHADOW_EVIDENCE_PING, TDMA_SHADOW_EVIDENCE_DATA };
 static void tdma_shadow_observe(uint8_t id, enum tdma_shadow_evidence evidence) {}
 static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return ticks; }
+/* SDK conversion and console policy leaves; channel cases keep detail off. */
+static uint64_t k_ticks_to_us_floor64(uint64_t ticks) { return ticks * 1000000 / 32768; }
+static bool esb_get_stats_detailed_enabled(void) { return false; }
 static void test_all_invalidate_tracker(uint8_t id, int64_t at) {}
 static const char *esb_pong_flag_name(uint8_t flag) { return "command"; }
 static uint32_t sys_get_be32(const uint8_t *p) {

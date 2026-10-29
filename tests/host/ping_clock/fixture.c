@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,7 +18,6 @@
 #define ESB_EVENT_TX_SUCCESS 1
 #define ESB_EVENT_TX_FAILED 2
 #define ESB_EVENT_RX_RECEIVED 3
-#define TDMA_ENABLED 1
 #define PING_TIMEOUT_MS 5000
 #define PING_CLEAN_REACQUIRE_STREAK 8u
 
@@ -31,7 +31,30 @@ static void atomic_or(atomic_t *p, int v) { *p |= v; }
 static void atomic_and(atomic_t *p, int v) { *p &= v; }
 static void log_message(const char *fmt, ...) { (void)fmt; }
 #define LOG_DBG(...) log_message(__VA_ARGS__)
-#define LOG_WRN(...) log_message(__VA_ARGS__)
+static unsigned detailed_warnings;
+static int64_t warning_mean;
+static unsigned warning_stddev;
+static uint64_t warning_rx_us;
+static char warning_sign;
+static void log_warning(const char *fmt, ...)
+{
+    if (strncmp(fmt, "TDMA Stats ID=", 14) != 0) return;
+    va_list args;
+    va_start(args, fmt);
+    assert(va_arg(args, int) == 2);
+    assert(va_arg(args, uint32_t) == 2);
+    assert(va_arg(args, uint32_t) == 13);
+    warning_mean = va_arg(args, int64_t);
+    warning_stddev = va_arg(args, uint32_t);
+    assert(va_arg(args, int) == -3);
+    assert(va_arg(args, int) == -6);
+    assert(va_arg(args, int) == 2);
+    warning_sign = va_arg(args, char *)[0];
+    warning_rx_us = va_arg(args, uint64_t);
+    va_end(args);
+    ++detailed_warnings;
+}
+#define LOG_WRN(...) log_warning(__VA_ARGS__)
 static unsigned error_count;
 #define LOG_ERR(...) (error_count++, log_message(__VA_ARGS__))
 #define LOG_INF(...) log_message(__VA_ARGS__)
@@ -129,7 +152,8 @@ static uint64_t k_uptime_get(void) { return 1000; }
 static uint32_t k_uptime_get_32(void) { return 1000; }
 static uint32_t k_ticks_to_us_floor32(uint32_t n) { return (uint32_t)((uint64_t)n * 1000000 / 32768); }
 static uint64_t k_ticks_to_us_floor64(uint64_t n) { return n * 1000000 / 32768; }
-static bool esb_get_stats_detailed_enabled(void) { return false; }
+static bool detailed_enabled;
+static bool esb_get_stats_detailed_enabled(void) { return detailed_enabled; }
 static unsigned irq_lock(void) { return 0; }
 static void irq_unlock(unsigned key) { (void)key; }
 static uint32_t sys_get_be32(const uint8_t *p)
@@ -657,6 +681,44 @@ static void test_early_sequence_exit(bool duplicate)
     assert(shadow_count == 1 && last_ping_counter[id] == 5);
     assert(last_pong_queued_counter[id] == 5);
 }
+static void test_detailed_warning(void)
+{
+    detailed_enabled = true;
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+    /* Exercise the extracted clock helper, including nonzero variance/sqrt. */
+    struct tdma_stats *stats = &g_tdma_stats[2];
+    stats->count = 2;
+    stats->violations = 13;
+    stats->sum_offset = -4;
+    stats->sum_sq_offset = 40;
+    stats->phase_initialized = true;
+    stats->phase_ema_q8 = -3 * 256;
+    stats->min_offset = -6;
+    stats->max_offset = 2;
+    g_ping_isr_rx_ticks_valid[2] = false;
+    account_ping_clock(2, 1000, 990);
+    assert(detailed_warnings == 1);
+    assert(warning_mean == -2 && warning_stddev == 4);
+    assert(warning_sign == '-' && warning_rx_us == 305);
+    account_ping_clock(2, 1000, 1010);
+    assert(detailed_warnings == 2);
+    assert(warning_sign == '+' && warning_rx_us == 305);
+    stats->violations = 12;
+    account_ping_clock(2, 1000, 1010);
+    assert(detailed_warnings == 2);
+    stats->violations = 13;
+    detailed_enabled = false;
+    account_ping_clock(2, 1000, 1010);
+    assert(detailed_warnings == 2);
+    detailed_enabled = true;
+    stats->count = 0;
+    account_ping_clock(2, 1000, 1010);
+    assert(detailed_warnings == 2);
+#else
+    assert(detailed_warnings == 0);
+#endif
+}
+
 static void fifo_push(struct esb_payload p, uint32_t ticks)
 {
     assert(fifo_count < 32);
@@ -811,6 +873,11 @@ int main(int argc, char **argv)
     assert(argc == 2);
     tick_context = TICK_EVENT;
     tdma_config_packed[2] = 2u | (3u << 8) | (48u << 16) | (7u << 24);
+    if (strcmp(argv[1], "detailed-warning") == 0) {
+        test_detailed_warning();
+        printf("PASS %s\n", argv[1]);
+        return 0;
+    }
     if (strcmp(argv[1], "drain") == 0) {
         test_drain();
         assert_tick_reads();

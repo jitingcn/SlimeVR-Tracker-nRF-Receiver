@@ -14,7 +14,6 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define TDMA_BASE_SLOT_TICKS 16
 #define TDMA_SLOT_TICKS_MAX_LEVEL0 64
-#define TDMA_SLOT_ROTATION 0
 static void log_message(const char *format, ...) { (void)format; }
 #define LOG_INF(...) log_message(__VA_ARGS__)
 #define LOG_WRN(...) log_message(__VA_ARGS__)
@@ -22,7 +21,6 @@ static void log_message(const char *format, ...) { (void)format; }
 #define LOG_ERR(...) log_message(__VA_ARGS__)
 #define TPS_CALCULATION_INTERVAL_MS 1000
 #define ATOMIC_INIT(x) (x)
-#define TDMA_ENABLED 0
 #define ESB_COMPOSITE_TYPE 0xfe
 #define TEST_ALL_JOIN_CONFIG_GRACE_MS 1500
 #define K_SEM_DEFINE(name, initial, maximum) struct fixture_sem name = {initial}
@@ -129,6 +127,9 @@ static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *p, size_t n)
 	return crc;
 }
 static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return ticks; }
+/* SDK conversion and console policy leaves; loss cases keep detail off. */
+static uint64_t k_ticks_to_us_floor64(uint64_t ticks) { return ticks * 1000000 / 32768; }
+static bool esb_get_stats_detailed_enabled(void) { return false; }
 static uint16_t test_all_wire_tps(void) { return 0; }
 static void remote_wom_receive(uint8_t id, uint8_t flag, const uint8_t *data, uint8_t counter) {}
 static const char *esb_pong_flag_name(uint8_t flag) { return "command"; }

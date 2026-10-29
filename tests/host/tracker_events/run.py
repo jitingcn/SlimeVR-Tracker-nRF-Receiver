@@ -174,7 +174,7 @@ def main():
         extract = importlib.util.module_from_spec(extract_spec)
         extract_spec.loader.exec_module(extract)
         layout_constants = '\n'.join(re.findall(
-            r'^#define TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|SLOT_ROTATION|'
+            r'^#define TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|'
             r'RECONFIG_MIN_MS|LOSS_RECONFIG_MIN_MS|CAP_LEVEL_MAX)\b[^\n]*', esb, re.M))
         layout_names = '''tdma_cap_ladder tdma_config_packed tdma_config_epoch tdma_dynamic_active_count
             tdma_dynamic_slot_ticks tdma_active_mask tdma_cap_level tdma_published_cap_level

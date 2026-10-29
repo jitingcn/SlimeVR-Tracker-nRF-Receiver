@@ -49,7 +49,7 @@ def function(name):
 
 constants = '\n'.join(re.findall(
     r'^#define (?:PING_TIMEOUT_MS|PING_CLEAN_REACQUIRE_STREAK|TDMA_SHADOW_\w+|TDMA_MEMBERSHIP_COHORT_MS|'
-    r'TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|SLOT_ROTATION|'
+    r'TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|'
     r'RECONFIG_MIN_MS|LOSS_RECONFIG_MIN_MS|CAP_LEVEL_MAX))\b[^\n]*', source, re.MULTILINE))
 constants += '\n' + '\n'.join(re.findall(
     r'^#define ESB_(?:PING|PONG)_\w+\b[^\n]*', header, re.MULTILINE))
