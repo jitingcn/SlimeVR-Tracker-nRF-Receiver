@@ -22,6 +22,9 @@
 #if TEST_MCUBOOT
 #define CONFIG_BOOTLOADER_MCUBOOT 1
 #endif
+#if TEST_UF2
+#define CONFIG_BUILD_OUTPUT_UF2 1
+#endif
 #define CONFIG_BOARD "probe"
 #define DT_NODE_EXISTS(x) TEST_MCUBOOT
 #define DT_NODELABEL(x) 0
@@ -112,6 +115,8 @@ static void release_and_wait(void) {
 }
 static uint8_t staging[8192];
 static unsigned erases,writes,reads,reboots;
+static unsigned copies, fail_read_call;
+static uint32_t read_base;
 static int upgrade_error;
 static int flash_erase(const struct device *d,uint32_t addr,size_t size) { erases++; memset(staging,0xff,sizeof(staging)); return 0; }
 static int flash_flatten(const struct device *d,uint32_t addr,size_t size) { return flash_erase(d,addr,size); }
@@ -119,7 +124,15 @@ static int flash_write(const struct device *d,uint32_t addr,const void *p,size_t
     uint8_t admitted[4096]; memcpy(admitted,p,size); pause_leaf(hold_write);
     assert(!memcmp(admitted,p,size)); memcpy(staging,p,size); writes++; return 0;
 }
-static int flash_read(const struct device *d,uint32_t addr,void *p,size_t size) { pause_leaf(hold_read); memcpy(p,staging,size); reads++; return 0; }
+static int flash_read(const struct device *d,uint32_t addr,void *p,size_t size) {
+    pause_leaf(hold_read);
+    reads++;
+    if (reads==fail_read_call) return -EIO;
+    size_t offset=read_base?addr-read_base:0;
+    assert(offset+size<=sizeof(staging));
+    memcpy(p,staging+offset,size);
+    return 0;
+}
 struct flash_area { uint32_t fa_off,fa_size; } secondary_area={0x80000,8192};
 static int flash_area_open(int id,const struct flash_area **a) { *a=&secondary_area; return 0; }
 static void flash_area_close(const struct flash_area *a) {}
@@ -133,7 +146,13 @@ static void sys_reboot(int type) { reboots++; }
 
 /* PRODUCTION_SOURCE */
 
-static void rcv_ota_activate_and_reset(void) { assert(!"hardware RAM copier is outside this probe"); }
+static void rcv_ota_activate_and_reset(void) {
+#if TEST_UF2
+    copies++;
+#else
+    assert(!"hardware RAM copier is outside this probe");
+#endif
+}
 static void command(uint8_t type) { uint8_t p[2]={type,RECEIVER_OTA_ID}; receiver_ota_process_hid(p,sizeof(p)); }
 static void begin(uint32_t size) {
     uint8_t p[64]={HID_OTA_BEGIN,RECEIVER_OTA_ID}; sys_put_le32(size,p+2);
@@ -197,8 +216,10 @@ static void activation(bool error) {
     assert(rcv_ota.state==(error?RCV_OTA_ERROR:RCV_OTA_COMPLETE)); assert(reboots==!error);
     begin(512); assert(joins==1 && creates==2 && rcv_ota.state==RCV_OTA_READY); command(HID_OTA_ABORT);
 }
+/* CRC_SETTINGS_CASES */
 int main(int argc,char **argv) {
     assert(argc==2);
+    if(crc_settings_case(argv[1])) return 0;
     if(!strcmp(argv[1],"begin_timeout")) timeout_case(false);
     else if(!strcmp(argv[1],"abort_timeout")) timeout_case(true);
     else if(!strcmp(argv[1],"verify_timeout")) verify_timeout();

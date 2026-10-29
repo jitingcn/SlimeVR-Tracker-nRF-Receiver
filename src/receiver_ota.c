@@ -945,7 +945,14 @@ static void rcv_ota_do_activate(void)
 	uint32_t remaining = rcv_ota.image_size;
 	while (remaining > 0) {
 		size_t chunk = MIN(remaining, sizeof(buf));
-		flash_read(flash_dev, addr, buf, chunk);
+		int err = flash_read(flash_dev, addr, buf, chunk);
+		if (err) {
+			LOG_ERR("RCV OTA: flash read error at 0x%05X: %d", addr, err);
+			rcv_ota.state = RCV_OTA_ERROR;
+			rcv_ota.error_code = OTA_STATUS_FLASH_ERROR;
+			rcv_ota_send_status();
+			return;
+		}
 		/* Nordic SDK CRC-16 (same as nRF5 bootloader / Adafruit UF2) */
 		for (size_t i = 0; i < chunk; i++) {
 			crc16 = (uint8_t)(crc16 >> 8) | (crc16 << 8);
