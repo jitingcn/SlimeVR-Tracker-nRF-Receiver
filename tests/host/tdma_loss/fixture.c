@@ -107,16 +107,8 @@ static void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth =
 static void k_sem_give(struct fixture_sem *sem) { assert(!irq_depth); sem->count = 1; }
 static void hid_reset_rssi_smooth(uint8_t id) { assert(irq_depth == 0); }
 static void tdma_sync_stats_reset(void) {}
-struct tdma_stats { uint32_t count; };
-static struct tdma_stats g_tdma_stats[MAX_TRACKERS];
-static int32_t g_last_ping_rx_time_diff_ticks[MAX_TRACKERS];
-static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS];
-static uint32_t g_ping_isr_rx_ticks[MAX_TRACKERS];
-static bool g_ping_isr_rx_ticks_valid[MAX_TRACKERS];
-static uint8_t g_bias_ppb_valid[MAX_TRACKERS], g_ping_dirty_streak[MAX_TRACKERS];
-static int32_t g_bias_ppb[MAX_TRACKERS], g_bias_ref_offset[MAX_TRACKERS];
-static uint32_t g_bias_ref_ticks[MAX_TRACKERS], g_last_ping_isr_rx_ticks_raw[MAX_TRACKERS];
-static uint32_t g_ping_reject_count[MAX_TRACKERS], pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
+/* DIAGNOSTIC DECLARATIONS */
+static uint32_t pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
 static uint64_t last_ping_time[MAX_TRACKERS];
 static atomic_t test_all_confirmed_mask, test_all_ready_after_ms[MAX_TRACKERS];
 static uint8_t tracker_remote_command[MAX_TRACKERS], pending_cmd_arg[MAX_TRACKERS];

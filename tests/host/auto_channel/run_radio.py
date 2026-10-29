@@ -46,14 +46,21 @@ lifecycle = "\n\n".join(function(esb, name) for name in (
     "channel_apply"))
 ack = function(esb, "esb_ack_handler_cb").split("/* ---- Discovery pairing packets", 1)[0]
 ack += "\n downstream_ack++; (void)pipe_id; (void)ack_payload;\n}\n"
-event = "\n\n".join(function(esb, name) for name in (
-    "composite_body_length", "account_ping_clock", "esb_receive_ping",
-    "esb_receive_composite", "event_handler"))
+event = "\n\n".join(
+    ("#if defined(CONFIG_TDMA_DIAGNOSTICS)\n" + function(esb, name) + "\n#endif\n")
+    if name == "account_ping_clock" else function(esb, name)
+    for name in ("composite_body_length", "account_ping_clock", "esb_receive_ping",
+                 "esb_receive_composite", "event_handler"))
 common = function(auto, "auto_channel_is_beacon")
 receive_on = function(auto, "auto_channel_receive")
 receive_off = function(auto, "auto_channel_receive", 1)
 restore = function(auto, "restore")
 fixture = (HERE / "radio_fixture.c").read_text()
+diagnostic_start = esb.rfind("#if defined(CONFIG_TDMA_DIAGNOSTICS)", 0,
+                           esb.index("#define RX_PHASE_MIN_TICKS"))
+diagnostic_end = esb.index("static void tdma_sync_stats_reset(void)\n{", diagnostic_start)
+fixture = fixture.replace("/* DIAGNOSTIC DECLARATIONS */",
+                          esb[diagnostic_start:diagnostic_end])
 header = (SOURCE / "esb.h").read_text()
 constants = "\n".join(re.findall(
     r"^#define ESB_(?:PING|PONG|COMPOSITE|OTA|RAW)_\w+\b[^\n]*", header, re.M))
@@ -72,11 +79,13 @@ with tempfile.TemporaryDirectory(prefix="auto-channel-radio-") as directory:
     directory = Path(directory)
     source = directory / "radio.c"
     source.write_text(fixture)
-    for enabled in (0, 1):
-        exe = directory / f"radio-{enabled}"
+    for enabled, diagnostics in ((feature, diag) for feature in (0, 1) for diag in (False, True)):
+        exe = directory / f"radio-{enabled}-{int(diagnostics)}"
+        flags = ["-DCONFIG_TDMA_DIAGNOSTICS=1"] if diagnostics else []
         subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                        "-Wno-unused-function", "-Wno-unused-variable",
                         "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
                         "-I", str(SOURCE), "-I", str(ROOT / "src"),
-                        f"-DTEST_FEATURE_ON={enabled}", str(source), "-o", str(exe)], check=True)
+                        *flags, f"-DTEST_FEATURE_ON={enabled}", str(source), "-o", str(exe)], check=True)
         subprocess.run([str(exe)], check=True)
 subprocess.run([sys.executable, str(HERE.parent / "ping_clock/run.py"), "--case", "drain"], check=True)

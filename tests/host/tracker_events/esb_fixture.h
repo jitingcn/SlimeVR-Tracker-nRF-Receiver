@@ -68,9 +68,11 @@ static struct packet_stats { uint8_t status_received, status_lost; } tracker_sta
 static int check_packet_sequence(uint8_t tracker, uint8_t sequence) {
     assert(tracker==2); sequence_calls++; last_sequence=sequence; return sequence_result;
 }
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 static void tdma_check_slot(uint8_t tracker, unsigned ticks, uint8_t rssi) {
     (void)ticks; (void)rssi; assert(tracker==2); slot_calls++;
 }
+#endif
 static void hid_write_packet_n(const uint8_t packet[16], uint8_t rssi) {
     (void)rssi; assert(pose_count<8); memcpy(poses[pose_count++],packet,16);
 }
@@ -89,7 +91,12 @@ static void composite(void) {
     esb_receive_composite(&rx_payload, current_rx_ticks);
     assert(pose_count==2 && poses[0][0]==1 && poses[1][0]==0);
     assert(poses[0][2]==0x11 && poses[1][2]==0x22);
-    assert(sequence_calls==1 && last_sequence==42 && slot_calls==1 && evidence_calls==1);
+    assert(sequence_calls==1 && last_sequence==42 && evidence_calls==1);
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+    assert(slot_calls==1);
+#else
+    assert(slot_calls==0);
+#endif
     assert((uint32_t)atomic_get(&tdma_shadow_pending_join_mask)==BIT(2));
     assert((uint32_t)atomic_get(&tdma_shadow_live_evidence_mask)==BIT(2));
     assert(tdma_membership_deadline_armed && tdma_membership_wake.count==1);

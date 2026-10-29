@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Exercise the actual receiver ACK and complete FIFO event dispatch.
+"""Compare receiver ACK and FIFO dispatch with diagnostics undefined and enabled.
 
+Both variants assert protocol behavior and compare their wire/output traces.
 SDK, scheduler and output leaves are modeled. --source accepts a baseline esb.c.
 """
 
@@ -39,6 +40,7 @@ constants = '\n'.join(re.findall(
 ack = function('esb_ack_handler_cb').split('\t/* Other packet types:', 1)[0] + '\n}\n'
 event = function('event_handler')
 clock = function('account_ping_clock') if re.search(r'^static void account_ping_clock\s*\(', source, re.M) else ''
+clock = '#if defined(CONFIG_TDMA_DIAGNOSTICS)\n' + clock + '\n#endif\n'
 lengths = extract_block(source, r'^static int composite_body_length\s*\([^;{}]*\)\s*\{')
 packet_helpers = '\n'.join(function(name) for name in ('esb_receive_ping', 'esb_receive_composite')
                            if re.search(rf'^static void {name}\s*\(', source, re.M))
@@ -56,17 +58,33 @@ with tempfile.TemporaryDirectory(prefix='receiver-ping-clock-') as directory:
     directory = Path(directory)
     generated = directory / 'fixture.c'
     generated.write_text(fixture)
-    executable = directory / 'fixture'
     compiler = shlex.split(os.environ.get('CC', 'cc'))
-    subprocess.run(compiler + [
-        '-std=c11', '-g', '-O1', '-Wall', '-Wextra',
-        '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-        '-fno-pie', '-no-pie', '-I', str(ROOT / 'src'), str(generated), '-o', str(executable),
-    ], check=True)
     failures = []
-    for case in args.case or CASES:
-        result = subprocess.run([str(executable), case], timeout=20)
-        if result.returncode:
-            failures.append(case)
+    protocol_outputs = {}
+    for diagnostics in (False, True):
+        variant = 'on' if diagnostics else 'off'
+        executable = directory / ('fixture-' + variant)
+        config = ['-DCONFIG_TDMA_DIAGNOSTICS=1'] if diagnostics else ['-UCONFIG_TDMA_DIAGNOSTICS']
+        subprocess.run(compiler + [
+            '-std=c11', '-g', '-O1', '-Wall', '-Wextra',
+            '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+            '-fno-pie', '-no-pie', *config, '-I', str(ROOT / 'src'),
+            str(generated), '-o', str(executable),
+        ], check=True)
+        for case in args.case or CASES:
+            result = subprocess.run([str(executable), case], timeout=20,
+                                    capture_output=True, text=True)
+            print(f'diagnostics={variant} {case}')
+            print(result.stdout, end='')
+            print(result.stderr, end='', file=sys.stderr)
+            if result.returncode:
+                failures.append(f'{variant}/{case}')
+            protocol = [line for line in result.stdout.splitlines()
+                        if line.startswith('PROTOCOL ')]
+            if diagnostics:
+                if protocol != protocol_outputs[case]:
+                    failures.append(f'protocol-mismatch/{case}')
+            else:
+                protocol_outputs[case] = protocol
     if failures:
         raise SystemExit('Failed cases: ' + ', '.join(failures))

@@ -919,6 +919,7 @@ static volatile int64_t stats_detailed_end_time
 	= 0;                                // Timestamp when detailed stats should auto-disable (0 = no auto-disable)
 static int64_t last_tps_print_time = 0; // Last time total TPS was printed
 
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 // Receiver-side arrival phase/RSSI histograms. Updated in EVENT context only;
 // health computes percentiles on demand, so the RADIO ISR remains unchanged.
 #define RX_PHASE_MIN_TICKS (-64)
@@ -997,8 +998,11 @@ static uint8_t g_ping_dirty_streak[MAX_TRACKERS] = {0};  /* consecutive rejected
 static uint32_t g_ping_reject_count[MAX_TRACKERS] = {0}; /* total rejected PINGs since stats reset */
 static uint32_t g_extrap_skip_count[MAX_TRACKERS] = {0}; /* extrapolations skipped due to stale baseline */
 
+#endif
+
 static void tdma_sync_stats_reset(void)
 {
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 	tdma_stats_reset();
 	memset(g_last_ping_rx_time_diff_valid, 0, sizeof(g_last_ping_rx_time_diff_valid));
 	memset(g_bias_ppb_valid, 0, sizeof(g_bias_ppb_valid));
@@ -1007,6 +1011,7 @@ static void tdma_sync_stats_reset(void)
 	memset(g_ping_dirty_streak, 0, sizeof(g_ping_dirty_streak));
 	memset(g_ping_reject_count, 0, sizeof(g_ping_reject_count));
 	memset(g_extrap_skip_count, 0, sizeof(g_extrap_skip_count));
+#endif
 }
 
 /* Aggregate normal/composite sequence-gap loss, excluding raw capture.
@@ -1163,6 +1168,7 @@ static void tdma_loss_controller_tick(int64_t now)
 	k_sched_unlock();
 }
 
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 #if TDMA_ENABLED
 /**
  * Check if a packet from a tracker arrived in its assigned TDMA slot.
@@ -1334,6 +1340,7 @@ static inline void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks, int8_t
 	ARG_UNUSED(rx_ticks);
 	ARG_UNUSED(rssi);
 }
+#endif
 #endif
 
 static void esb_stats_thread(void);
@@ -1890,6 +1897,7 @@ static void esb_ack_handler_cb(
 		return;
 	}
 
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 	/* ---- Capture ISR timestamp for any tracker packet (non-pairing) ---- */
 	if (data_length > 1 && pipe_id > 0) {
 		uint8_t tid = pdu_data[1];
@@ -1898,6 +1906,7 @@ static void esb_ack_handler_cb(
 			g_last_isr_rx_valid[tid] = true;
 		}
 	}
+#endif
 
 	/* ---- PING → PONG (immediate response) ---- */
 	if (data_length == ESB_PING_LEN && pdu_data[0] == ESB_PING_TYPE) {
@@ -1955,10 +1964,12 @@ static void esb_ack_handler_cb(
 				cmd = ESB_PONG_FLAG_NORMAL;
 			}
 		}
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 		if (pipe_id == 1U + (tracker_id % 7)) {
 			g_ping_isr_rx_ticks[tracker_id] = rx_ticks;
 			g_ping_isr_rx_ticks_valid[tracker_id] = true;
 		}
+#endif
 
 		ack_payload->pipe = 1 + (tracker_id % 7);
 		ack_payload->length = ESB_PONG_LEN;
@@ -2115,6 +2126,7 @@ static int composite_body_length(uint8_t type)
 	}
 }
 
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 static void account_ping_clock(uint8_t tracker_id, uint32_t expected_rx_ticks, uint32_t current_rx_ticks)
 {
 	struct tdma_stats *stats = &g_tdma_stats[tracker_id];
@@ -2232,6 +2244,7 @@ static void account_ping_clock(uint8_t tracker_id, uint32_t expected_rx_ticks, u
 	ARG_UNUSED(stats);
 #endif
 }
+#endif
 
 static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_ticks)
 {
@@ -2272,11 +2285,18 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 		);
 		return;
 	}
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 	uint32_t expected_rx_ticks = sys_get_be32(&payload->data[3]);
+#else
+	ARG_UNUSED(event_ticks);
+#endif
 	if (payload->pipe == 1 + (tracker_id % 7)) {
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 		account_ping_clock(tracker_id, expected_rx_ticks, event_ticks);
+#endif
 		tdma_shadow_observe(tracker_id, TDMA_SHADOW_EVIDENCE_PING);
 	}
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 	// Calculate signed ticks difference
 	int32_t ticks_diff = (int32_t)event_ticks - (int32_t)expected_rx_ticks;
 	// Get absolute value for conversion to microseconds
@@ -2288,6 +2308,7 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 		ticks_diff >= 0 ? "+" : "-",          // Add sign to the log
 		k_ticks_to_us_floor32(ticks_diff_abs) // Convert absolute tick difference to microseconds
 	);
+#endif
 
 	// First PING received for this tracker - accept directly, no sequence check
 	if (!ping_counter_initialized[tracker_id]) {
@@ -2554,7 +2575,11 @@ static void esb_receive_composite(const struct esb_payload *payload, uint32_t ev
 			return;
 		}
 	}
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 	tdma_check_slot(tracker_id, event_ticks, payload->rssi);
+#else
+	ARG_UNUSED(event_ticks);
+#endif
 
 	LOG_DBG("Received composite packet from tracker %d with %d sub-packets", tracker_id, sub_count);
 
@@ -2641,7 +2666,11 @@ void event_handler(struct esb_evt const *event)
 				LOG_ERR("Error while reading rx packet: %d", err);
 				break;
 			}
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 			uint32_t current_rx_ticks = k_uptime_ticks();
+#else
+			const uint32_t current_rx_ticks = 0;
+#endif
 			if (rx_payload.length == 0) {
 				continue;
 			}
@@ -2773,8 +2802,10 @@ void event_handler(struct esb_evt const *event)
 				}
 				uint8_t tracker_id = rx_payload.data[1];
 
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 				// TDMA Slot Check for Data (Type 17)
 				tdma_check_slot(tracker_id, current_rx_ticks, rx_payload.rssi);
+#endif
 
 				if (tracker_id >= stored_trackers || tracker_id >= MAX_TRACKERS) {
 					continue;
@@ -3151,6 +3182,7 @@ static void tracker_slot_reset(uint8_t id)
 	memset(&tracker_stats[id], 0, sizeof(tracker_stats[id]));
 	decision_received[id] = 0;
 	decision_gaps[id] = 0;
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
 	memset(&g_tdma_stats[id], 0, sizeof(g_tdma_stats[id]));
 	g_last_ping_rx_time_diff_ticks[id] = 0;
 	g_last_ping_rx_time_diff_valid[id] = false;
@@ -3166,6 +3198,7 @@ static void tracker_slot_reset(uint8_t id)
 	g_ping_dirty_streak[id] = 0;
 	g_ping_reject_count[id] = 0;
 	g_extrap_skip_count[id] = 0;
+#endif
 	channel_target_mask &= ~BIT(id);
 	tdma_shadow_forget_tracker(id);
 	esb_auto_loss_invalidate();
@@ -4083,9 +4116,9 @@ void esb_print_health_snapshot(void)
 		tdma_cap_level,
 		(uint8_t)TDMA_CAP_LEVEL_MAX,
 		tdma_loss_last_permille,
-		tdma_loss_trigger_streak,
-		tdma_loss_recover_streak,
-		tdma_loss_probe_streak,
+		tdma_loss_trigger_streak_ticks,
+		tdma_loss_recover_streak_ticks,
+		tdma_loss_probe_streak_ticks,
 		tdma_last_loss_step_ms
 	);
 	LOG_INF("HEALTH observed=0x%04x", (unsigned int)observed_mask);

@@ -5,6 +5,7 @@ NVS and hardware leaves are modeled. The real PING validation, membership,
 deadline and publication bodies are exercised without RF or HID timing.
 """
 import argparse
+import importlib.util
 import os
 from pathlib import Path
 import re
@@ -24,6 +25,9 @@ parser.add_argument('--case', choices=['owner-store-lock-delay'])
 args = parser.parse_args()
 source = args.source.read_text()
 header = (ROOT / 'src/connection/esb.h').read_text()
+spec = importlib.util.spec_from_file_location('tdma_loss_extract', HERE.parent / 'tdma_loss/run.py')
+extract = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(extract)
 
 
 def declaration(name):
@@ -61,6 +65,7 @@ variables = '''tdma_cap_ladder tdma_config_packed tdma_config_epoch
     tdma_membership_deadline_ms tdma_membership_deadline_armed'''.split()
 declarations = [constants, extract_block(source, r'^enum tdma_shadow_evidence\s*\{', True)]
 declarations.extend(declaration(name) for name in variables)
+declarations.append(extract.diagnostic_loss_declarations(source))
 functions = [function(name) for name in (
     'tdma_loss_reset_windows', 'tdma_pack_config', 'tdma_shadow_observe',
     'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
@@ -70,7 +75,8 @@ functions = [function(name) for name in (
 functions.append('static uint32_t sys_get_be32(const uint8_t *p) {\n'
                  'return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | '
                  '((uint32_t)p[2] << 8) | p[3];\n}\n')
-functions.extend(function(name) for name in ('account_ping_clock', 'esb_receive_ping'))
+functions.append(extract.diagnostic_function(source, 'account_ping_clock'))
+functions.append(function('esb_receive_ping'))
 functions.append('static bool host_validated_ping(void) {\n'
                  'if (rx_payload.length != ESB_PING_LEN || rx_payload.data[0] != ESB_PING_TYPE) return false;\n'
                  'uint8_t id = rx_payload.data[1];\n'
@@ -85,6 +91,7 @@ functions.append('static void host_forget_id(uint8_t id) {\n'
                  'unsigned int key = irq_lock();\n'
                  'tdma_shadow_forget_tracker(id); irq_unlock(key);\n}')
 fixture = (HERE / 'fixture.c').read_text()
+fixture = fixture.replace('/* DIAGNOSTIC DECLARATIONS */', extract.diagnostic_declarations(source))
 fixture = fixture.replace('/* PRODUCTION DECLARATIONS */', '\n'.join(declarations))
 fixture = fixture.replace('/* PRODUCTION FUNCTIONS */', '\n\n'.join(functions))
 with tempfile.TemporaryDirectory(prefix='receiver-tdma-membership-') as directory:
@@ -93,9 +100,11 @@ with tempfile.TemporaryDirectory(prefix='receiver-tdma-membership-') as director
     generated.write_text(fixture)
     executable = directory / 'fixture'
     compiler = shlex.split(os.environ.get('CC', 'cc'))
-    subprocess.run(compiler + [
-        '-std=c11', '-g', '-O1', '-Wall', '-Wextra',
-        '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-        '-fno-pie', '-no-pie', str(generated), '-o', str(executable),
-    ], check=True)
-    subprocess.run([str(executable)] + ([args.case] if args.case else []), check=True, timeout=20)
+    for diagnostics in (False, True):
+        flags = ['-DCONFIG_TDMA_DIAGNOSTICS=1'] if diagnostics else []
+        subprocess.run(compiler + [
+            '-std=c11', '-g', '-O1', '-Wall', '-Wextra',
+            '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+            '-fno-pie', '-no-pie', *flags, str(generated), '-o', str(executable),
+        ], check=True)
+        subprocess.run([str(executable)] + ([args.case] if args.case else []), check=True, timeout=20)

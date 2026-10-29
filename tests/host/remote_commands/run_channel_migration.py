@@ -49,6 +49,8 @@ production += "uint8_t cmd = tracker_remote_command[tracker_id];\n" + overlay + 
 production += "return cmd;\n}\n"
 fixture = (HERE / "test_channel_migration.c").read_text()
 prelude, cases = fixture.split("/* PRODUCTION BODIES */")
+prelude = prelude.replace("/* DIAGNOSTIC DECLARATIONS */",
+                          extract.diagnostic_declarations(source))
 # Exercise the complete production ACK callback, including pairing, channel
 # confirmation priority, command formats, OTA override and CRC generation.
 defines = []
@@ -60,7 +62,7 @@ defines.extend(re.findall(r'^#define (?:PING_TIMEOUT_MS|PING_CLEAN_REACQUIRE_STR
                           source, re.MULTILINE))
 prelude = "\n".join(defines) + "\n" + prelude
 production += "\n" + extract.function(source, "esb_ack_handler_cb")
-production += "\n" + extract.function(source, "account_ping_clock")
+production += "\n" + extract.diagnostic_function(source, "account_ping_clock")
 production += "\n" + extract.function(source, "esb_receive_ping")
 production += """
 static void echo(uint8_t tracker_id, uint8_t flag) {
@@ -83,10 +85,12 @@ with tempfile.TemporaryDirectory(prefix="receiver-channel-migration-") as direct
     generated = temporary / "test.c"
     generated.write_text(prelude + production + cases)
     binary = temporary / "test"
-    subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
-        "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
-        "-Wno-unused-function", "-Wno-unused-variable", "-g", "-O1",
-        "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
-        str(generated), "-o", str(binary),
-    ], check=True)
-    subprocess.run([str(binary)], check=True)
+    for diagnostics in (False, True):
+        flags = ["-DCONFIG_TDMA_DIAGNOSTICS=1"] if diagnostics else []
+        subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
+            "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+            "-Wno-unused-function", "-Wno-unused-variable", "-g", "-O1",
+            "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
+            *flags, str(generated), "-o", str(binary),
+        ], check=True)
+        subprocess.run([str(binary)], check=True)

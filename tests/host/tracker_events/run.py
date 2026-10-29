@@ -144,7 +144,21 @@ def main():
                         default=Path(os.environ.get('SOURCE_ROOT', Path(__file__).resolve().parents[3])))
     parser.add_argument('--case', action='append', choices=CASES)
     parser.add_argument('--wire-input', type=Path)
+    parser.add_argument('--diagnostics', choices=['off', 'on'], help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.diagnostics is None:
+        outputs = []
+        for diagnostics in ('off', 'on'):
+            completed = subprocess.run(
+                [sys.executable, *sys.argv, '--diagnostics', diagnostics],
+                text=True, capture_output=True)
+            if completed.returncode:
+                sys.stderr.write(completed.stderr)
+                raise subprocess.CalledProcessError(completed.returncode, completed.args)
+            outputs.append(completed.stdout)
+        assert outputs[0] == outputs[1], 'diagnostics changed protocol/event output'
+        sys.stdout.write(outputs[0])
+        return
     root = args.source_root.resolve()
     client = load_client(root)
     with tempfile.TemporaryDirectory(prefix='receiver-events-') as directory:
@@ -159,15 +173,17 @@ def main():
             'tdma_loss_extract', Path(__file__).resolve().parent.parent / 'tdma_loss/run.py')
         extract = importlib.util.module_from_spec(extract_spec)
         extract_spec.loader.exec_module(extract)
-        layout_constants = esb[esb.index('#define TDMA_BASE_SLOT_TICKS'):
-                               esb.index('#define TDMA_SYNC_EXTRAP_MAX_TICKS')]
-        layout_names = '''tdma_config_packed tdma_config_epoch tdma_dynamic_active_count
+        layout_constants = '\n'.join(re.findall(
+            r'^#define TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|SLOT_ROTATION|'
+            r'RECONFIG_MIN_MS|LOSS_RECONFIG_MIN_MS|CAP_LEVEL_MAX)\b[^\n]*', esb, re.M))
+        layout_names = '''tdma_cap_ladder tdma_config_packed tdma_config_epoch tdma_dynamic_active_count
             tdma_dynamic_slot_ticks tdma_active_mask tdma_cap_level tdma_published_cap_level
             tdma_loss_trigger_streak_ticks tdma_loss_recover_streak_ticks
             tdma_loss_probe_streak_ticks tdma_loss_pool_received tdma_loss_pool_gaps
             tdma_loss_pool_ticks'''.split()
         declarations = '\n'.join([layout_constants, extract.membership_declarations(esb)] +
                                  [extract.declaration(esb, name) for name in layout_names])
+        declarations += '\n' + extract.diagnostic_loss_declarations(esb)
         (path/'esb_membership_declarations.inc').write_text(declarations)
         membership = '\n'.join(function(esb, name) for name in (
             'tdma_loss_reset_windows', 'tdma_pack_config', 'tdma_shadow_observe',
@@ -192,6 +208,8 @@ static void tracked_tdma_shadow_observe(uint8_t tracker, enum tdma_shadow_eviden
             str(root/'src/tracker_events.c'), str(Path(__file__).with_name('fixture.c')),
             '-o',str(binary),
         ]
+        if args.diagnostics == 'on':
+            command.append('-DCONFIG_TDMA_DIAGNOSTICS=1')
         subprocess.run(command,check=True)
         if args.wire_input is not None:
             completed = subprocess.run([str(binary),'replay'],input=args.wire_input.read_text(),

@@ -71,6 +71,23 @@ def declaration(source, name):
     return matches[0].group()
 
 
+def diagnostic_loss_declarations(source, names=('tdma_last_loss_step_ms',)):
+    return ('#if defined(CONFIG_TDMA_DIAGNOSTICS)\n' +
+            '\n'.join(declaration(source, name) for name in names) + '\n#endif\n')
+
+
+def diagnostic_declarations(source):
+    start = source.rfind('#if defined(CONFIG_TDMA_DIAGNOSTICS)', 0,
+                         source.index('#define RX_PHASE_MIN_TICKS'))
+    end = source.index('static void tdma_sync_stats_reset(void)\n{', start)
+    return source[start:end]
+
+
+def diagnostic_function(source, name):
+    return ('#if defined(CONFIG_TDMA_DIAGNOSTICS)\n' +
+            function(source, name) + '\n#endif\n')
+
+
 def membership_declarations(source):
     start = source.index('#define PING_TIMEOUT_MS')
     end = source.index('static void tdma_shadow_observe', start)
@@ -92,18 +109,22 @@ def membership_bodies(source):
 
 def production_bodies(source, header=''):
     # Extract each selected source tree's constants and loss-controller state.
-    constants_start = source.index('#define TDMA_RECONFIG_MIN_MS')
-    constants_end = source.index('#define TDMA_SYNC_EXTRAP_MAX_TICKS')
-    constants = source[constants_start:constants_end]
+    constants = '\n'.join(re.findall(
+        r'^#define TDMA_(?:RECONFIG_MIN_MS|LOSS_\w+|CAP_LEVEL_MAX)\b[^\n]*',
+        source, re.MULTILINE))
     declarations = '\n'.join(re.findall(
         r'^static (?:uint8_t|uint32_t) '
-        r'tdma_(?:cap_level|published_cap_level|loss_\w+|prev_\w+)[^;]*;',
+        r'tdma_(?:cap_level|published_cap_level|loss_(?!last_permille\b)\w+|prev_\w+)[^;]*;',
         source,
         re.MULTILINE,
     ))
     declarations += '\n' + '\n'.join(re.findall(
         r'^static (?:uint32_t|bool) (?:decision_\w+|tdma_decision_ready)[^;]*;',
         source, re.MULTILINE,
+    ))
+    declarations += '\n' + declaration(source, 'tdma_cap_ladder')
+    declarations += '\n' + diagnostic_loss_declarations(source, (
+        'tdma_last_loss_step_ms', 'tdma_loss_last_permille',
     ))
     structure_start = re.search(r'\bstruct\s+packet_stats\s*\{', source)
     if structure_start is None:
@@ -167,7 +188,7 @@ static void restart_ping(uint8_t tracker_id) {
         function(source, 'tdma_pack_config'),
         function(source, 'tdma_slot_ticks_for'),
         membership_bodies(source),
-        function(source, 'account_ping_clock'),
+        diagnostic_function(source, 'account_ping_clock'),
         function(source, 'esb_receive_ping'),
         function(source, 'esb_receive_composite'),
         function(source, 'tdma_recalculate'),
@@ -193,7 +214,8 @@ def main():
     header = (args.source_root / 'src/connection/esb.h').read_text()
     fixture = Path(__file__).with_name('fixture.c').read_text()
     prelude, scenarios = fixture.split('/* PRODUCTION BODIES */')
-
+    prelude = prelude.replace('/* DIAGNOSTIC DECLARATIONS */',
+                              diagnostic_declarations(source))
     with tempfile.TemporaryDirectory(prefix='receiver-tdma-loss-') as directory:
         path = Path(directory)
         generated = path / 'test.c'
@@ -209,10 +231,13 @@ def main():
             '-Wno-unused-variable',
             '-Wno-unused-parameter',
         ]
-        subprocess.run(compiler + flags + ['-I', str(args.source_root / 'src'), str(generated), '-o', str(binary)], check=True)
-        for case in args.case or CASES:
-            subprocess.run([str(binary), case], check=True)
-            print(f'PASS {case}', flush=True)
+        for diagnostics in (False, True):
+            diagnostic_flags = ['-DCONFIG_TDMA_DIAGNOSTICS=1'] if diagnostics else []
+            subprocess.run(compiler + flags + diagnostic_flags + [
+                '-I', str(args.source_root / 'src'), str(generated), '-o', str(binary)], check=True)
+            for case in args.case or CASES:
+                subprocess.run([str(binary), case], check=True)
+                print(f'PASS diagnostics={int(diagnostics)} {case}', flush=True)
 
 
 if __name__ == '__main__':

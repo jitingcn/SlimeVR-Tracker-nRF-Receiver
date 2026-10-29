@@ -93,16 +93,8 @@ struct pairing_event { uint8_t packet[8]; };
 static int esb_pairing_msgq;
 static bool esb_pairing, pairing_new_devices_blocked;
 static uint8_t stored_trackers = MAX_TRACKERS;
-struct tdma_stats { uint32_t count; };
-static struct tdma_stats g_tdma_stats[MAX_TRACKERS];
-static int32_t g_last_ping_rx_time_diff_ticks[MAX_TRACKERS];
-static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS];
-static uint32_t g_ping_isr_rx_ticks[MAX_TRACKERS];
-static bool g_ping_isr_rx_ticks_valid[MAX_TRACKERS];
-static uint8_t g_bias_ppb_valid[MAX_TRACKERS], g_ping_dirty_streak[MAX_TRACKERS];
-static int32_t g_bias_ppb[MAX_TRACKERS], g_bias_ref_offset[MAX_TRACKERS];
-static uint32_t g_bias_ref_ticks[MAX_TRACKERS], g_last_ping_isr_rx_ticks_raw[MAX_TRACKERS];
-static uint32_t g_ping_reject_count[MAX_TRACKERS], pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
+/* DIAGNOSTIC DECLARATIONS */
+static uint32_t pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
 static uint8_t last_ping_counter[MAX_TRACKERS], last_pong_queued_counter[MAX_TRACKERS];
 static bool ping_counter_initialized[MAX_TRACKERS], sequence_initialized[MAX_TRACKERS];
 static uint64_t last_ping_time[MAX_TRACKERS];

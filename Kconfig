@@ -160,13 +160,14 @@ config TDMA_DIAGNOSTICS
     bool "Compile in TDMA/RF phase diagnostics"
     default n
     help
-        Per-tracker phase/RSSI histograms, sync bookkeeping counters
-        (ping_rej, extrap_skip) and the console health snapshot.
-        Disable for production builds: reclaims ~25 KB RAM and removes
-        per-packet histogram work from the radio event path. TDMA
-        scheduling and PING/PONG clock sync stay fully functional
-        without this option; only the measurement instrumentation is
-        removed at compile time.
+        Per-tracker phase/RSSI histograms, arrival phase checks, PING
+        bias/skew and rejection tracking, the TDMA Stats phase warning,
+        and the console health snapshot.
+        Disable for production builds to remove diagnostic timestamps,
+        phase accounting and warning calculations from the radio paths.
+        TDMA scheduling, membership, loss control, PING/PONG clock sync
+        and ordinary packet statistics stay functional without this
+        option; only measurement instrumentation is removed.
 
 endmenu
 

@@ -112,16 +112,7 @@ static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t length)
     }
     return crc;
 }
-struct tdma_stats { uint32_t count; };
-static struct tdma_stats g_tdma_stats[MAX_TRACKERS];
-static int32_t g_last_ping_rx_time_diff_ticks[MAX_TRACKERS];
-static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS];
-static uint32_t g_ping_isr_rx_ticks[MAX_TRACKERS];
-static bool g_ping_isr_rx_ticks_valid[MAX_TRACKERS];
-static uint8_t g_bias_ppb_valid[MAX_TRACKERS], g_ping_dirty_streak[MAX_TRACKERS];
-static int32_t g_bias_ppb[MAX_TRACKERS], g_bias_ref_offset[MAX_TRACKERS];
-static uint32_t g_bias_ref_ticks[MAX_TRACKERS], g_last_ping_isr_rx_ticks_raw[MAX_TRACKERS];
-static uint32_t g_ping_reject_count[MAX_TRACKERS];
+/* DIAGNOSTIC DECLARATIONS */
 static uint8_t last_ping_counter[MAX_TRACKERS], last_pong_queued_counter[MAX_TRACKERS];
 static bool ping_counter_initialized[MAX_TRACKERS], sequence_initialized[MAX_TRACKERS];
 static uint64_t last_ping_time[MAX_TRACKERS];
@@ -172,10 +163,14 @@ static void reset_fixture(uint8_t count, uint64_t time)
     memset(last_ping_counter, 0, sizeof(last_ping_counter));
     memset(last_ping_time, 0, sizeof(last_ping_time));
     memset(last_pong_queued_counter, 0, sizeof(last_pong_queued_counter));
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
     memset(g_last_ping_rx_time_diff_valid, 0, sizeof(g_last_ping_rx_time_diff_valid));
-    memset(g_ping_isr_rx_ticks_valid, 0, sizeof(g_ping_isr_rx_ticks_valid));
+    for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
+        g_ping_isr_rx_ticks_valid[i] = false;
+    }
     memset(g_bias_ppb_valid, 0, sizeof(g_bias_ppb_valid));
     memset(g_ping_dirty_streak, 0, sizeof(g_ping_dirty_streak));
+#endif
     memset(crc_error_count, 0, sizeof(crc_error_count));
 }
 

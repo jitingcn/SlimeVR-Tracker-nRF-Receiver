@@ -137,16 +137,8 @@ static bool wom_complete[MAX_TRACKERS];
 static int16_t pending_sens_data[MAX_TRACKERS][3];
 static uint8_t pending_sens_auto_axis[MAX_TRACKERS];
 static uint16_t pending_sens_auto_revolutions[MAX_TRACKERS];
-static uint32_t g_last_isr_rx_ticks[MAX_TRACKERS], g_ping_isr_rx_ticks[MAX_TRACKERS];
-static bool g_last_isr_rx_valid[MAX_TRACKERS], g_ping_isr_rx_ticks_valid[MAX_TRACKERS];
-struct tdma_stats { uint32_t count; };
-static struct tdma_stats g_tdma_stats[MAX_TRACKERS];
-static int32_t g_last_ping_rx_time_diff_ticks[MAX_TRACKERS];
-static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS];
-static uint8_t g_bias_ppb_valid[MAX_TRACKERS], g_ping_dirty_streak[MAX_TRACKERS];
-static int32_t g_bias_ppb[MAX_TRACKERS], g_bias_ref_offset[MAX_TRACKERS];
-static uint32_t g_bias_ref_ticks[MAX_TRACKERS], g_last_ping_isr_rx_ticks_raw[MAX_TRACKERS];
-static uint32_t g_ping_reject_count[MAX_TRACKERS], pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
+/* DIAGNOSTIC DECLARATIONS */
+static uint32_t pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
 static uint8_t last_ping_counter[MAX_TRACKERS], last_pong_queued_counter[MAX_TRACKERS], echo_counter[MAX_TRACKERS];
 static bool ping_counter_initialized[MAX_TRACKERS];
 static uint64_t last_ping_time[MAX_TRACKERS];
@@ -211,9 +203,11 @@ static void reset(unsigned count) {
     memset(echo_counter, 0, sizeof(echo_counter));
     memset(ping_counter_initialized, 0, sizeof(ping_counter_initialized));
     memset(last_ping_time, 0, sizeof(last_ping_time));
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
     memset(g_last_ping_rx_time_diff_valid, 0, sizeof(g_last_ping_rx_time_diff_valid));
     memset(g_bias_ppb_valid, 0, sizeof(g_bias_ppb_valid));
     memset(g_ping_dirty_streak, 0, sizeof(g_ping_dirty_streak));
+#endif
     memset(tdma_config_packed, 0, sizeof(tdma_config_packed));
     ota_target = ota_payload = pairing_new_devices_blocked = false;
     channel_get_error = 0;

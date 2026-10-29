@@ -39,12 +39,13 @@ wom_token wom_minutes wom_error wom_complete
 wom_advertised wom_first_ping_counter
 pipe_mismatch_count crc_error_count
  test_all_ready_after_ms tdma_config_packed tdma_prev_recv tdma_prev_gaps
-tdma_prev_restarts tracker_stats decision_received decision_gaps g_tdma_stats
-g_last_ping_rx_time_diff_ticks g_last_ping_rx_time_diff_valid g_ping_isr_rx_ticks
-g_ping_isr_rx_ticks_valid g_last_isr_rx_ticks g_last_isr_rx_valid g_bias_ppb_valid
-g_bias_ppb g_bias_ref_offset g_bias_ref_ticks g_last_ping_isr_rx_ticks_raw
-g_ping_dirty_streak g_ping_reject_count g_extrap_skip_count
+tdma_prev_restarts tracker_stats decision_received decision_gaps
 tdma_shadow_last_seen_ms'''.split()
+diagnostic_arrays = '''g_tdma_stats g_last_ping_rx_time_diff_ticks
+g_last_ping_rx_time_diff_valid g_ping_isr_rx_ticks g_ping_isr_rx_ticks_valid
+g_last_isr_rx_ticks g_last_isr_rx_valid g_bias_ppb_valid g_bias_ppb
+g_bias_ref_offset g_bias_ref_ticks g_last_ping_isr_rx_ticks_raw
+g_ping_dirty_streak g_ping_reject_count g_extrap_skip_count'''.split()
 slot_masks = '''test_all_confirmed_mask channel_target_mask tdma_shadow_ever_ping_mask
 tdma_shadow_ever_data_mask tdma_shadow_live_evidence_mask tdma_shadow_desired_mask
 tdma_shadow_pending_join_mask tdma_shadow_pending_leave_mask'''.split()
@@ -74,8 +75,12 @@ constants += '\n' + '\n'.join(re.findall(
     protocol, re.M))
 declarations = constants + '\n' + '\n'.join(
     extract_block(live, rf'^{kind} {name}\s*\{{', semicolon=True)
-    for kind, name in [('struct', 'packet_stats'), ('struct', 'tdma_stats'), ('enum', 'tdma_shadow_evidence')])
+    for kind, name in [('struct', 'packet_stats'), ('enum', 'tdma_shadow_evidence')])
 declarations += '\n' + '\n'.join(declaration(name) for name in slot_arrays + slot_masks + scalars)
+declarations += '\n#if defined(CONFIG_TDMA_DIAGNOSTICS)\n'
+declarations += extract_block(live, r'^struct tdma_stats\s*\{', semicolon=True)
+declarations += '\n' + '\n'.join(declaration(name) for name in diagnostic_arrays)
+declarations += '\n#endif\n'
 
 names = ['tdma_shadow_observe', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
          'esb_send_remote_command_sens', 'esb_send_remote_command_sens_auto',
@@ -92,10 +97,20 @@ for name in names:
     functions.append(body)
 
 seed = ['static void seed_slot(unsigned id) {']
-check = ['static void check_slot(unsigned id) {', 'uint8_t zero[sizeof(struct tdma_stats) + sizeof(struct packet_stats) + 32] = {0};']
-for name in slot_arrays:
+check = ['static void check_slot(unsigned id) {',
+         'uint8_t zero[sizeof(struct packet_stats) + 32] = {0};']
+for name in slot_arrays + diagnostic_arrays:
+    if name in diagnostic_arrays:
+        seed.append('#if defined(CONFIG_TDMA_DIAGNOSTICS)')
+        check.append('#if defined(CONFIG_TDMA_DIAGNOSTICS)')
     seed.append(f'memset((void *)&{name}[id], 1, sizeof({name}[id]));')
-    check.append(f'assert(memcmp((const void *)&{name}[id], zero, sizeof({name}[id])) == 0);')
+    check.append(f'assert(memcmp((const void *)&{name}[id], zero, sizeof({name}[id])) == 0);'
+                 if name != 'g_tdma_stats' else
+                 'for (size_t i = 0; i < sizeof(g_tdma_stats[id]); ++i) '
+                 'assert(((const uint8_t *)&g_tdma_stats[id])[i] == 0);')
+    if name in diagnostic_arrays:
+        seed.append('#endif')
+        check.append('#endif')
 for name in slot_masks:
     seed.append(f'{name} |= BIT(id);')
     check.append(f'assert(!({name} & BIT(id)));')
@@ -114,12 +129,14 @@ with tempfile.TemporaryDirectory(prefix='receiver-state-') as directory:
     probe.write_text(fixture)
     executable = temporary / 'probe'
     flags = [] if 'slots' in cases else ['-DSTATE_ONLY_LEGACY']
-    subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
-        '-std=gnu11', '-g', '-O1', '-fsanitize=address,undefined',
-        '-fno-omit-frame-pointer', '-fno-pie', '-no-pie',
-        '-I', str(temporary), '-I', str(ROOT / 'src'), *flags,
-        str(probe), str(ROOT / 'src/connection/tracker_roster.c'),
-        '-o', str(executable),
-    ], check=True)
-    for case in cases:
-        subprocess.run([str(executable), case], check=True, timeout=20)
+    for diagnostics in (False, True):
+        diagnostic_flags = ['-DCONFIG_TDMA_DIAGNOSTICS=1'] if diagnostics else []
+        subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
+            '-std=gnu11', '-g', '-O1', '-fsanitize=address,undefined',
+            '-fno-omit-frame-pointer', '-fno-pie', '-no-pie',
+            '-I', str(temporary), '-I', str(ROOT / 'src'), *flags, *diagnostic_flags,
+            str(probe), str(ROOT / 'src/connection/tracker_roster.c'),
+            '-o', str(executable),
+        ], check=True)
+        for case in cases:
+            subprocess.run([str(executable), case], check=True, timeout=20)
