@@ -822,8 +822,8 @@ void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
 
 	// Drop packets with all-zero quaternion (type 1 and 4: quat in bytes 2-9).
 	if (data[0] == 1 || data[0] == 4) {
-		const uint16_t *q = (const uint16_t *)&data[2];
-		if (q[0] == 0 && q[1] == 0 && q[2] == 0 && q[3] == 0) {
+		if ((data[2] | data[3] | data[4] | data[5] |
+		     data[6] | data[7] | data[8] | data[9]) == 0) {
 			return;
 		}
 	}

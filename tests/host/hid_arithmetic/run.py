@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise production HID RSSI, 32-bit uptime, and roster snapshots with UBSan."""
+"""Exercise production HID arithmetic, byte packets, and roster snapshots with UBSan."""
 import argparse
 import os
 from pathlib import Path
@@ -12,7 +12,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[3]
 parser = argparse.ArgumentParser()
 parser.add_argument('--source-root', type=Path, default=ROOT)
-parser.add_argument('--case', choices=('rssi', 'uptime', 'roster', 'all'), default='all')
+parser.add_argument('--case', choices=('rssi', 'uptime', 'roster', 'quaternion', 'all'), default='all')
 args = parser.parse_args()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness'))
 from c_extract import extract_block
@@ -136,6 +136,28 @@ static void test_rssi(void) {
     assert_rssi_report(15, -30, 226);
     assert_rssi_report(0, -60, 170);
 }
+static void test_quaternion(void) {
+    _Alignas(uint16_t) uint8_t storage[17];
+    volatile unsigned offsets[] = {0, 1};
+    for (unsigned alignment=0; alignment<2; alignment++) {
+        uint8_t *packet=storage+offsets[alignment];
+        for (unsigned type=1; type<=4; type+=3) {
+            memset(packet, 0xA5, 16);
+            packet[0]=(uint8_t)type;
+            memset(packet+2, 0, 8);
+            unsigned before=enqueued_count;
+            hid_write_packet_n(packet, 200);
+            assert(enqueued_count==before);
+            for (unsigned byte=2; byte<=9; byte++) {
+                packet[byte]=1;
+                hid_write_packet_n(packet, 200);
+                assert(enqueued_count==++before && enqueued_generation==0);
+                assert(!memcmp(enqueued_packet, packet, 16));
+                packet[byte]=0;
+            }
+        }
+    }
+}
 static void test_window(uint64_t start) {
     memset(&hid_stats, 0, sizeof(hid_stats));
     now=start;
@@ -212,6 +234,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "all") || !strcmp(argv[1], "rssi")) test_rssi();
     if (!strcmp(argv[1], "all") || !strcmp(argv[1], "uptime")) test_uptime();
     if (!strcmp(argv[1], "all") || !strcmp(argv[1], "roster")) test_roster();
+    if (!strcmp(argv[1], "all") || !strcmp(argv[1], "quaternion")) test_quaternion();
     puts("HID arithmetic/snapshot behavior passed");
 }
 '''
