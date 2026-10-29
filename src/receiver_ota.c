@@ -602,10 +602,6 @@ static void rcv_ota_handle_data(const uint8_t *data, size_t len)
 	}
 
 	uint16_t seq = sys_get_be16(&data[2]);
-	size_t payload_len = len - 4;
-	if (payload_len > OTA_DATA_MAX_PAYLOAD) {
-		payload_len = OTA_DATA_MAX_PAYLOAD;
-	}
 
 	/* Calculate expected payload for this seq */
 	uint32_t offset = (uint32_t)seq * OTA_DATA_MAX_PAYLOAD;
@@ -613,10 +609,7 @@ static void rcv_ota_handle_data(const uint8_t *data, size_t len)
 		LOG_WRN("RCV OTA: seq %u beyond image end", seq);
 		return;
 	}
-	uint32_t remaining = rcv_ota.image_size - offset;
-	if (payload_len > remaining) {
-		payload_len = remaining;
-	}
+	size_t payload_len = MIN(OTA_DATA_MAX_PAYLOAD, rcv_ota.image_size - offset);
 
 	/* Sequence check */
 	if (seq != rcv_ota.next_expected_seq) {
@@ -628,6 +621,9 @@ static void rcv_ota_handle_data(const uint8_t *data, size_t len)
 		rcv_ota.state = RCV_OTA_ERROR;
 		rcv_ota.error_code = OTA_STATUS_SEQ_ERROR;
 		rcv_ota_send_status();
+		return;
+	}
+	if (len - 4 < payload_len) {
 		return;
 	}
 

@@ -204,6 +204,7 @@ int main(int argc,char **argv) {
     else if(!strcmp(argv[1],"verify_timeout")) verify_timeout();
     else if(!strcmp(argv[1],"complete")) activation(false);
     else if(!strcmp(argv[1],"activation_error")) activation(true);
+    else if(!strcmp(argv[1],"data_payload")) data_payload_cases();
     else if(!strcmp(argv[1],"abort")) { command(HID_OTA_ABORT); assert(joins==0); begin(256); command(HID_OTA_ABORT); assert(joins==1 && rcv_ota.state==RCV_OTA_IDLE); begin(512); command(HID_OTA_ABORT); assert(joins==2 && creates==2); }
     else abort();
     printf("PASS %s mcuboot=%d\n",argv[1],TEST_MCUBOOT);
