@@ -214,8 +214,8 @@ static const uint8_t hid_report_desc[] = {
 	HID_END_COLLECTION,
 };
 
-uint16_t sent_device_addr = 0;
-int64_t last_registration_sent = 0;
+static uint16_t sent_device_addr = 0;
+static int64_t last_registration_sent = 0;
 
 //|type    |description
 //|TX   255|registration: associate tracker id with device address
