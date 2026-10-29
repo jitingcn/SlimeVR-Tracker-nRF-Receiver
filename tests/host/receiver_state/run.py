@@ -3,8 +3,7 @@
 
 Store and peripheral leaves are modeled; tuple tests inject a possible interrupt
 after each production shared-field store, without changing the store or order.
---source-root selects function bodies for baseline shadow/tuple comparisons;
-new roster APIs and declarations come from the live receiver contract.
+--source-root selects function bodies while declarations use the live contract.
 """
 import argparse
 import os
@@ -45,14 +44,14 @@ g_last_ping_rx_time_diff_ticks g_last_ping_rx_time_diff_valid g_ping_isr_rx_tick
 g_ping_isr_rx_ticks_valid g_last_isr_rx_ticks g_last_isr_rx_valid g_bias_ppb_valid
 g_bias_ppb g_bias_ref_offset g_bias_ref_ticks g_last_ping_isr_rx_ticks_raw
 g_ping_dirty_streak g_ping_reject_count g_extrap_skip_count
-tdma_shadow_last_seen_ms tdma_shadow_join_since_ms tdma_initial_ping_at_ms'''.split()
+tdma_shadow_last_seen_ms'''.split()
 slot_masks = '''test_all_confirmed_mask channel_target_mask tdma_shadow_ever_ping_mask
 tdma_shadow_ever_data_mask tdma_shadow_live_evidence_mask tdma_shadow_desired_mask
-tdma_shadow_pending_join_mask tdma_shadow_pending_leave_mask
-tdma_initial_allowed_mask tdma_initial_ping_mask'''.split()
+tdma_shadow_pending_join_mask tdma_shadow_pending_leave_mask'''.split()
 scalars = '''tdma_shadow_desired_changed_at_ms tracker_store_ready esb_clearing
-esb_pairing tdma_last_reconfig_time test_all_state_valid test_all_enabled
-test_all_requested_tps test_all_effective_tps test_all_generation'''.split()
+esb_pairing tdma_active_mask tdma_membership_deadline_ms tdma_membership_deadline_armed
+test_all_state_valid test_all_enabled test_all_requested_tps test_all_effective_tps
+test_all_generation'''.split()
 
 
 def declaration(name):
@@ -68,7 +67,7 @@ def function(name):
 
 
 constants = '\n'.join(re.findall(
-    r'^#define (?:PING_TIMEOUT_MS|REMOTE_COMMAND_ACTIVE_SCAN_MS|TDMA_SHADOW_\w+|RX_PHASE_BUCKETS|RX_RSSI_BUCKETS)\b[^\n]*', live, re.M))
+    r'^#define (?:PING_TIMEOUT_MS|REMOTE_COMMAND_ACTIVE_SCAN_MS|TDMA_SHADOW_\w+|TDMA_MEMBERSHIP_COHORT_MS|RX_PHASE_BUCKETS|RX_RSSI_BUCKETS)\b[^\n]*', live, re.M))
 protocol = (ROOT / 'src/connection/esb.h').read_text()
 constants += '\n' + '\n'.join(re.findall(
     r'^#define ESB_(?:PONG_FLAG_\w+|PING_FLAG_WOM_(?:RESULT|ERROR))\b[^\n]*',
@@ -78,7 +77,7 @@ declarations = constants + '\n' + '\n'.join(
     for kind, name in [('struct', 'packet_stats'), ('struct', 'tdma_stats'), ('enum', 'tdma_shadow_evidence')])
 declarations += '\n' + '\n'.join(declaration(name) for name in slot_arrays + slot_masks + scalars)
 
-names = ['tdma_shadow_observe', 'tdma_shadow_forget_tracker', 'tdma_shadow_update',
+names = ['tdma_shadow_observe', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
          'esb_send_remote_command_sens', 'esb_send_remote_command_sens_auto',
          'esb_send_remote_command_sens_auto_all', 'esb_send_remote_command_arg']
 if 'slots' in cases:

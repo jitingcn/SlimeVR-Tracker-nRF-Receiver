@@ -242,8 +242,18 @@ static void pairing(void)
         assert(tracker_events_receive(packet,17,host_now));
     }
     stored_trackers=16;
+    tdma_active_mask=BIT(2);
+    tdma_dynamic_active_count=1;
+    tdma_dynamic_slot_ticks=TDMA_SLOT_TICKS_MAX_LEVEL0;
+    tdma_config_epoch=1;
+    tdma_config_packed[2]=tdma_pack_config(0, 1, tdma_dynamic_slot_ticks, tdma_config_epoch);
+    atomic_set(&tdma_shadow_desired_mask, BIT(2));
+    tdma_last_reconfig_time=host_now;
+    tdma_last_reconfig_valid=true;
     esb_clear();
     assert(stored_trackers==0 && irq_depth==0);
+    assert(tdma_active_mask==0 && tdma_dynamic_active_count==0);
+    assert(tdma_last_reconfig_valid && tdma_last_reconfig_time==host_now);
     assert(!tracker_events_hid_valid(saved,generation,host_now));
     tracker_events_process(host_now); assert(count==0);
     e.nonce++; e.event_seq=1; receive(e); assert(count==1);

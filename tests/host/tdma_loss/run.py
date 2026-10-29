@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise production sequence/recovery bodies, optionally from a pre-change tree."""
+"""Exercise production sequence, membership and recovery bodies."""
 
 import argparse
 import os
@@ -27,6 +27,7 @@ CASES = (
     'auto-snapshot',
     'sequence-lifetime',
     'blackout-reanchor',
+    'ingress-membership',
     'blackout-loss-evidence',
     'decision-common-boundary',
     'decision-short-boundary',
@@ -61,11 +62,37 @@ def function(source, name, optional=False):
         return ''
     raise ValueError(f'Missing production function: {name}')
 
+def declaration(source, name):
+    pattern = (r'^static[ \t]+(?:volatile[ \t]+)?(?:const[ \t]+)?'
+               r'(?:[A-Za-z_]\w*[ \t]+)+' + re.escape(name) + r'\b[^;]*;')
+    matches = list(re.finditer(pattern, source, re.MULTILINE))
+    if len(matches) != 1:
+        raise ValueError(f'Expected one production declaration for {name}, found {len(matches)}')
+    return matches[0].group()
+
+
+def membership_declarations(source):
+    start = source.index('#define PING_TIMEOUT_MS')
+    end = source.index('static void tdma_shadow_observe', start)
+    return '\n'.join((
+        declaration(source, 'tdma_last_reconfig_time'),
+        declaration(source, 'tdma_last_reconfig_valid'),
+        source[start:end],
+    ))
+
+
+def membership_bodies(source):
+    return '\n'.join(function(source, name) for name in (
+        'tdma_shadow_observe', 'tdma_shadow_forget_tracker',
+        'tdma_shadow_merge_locked', 'tdma_shadow_update',
+        'tdma_membership_wait_ms',
+    ))
+
+
 
 def production_bodies(source, header=''):
-    # Keep the selected tree's constants and state names together. Older trees
-    # use *_WINDOWS / *_window_*; current code uses *_TICKS / *_pool_*.
-    constants_start = source.index('static const uint16_t tdma_cap_ladder')
+    # Extract each selected source tree's constants and loss-controller state.
+    constants_start = source.index('#define TDMA_RECONFIG_MIN_MS')
     constants_end = source.index('#define TDMA_SYNC_EXTRAP_MAX_TICKS')
     constants = source[constants_start:constants_end]
     declarations = '\n'.join(re.findall(
@@ -118,6 +145,7 @@ def production_bodies(source, header=''):
                       'do {\n' + source[start:end] + 'return true;\n} while (0);\nreturn false;\n}\n')
     return '\n'.join((
         constants,
+        membership_declarations(source),
         declarations,
         structure,
         'static struct packet_stats tracker_stats[MAX_TRACKERS];',
@@ -130,6 +158,7 @@ def production_bodies(source, header=''):
         restart_wrapper,
         function(source, 'tdma_pack_config'),
         function(source, 'tdma_slot_ticks_for'),
+        membership_bodies(source),
         function(source, 'tdma_recalculate'),
         admission,
     ))

@@ -14,11 +14,17 @@
 #define TDMA_BASE_SLOT_TICKS 16
 #define TDMA_SLOT_TICKS_MAX_LEVEL0 64
 #define TDMA_SLOT_ROTATION 0
-#define TDMA_RECONFIG_MIN_MS 5000
 #define LOG_INF(...)
 #define LOG_WRN(...)
 #define LOG_DBG(...)
 #define TPS_CALCULATION_INTERVAL_MS 1000
+#define ATOMIC_INIT(x) (x)
+#define K_SEM_DEFINE(name, initial, maximum) struct fixture_sem name = {initial}
+
+typedef int32_t atomic_t;
+typedef int32_t atomic_val_t;
+struct fixture_sem { unsigned count; };
+
 
 static int64_t now = 1000;
 static uint32_t tdma_active_mask = BIT(3);
@@ -31,9 +37,9 @@ static uint8_t last_packet_sequence[MAX_TRACKERS];
 static bool sequence_initialized[MAX_TRACKERS];
 static int tdma_rx_discontinuity_pending, channel_change_pending;
 static int atomic_set(int *value, int next) { int old = *value; *value = next; return old; }
-struct payload { uint8_t data[64]; unsigned length; };
-#define TDMA_SHADOW_EVIDENCE_DATA 1
-static void tdma_shadow_observe(uint8_t id, int evidence) {}
+struct payload { uint8_t data[64]; unsigned length; uint8_t pipe; };
+static int atomic_or(int *value, int bits) { int old = *value; *value |= bits; return old; }
+static int atomic_and(int *value, int bits) { int old = *value; *value &= bits; return old; }
 static unsigned sched_depth;
 static void k_sched_lock(void) { assert(sched_depth++ == 0); }
 static void k_sched_unlock(void) { assert(sched_depth-- == 1); }
@@ -44,6 +50,8 @@ static int64_t k_uptime_get(void)
 {
 	return now;
 }
+static uint32_t k_uptime_get_32(void) { return (uint32_t)now; }
+
 
 static int atomic_get(const int *value)
 {
@@ -79,13 +87,8 @@ static bool self_ota, esb_pairing, esb_clearing, esb_radio_fault, busy;
 static bool abort_pending[MAX_TRACKERS], ping_counter_initialized[MAX_TRACKERS];
 static uint8_t receiver_rf_channel = ESB_RF_CHANNEL_DEFAULT;
 static uint32_t auto_loss_reset_epoch;
-static int tdma_shadow_desired_mask = BIT(3);
-static int tdma_shadow_pending_join_mask, tdma_shadow_pending_leave_mask;
 static uint8_t tdma_config_epoch, tdma_dynamic_slot_ticks, tdma_dynamic_active_count;
 static uint32_t tdma_config_packed[MAX_TRACKERS];
-static int64_t tdma_last_reconfig_time;
-static bool tdma_initial_done, tdma_initial_started;
-static uint32_t tdma_initial_ping_mask;
 static uint8_t stored_trackers = 4;
 static void test_all_note_layout(uint32_t old, uint32_t next, int64_t at) {}
 static void test_all_update_effective(uint8_t count, int64_t at, bool reset) {}
@@ -95,6 +98,7 @@ static bool esb_ota_relay_abort_pending(uint8_t id) { return abort_pending[id]; 
 static unsigned irq_depth;
 static unsigned irq_lock(void) { return irq_depth++; }
 static void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth = key; }
+static void k_sem_give(struct fixture_sem *sem) { assert(!irq_depth); sem->count = 1; }
 static void hid_reset_rssi_smooth(uint8_t id) { assert(irq_depth == 0); }
 static void tdma_sync_stats_reset(void) {}
 
@@ -393,7 +397,7 @@ static void blackout_reanchor(void)
 		assert(auto_loss_reset_epoch != epoch);
 		for (unsigned t = 0; t < MAX_TRACKERS; ++t) {
 			uint8_t seq = (uint8_t)(100 + offsets[o]);
-			struct payload p = {.length = 20};
+			struct payload p = {.length = 20, .pipe = 1 + t % 7};
 			p.data[t & 1 ? 19 : 16] = seq;
 			bool (*admit)(uint8_t, struct payload) = t & 1 ? composite_admit : normal_admit;
 			uint32_t gaps = tracker_stats[t].total_gaps;
@@ -413,6 +417,32 @@ static void blackout_reanchor(void)
 	esb_rx_discontinuity();
 	for (unsigned seq = 64; seq <= 101; ++seq)
 		assert(check_packet_sequence(0, seq) == 0);
+}
+
+static void ingress_membership(void)
+{
+	struct payload p = {.length = 20, .pipe = 1};
+	p.data[16] = 10;
+	assert(normal_admit(1, p)); /* Forwarded, but wrong-pipe evidence is ignored. */
+	assert(!atomic_get(&tdma_shadow_pending_join_mask));
+	assert(!atomic_get(&tdma_shadow_live_evidence_mask));
+	p.pipe = 2;
+	p.data[16] = 11;
+	assert(normal_admit(1, p));
+	assert((uint32_t)atomic_get(&tdma_shadow_pending_join_mask) == BIT(1));
+	assert(tdma_membership_deadline_armed && tdma_membership_wake.count == 1);
+	uint32_t deadline = tdma_membership_deadline_ms;
+	now += 10;
+	p.pipe = 1;
+	p.data[19] = 40;
+	assert(composite_admit(2, p));
+	assert((uint32_t)atomic_get(&tdma_shadow_pending_join_mask) == BIT(1));
+	p.pipe = 3;
+	p.data[19] = 41;
+	assert(composite_admit(2, p));
+	assert((uint32_t)atomic_get(&tdma_shadow_pending_join_mask) == (BIT(1) | BIT(2)));
+	assert((uint32_t)atomic_get(&tdma_shadow_last_seen_ms[2]) == (uint32_t)now);
+	assert(tdma_membership_deadline_ms == deadline);
 }
 
 static void blackout_loss_evidence(void)
@@ -498,14 +528,18 @@ static void decision_layout_boundary(void)
 	for (unsigned i = 0; i < 4; ++i) check_packet_sequence(i, 10);
 	tdma_dynamic_slot_ticks = tdma_slot_ticks_for(4);
 	tdma_dynamic_active_count = 4;
+	tdma_config_epoch = 1;
+	for (unsigned i = 0; i < 4; ++i)
+		tdma_config_packed[i] = tdma_pack_config(i, 4, tdma_dynamic_slot_ticks, tdma_config_epoch);
 	tdma_last_reconfig_time = now;
+	tdma_last_reconfig_valid = true;
 	esb_get_auto_loss_snapshot(&before);
 	tdma_cap_level = 1;
-	tdma_recalculate(); /* Debounced: pending must be visible. */
+	tdma_recalculate(false); /* Debounced: pending must be visible. */
 	esb_get_auto_loss_snapshot(&after);
 	assert(after.cap_pending && after.reset_epoch == before.reset_epoch);
 	now += TDMA_LOSS_RECONFIG_MIN_MS;
-	tdma_recalculate(); /* Same roster, real physical width change. */
+	tdma_recalculate(false); /* Same roster, real physical width change. */
 	esb_get_auto_loss_snapshot(&after);
 	assert(after.active_mask == before.active_mask);
 	assert(after.layout_epoch != before.layout_epoch);
@@ -528,10 +562,20 @@ static void decision_layout_boundary(void)
 static void decision_pending_membership(void)
 {
 	struct esb_auto_loss_snapshot snapshot;
-	tdma_shadow_pending_join_mask = BIT(4);
+	stored_trackers = 5;
+	tdma_shadow_observe(4, TDMA_SHADOW_EVIDENCE_DATA);
+	assert((uint32_t)atomic_get(&tdma_shadow_pending_join_mask) == BIT(4));
 	esb_get_auto_loss_snapshot(&snapshot);
 	assert(!snapshot.eligible);
-	tdma_shadow_pending_join_mask = 0;
+	tdma_shadow_update((uint32_t)now);
+	assert(!atomic_get(&tdma_shadow_pending_join_mask));
+	assert((uint32_t)atomic_get(&tdma_shadow_desired_mask) == (BIT(3) | BIT(4)));
+	assert(tdma_active_mask == BIT(3));
+	esb_get_auto_loss_snapshot(&snapshot);
+	assert(!snapshot.eligible); /* Merged desired membership is not yet published. */
+	unsigned int key = irq_lock();
+	tdma_shadow_forget_tracker(4);
+	irq_unlock(key);
 	tdma_shadow_pending_leave_mask = BIT(3);
 	esb_get_auto_loss_snapshot(&snapshot);
 	assert(!snapshot.eligible);
@@ -583,6 +627,7 @@ static const struct {
 	{"auto-snapshot", auto_snapshot},
 	{"sequence-lifetime", sequence_lifetime},
 	{"blackout-reanchor", blackout_reanchor},
+	{"ingress-membership", ingress_membership},
 	{"blackout-loss-evidence", blackout_loss_evidence},
 	{"decision-common-boundary", decision_common_boundary},
 	{"decision-short-boundary", decision_short_boundary},
@@ -594,6 +639,7 @@ static const struct {
 int main(int argc, char **argv)
 {
 	assert(argc == 2);
+	atomic_set(&tdma_shadow_desired_mask, BIT(3));
 	tdma_cap_level = 3;
 	tdma_published_cap_level = 3;
 	tdma_decision_ready = true;

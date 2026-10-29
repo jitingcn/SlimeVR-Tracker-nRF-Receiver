@@ -155,13 +155,38 @@ def main():
         (path/'zephyr/logging/log.h').write_text(LOGGING)
         (path/'zephyr/sys/util.h').write_text('#include <zephyr/kernel.h>\n')
         esb = (root/'src/connection/esb.c').read_text()
+        extract_spec = importlib.util.spec_from_file_location(
+            'tdma_loss_extract', Path(__file__).resolve().parent.parent / 'tdma_loss/run.py')
+        extract = importlib.util.module_from_spec(extract_spec)
+        extract_spec.loader.exec_module(extract)
+        layout_constants = esb[esb.index('#define TDMA_BASE_SLOT_TICKS'):
+                               esb.index('#define TDMA_SYNC_EXTRAP_MAX_TICKS')]
+        layout_names = '''tdma_config_packed tdma_config_epoch tdma_dynamic_active_count
+            tdma_dynamic_slot_ticks tdma_active_mask tdma_cap_level tdma_published_cap_level
+            tdma_loss_trigger_streak_ticks tdma_loss_recover_streak_ticks
+            tdma_loss_probe_streak_ticks tdma_loss_pool_received tdma_loss_pool_gaps
+            tdma_loss_pool_ticks'''.split()
+        declarations = '\n'.join([layout_constants, extract.membership_declarations(esb)] +
+                                 [extract.declaration(esb, name) for name in layout_names])
+        (path/'esb_membership_declarations.inc').write_text(declarations)
+        membership = '\n'.join(function(esb, name) for name in (
+            'tdma_loss_reset_windows', 'tdma_pack_config', 'tdma_shadow_observe',
+            'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked',
+            'tdma_slot_ticks_for', 'tdma_recalculate'))
         lengths = esb[esb.index('static int composite_body_length('):esb.index('void event_handler(')]
         composite = esb[esb.index('handle_composite_packet:'):esb.index('\n\t\t\t} break;', esb.index('handle_composite_packet:'))]
         clear = function(esb, 'esb_clear')
         (path/'esb_event_paths.inc').write_text(
-            lengths + '\nstatic void composite_receive(void) { do { switch (0) { case 0: {\n'
-            + composite.replace('handle_composite_packet:', '')
-            + '\n} break; } } while (0); }\n' + clear)
+            membership + '\n' + lengths + '''
+static void tracked_tdma_shadow_observe(uint8_t tracker, enum tdma_shadow_evidence kind) {
+    assert(tracker==2 && kind==TDMA_SHADOW_EVIDENCE_DATA);
+    evidence_calls++;
+    tdma_shadow_observe(tracker, kind);
+}
+#define tdma_shadow_observe tracked_tdma_shadow_observe
+static void composite_receive(void) { do { switch (0) { case 0: {
+''' + composite.replace('handle_composite_packet:', '')
+            + '\n} break; } } while (0); }\n#undef tdma_shadow_observe\n' + clear)
         binary = path/'test'
         command = shlex.split(os.environ.get('CC','cc')) + [
             '-std=c11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',

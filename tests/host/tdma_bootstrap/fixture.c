@@ -29,7 +29,7 @@ static unsigned irq_depth, mutex_depth;
 static unsigned irq_lock(void) { return irq_depth++; }
 static void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth = key; }
 struct fixture_sem { unsigned count; };
-static struct fixture_sem tdma_initial_wake;
+static struct fixture_sem tdma_membership_wake;
 static unsigned wake_signals;
 static void k_sem_give(struct fixture_sem *sem)
 {
@@ -38,11 +38,17 @@ static void k_sem_give(struct fixture_sem *sem)
     ++wake_signals;
 }
 static int tracker_store_lock;
+static void (*mutex_hook)(void);
 static void k_mutex_lock(int *lock, int timeout)
 {
     (void)lock; (void)timeout;
     assert(!irq_depth && !mutex_depth);
     ++mutex_depth;
+    if (mutex_hook) {
+        void (*hook)(void) = mutex_hook;
+        mutex_hook = NULL;
+        hook();
+    }
 }
 static void k_mutex_unlock(int *lock)
 {
@@ -65,7 +71,16 @@ static int tracker_roster_load(uint8_t *count, uint64_t *addresses)
 }
 static bool data_collect_is_active(void) { return false; }
 static bool data_collect_batch_is_active(void) { return false; }
-static void tdma_sync_stats_reset(void) { assert(!irq_depth); }
+static void (*sync_hook)(void);
+static void tdma_sync_stats_reset(void)
+{
+    assert(!irq_depth);
+    if (sync_hook) {
+        void (*hook)(void) = sync_hook;
+        sync_hook = NULL;
+        hook();
+    }
+}
 static unsigned loss_invalidations, membership_notifications, effective_updates;
 static uint32_t last_notified_mask;
 static uint8_t last_effective_slots;
@@ -103,22 +118,24 @@ static void reset_fixture(uint8_t count, uint64_t time)
 {
     assert(!irq_depth && !mutex_depth && count <= MAX_TRACKERS);
     now_ms = time; restore_error = 0; saved_count = count;
+    tdma_active_mask = 0;
+    unsigned int key = irq_lock();
     for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
         saved_addr[i] = i < count ? 1000 + i : 0;
         stored_tracker_addr[i] = 0;
         tdma_config_packed[i] = 0;
         tdma_shadow_forget_tracker(i);
-        tdma_initial_ping_at_ms[i] = 0;
     }
+    irq_unlock(key);
     stored_trackers = 0; tracker_store_ready = false;
     tdma_config_epoch = tdma_dynamic_active_count = tdma_dynamic_slot_ticks = 0;
-    tdma_active_mask = 0; tdma_last_reconfig_time = 0;
-    tdma_initial_allowed_mask = tdma_initial_ping_mask = tdma_initial_deadline_ms = 0;
-    tdma_initial_started = tdma_initial_done = false;
+    tdma_last_reconfig_time = 0; tdma_last_reconfig_valid = false;
+    tdma_membership_deadline_ms = 0; tdma_membership_deadline_armed = false;
     tdma_cap_level = tdma_published_cap_level = 0;
     tdma_loss_reset_windows(); atomic_set(&test_all_enabled, 0);
     atomic_set(&tdma_shadow_desired_changed_at_ms, 0);
-    tdma_initial_wake.count = wake_signals = 0;
+    tdma_membership_wake.count = wake_signals = 0;
+    sync_hook = NULL; mutex_hook = NULL;
     loss_invalidations = membership_notifications = effective_updates = 0;
     last_notified_mask = 0; last_effective_slots = 0;
     memset(pipe_mismatch_count, 0, sizeof(pipe_mismatch_count));
@@ -140,11 +157,18 @@ static bool ping(uint8_t id, bool valid_crc)
     return host_validated_ping();
 }
 
-static void process_initial(void)
+static void service(void)
 {
-    assert(tdma_initial_due((uint32_t)now_ms));
     k_mutex_lock(&tracker_store_lock, K_FOREVER);
-    tdma_initial_process((uint32_t)now_ms);
+    tdma_shadow_update((uint32_t)now_ms);
+    tdma_recalculate(false);
+    k_mutex_unlock(&tracker_store_lock);
+}
+
+static void force_layout(void)
+{
+    k_mutex_lock(&tracker_store_lock, K_FOREVER);
+    tdma_recalculate(true);
     k_mutex_unlock(&tracker_store_lock);
 }
 
@@ -155,28 +179,30 @@ static void all_rosters(uint64_t base)
     for (uint8_t n = 1; n <= MAX_TRACKERS; ++n) {
         reset_fixture(n, base);
         assert(tracker_store_restore() == 0 && tracker_store_ready);
-        assert(!tdma_initial_started && !tdma_initial_done && !tdma_dynamic_active_count);
         assert(ping(0, true));
-        uint32_t deadline = (uint32_t)(base + TDMA_INITIAL_COHORT_MS + 1U);
-        assert(tdma_initial_deadline_ms == deadline && wake_signals == 1);
-        assert(tdma_initial_wait_ms(500) == TDMA_INITIAL_COHORT_MS + 1U);
+        assert(ping(0, true) && wake_signals == 1);
+        assert(tdma_membership_deadline_ms == (uint32_t)(base + 101));
+        assert(tdma_membership_wait_ms(500) == 101);
+        service();
+        assert((uint32_t)atomic_get(&tdma_shadow_desired_mask) == BIT(0));
+        assert(!tdma_active_mask && !atomic_get(&tdma_shadow_pending_join_mask));
         for (uint8_t id = 1; id < n; ++id) {
-            now_ms = base + ((uint32_t)id * TDMA_INITIAL_COHORT_MS) / (n - 1);
+            now_ms = base + ((uint32_t)id * 100U) / (n - 1);
             assert(ping(id, true));
         }
-        now_ms = base + TDMA_INITIAL_COHORT_MS;
-        assert(ping(0, true)); /* duplicate does not defer deadline */
-        assert(tdma_initial_deadline_ms == deadline && wake_signals == 1);
-        assert(!tdma_initial_due((uint32_t)now_ms));
-        assert(tdma_initial_wait_ms(500) == 1);
-        assert(!tdma_dynamic_active_count && !tdma_active_mask);
-        now_ms = base + TDMA_INITIAL_COHORT_MS + 1U;
-        assert(tdma_initial_wait_ms(500) == 0);
-        process_initial();
-        assert(tdma_initial_done && !tdma_initial_started);
-        assert(tdma_dynamic_active_count == n && tdma_active_mask == BIT(n) - 1U);
+        now_ms = base + 100;
+        assert(ping(0, true));
+        service();
+        assert(tdma_membership_deadline_ms == (uint32_t)(base + 101));
+        assert(tdma_membership_wait_ms(500) == 1);
+        assert(!tdma_active_mask && !tdma_last_reconfig_valid);
         assert((uint32_t)atomic_get(&tdma_shadow_desired_mask) == BIT(n) - 1U);
-        assert(!atomic_get(&tdma_shadow_pending_join_mask));
+        now_ms = base + 101;
+        assert(tdma_membership_wait_ms(500) == 0);
+        service();
+        assert(tdma_dynamic_active_count == n && tdma_active_mask == BIT(n) - 1U);
+        assert(!tdma_membership_deadline_armed && !atomic_get(&tdma_shadow_pending_join_mask));
+        assert(tdma_last_reconfig_valid && tdma_last_reconfig_time == (int64_t)now_ms);
         assert(last_notified_mask == BIT(n) - 1U && last_effective_slots == n);
         assert(tdma_dynamic_slot_ticks == widths[n]);
         for (uint8_t id = 0; id < n; ++id) {
@@ -185,108 +211,284 @@ static void all_rosters(uint64_t base)
             assert(epoch_of(cfg) == tdma_config_epoch);
         }
         uint8_t epoch = tdma_config_epoch;
-        now_ms += 1000; tdma_shadow_update((uint32_t)now_ms); tdma_recalculate();
-        assert(tdma_config_epoch == epoch); /* no saved-roster -> compact handoff */
+        now_ms += 1000;
+        service();
+        assert(tdma_config_epoch == epoch && tdma_last_reconfig_time == (int64_t)(base + 101));
     }
 }
 
-static void eligibility_and_stale(void)
+static void invalid_and_stale_evidence(void)
 {
     reset_fixture(2, 0); assert(tracker_store_restore() == 0);
     assert(!ping(0, false));
     assert(!ping(16, true));
-    assert(ping(2, true)); /* valid packet, but not a paired roster ID */
+    assert(ping(2, true)); /* Valid PING but not a stored ID. */
     memset(&rx_payload, 0, sizeof(rx_payload));
     rx_payload.length = ESB_PING_LEN; rx_payload.data[0] = ESB_PING_TYPE;
-    rx_payload.data[1] = 0; rx_payload.pipe = 2; /* ID 0 belongs on pipe 1. */
+    rx_payload.data[1] = 0; rx_payload.pipe = 2;
     rx_payload.data[ESB_PING_LEN - 1] = crc8_ccitt(0x07, rx_payload.data, ESB_PING_LEN - 1);
-    assert(host_validated_ping()); /* normal diagnostics retain this behavior */
-    tdma_shadow_observe(1, TDMA_SHADOW_EVIDENCE_DATA);
-    assert(!tdma_initial_started && !tdma_initial_ping_mask && !wake_signals);
-    now_ms = 10000; assert(!tdma_initial_due((uint32_t)now_ms));
-    assert(!tdma_config_epoch && !tdma_dynamic_active_count);
-    assert(ping(1, true) && tdma_initial_started);
-    now_ms += TDMA_SHADOW_FRESH_MS + 1;
-    process_initial(); /* stale cohort does not promote a slot */
-    assert(!tdma_initial_done && !tdma_initial_started && !tdma_dynamic_active_count);
-    assert(ping(1, true) && tdma_initial_started && wake_signals == 2);
-    now_ms += TDMA_INITIAL_COHORT_MS + 1;
-    process_initial();
+    rx_payload.length = ESB_PING_LEN - 1;
+    assert(!host_validated_ping());
+    rx_payload.length = ESB_PING_LEN; rx_payload.data[0] ^= 1;
+    assert(!host_validated_ping());
+    rx_payload.data[0] = ESB_PING_TYPE;
+    assert(host_validated_ping()); /* The rest of the packet path is unchanged. */
+    assert(!atomic_get(&tdma_shadow_live_evidence_mask));
+    assert(!tdma_membership_deadline_armed && !wake_signals);
+    service();
+    assert(!tdma_active_mask && !tdma_last_reconfig_valid);
+
+    assert(ping(1, true));
+    assert(atomic_get(&tdma_shadow_pending_join_mask) == BIT(1));
+    now_ms = TDMA_SHADOW_FRESH_MS;
+    service();
+    assert(!tdma_active_mask && !atomic_get(&tdma_shadow_live_evidence_mask));
+    assert(!tdma_membership_deadline_armed && !atomic_get(&tdma_shadow_pending_join_mask));
+    assert(ping(1, true));
+    assert(wake_signals == 2 && tdma_membership_deadline_ms == TDMA_SHADOW_FRESH_MS + 101);
+    service();
+    assert((uint32_t)atomic_get(&tdma_shadow_desired_mask) == BIT(1) && !tdma_active_mask);
+    now_ms += 100;
+    service();
+    assert(!tdma_active_mask && tdma_membership_wait_ms(500) == 1);
+    now_ms++;
+    service();
     assert(tdma_active_mask == BIT(1) && slot(tdma_config_packed[1]) == 0);
+    uint32_t last_seen = (uint32_t)atomic_get(&tdma_shadow_last_seen_ms[1]);
+    now_ms++;
+    rx_payload.pipe = 1; /* ID 1 belongs on pipe 2. */
+    assert(host_validated_ping());
+    assert((uint32_t)atomic_get(&tdma_shadow_last_seen_ms[1]) == last_seen);
+
+    reset_fixture(1, 0); assert(tracker_store_restore() == 0);
+    assert(ping(0, true)); service();
+    assert((uint32_t)atomic_get(&tdma_shadow_desired_mask) == 1 && !tdma_active_mask);
+    now_ms = TDMA_SHADOW_FRESH_MS; service();
+    assert(!atomic_get(&tdma_shadow_desired_mask) && !tdma_membership_deadline_armed);
+    assert(ping(0, true)); service();
+    now_ms += 101; service();
+    assert(tdma_active_mask == 1);
 }
 
-static void later_join_and_removal(void)
+static void fresh_joins_and_spacing(void)
 {
-    reset_fixture(4, 1000); assert(tracker_store_restore() == 0);
+    reset_fixture(0, 1600); assert(tracker_store_restore() == 0);
+    stored_trackers = 4; /* IDs paired after the empty roster was restored. */
     assert(ping(0, true));
-    now_ms = 1101; process_initial();
-    uint8_t epoch = tdma_config_epoch;
-    now_ms = 1102; assert(ping(1, true)); /* outside initial window */
-    tdma_shadow_update((uint32_t)now_ms); tdma_recalculate();
-    assert(tdma_config_epoch == epoch && slot(tdma_config_packed[1]) == 0xff);
-    now_ms = 3102; assert(ping(1, true));
-    tdma_shadow_update((uint32_t)now_ms); tdma_recalculate();
-    assert(tdma_config_epoch == epoch); /* ordinary 5 s layout debounce */
-    now_ms = 6101; assert(ping(1, true));
-    tdma_shadow_update((uint32_t)now_ms); tdma_recalculate();
-    assert(tdma_config_epoch == (uint8_t)(epoch + 1));
-    assert(tdma_active_mask == (BIT(0) | BIT(1)) && total(tdma_config_packed[1]) == 2);
+    service();
+    assert(tdma_active_mask == 0 && (uint32_t)atomic_get(&tdma_shadow_desired_mask) == BIT(0));
+    now_ms = 1700;
+    service();
+    assert(!tdma_active_mask && tdma_membership_wait_ms(500) == 1);
+    now_ms = 1701;
+    service();
+    assert(tdma_active_mask == BIT(0) && tdma_last_reconfig_time == 1701);
 
-    reset_fixture(3, 0); assert(tracker_store_restore() == 0);
-    assert(ping(0, true) && ping(2, true));
-    host_forget_initial_id(2); stored_trackers = 2;
-    /* A new tracker reusing the ID is not in the saved-at-boot cohort. */
-    stored_trackers = 3; assert(ping(2, true));
-    assert(!(tdma_initial_allowed_mask & BIT(2)) && !(tdma_initial_ping_mask & BIT(2)));
-    now_ms = 101; process_initial();
-    assert(tdma_active_mask == BIT(0) && slot(tdma_config_packed[2]) == 0xff);
+    now_ms = 1702; assert(ping(1, true));
+    assert(atomic_get(&tdma_shadow_pending_join_mask) == BIT(1));
+    service();
+    assert(!atomic_get(&tdma_shadow_pending_join_mask));
+    assert((uint32_t)atomic_get(&tdma_shadow_desired_mask) == 3 && tdma_active_mask == 1);
+    assert(slot(tdma_config_packed[1]) == 0xff);
+    uint32_t first_deadline = tdma_membership_deadline_ms;
+    now_ms = 1750; assert(ping(2, true));
+    service();
+    assert(tdma_membership_deadline_ms == first_deadline && first_deadline == 1803);
+    now_ms = 2700;
+    service();
+    assert(tdma_active_mask == 1 && tdma_membership_wait_ms(500) == 1);
+    now_ms = 2701;
+    service();
+    assert(tdma_active_mask == 7 && tdma_last_reconfig_time == 2701);
+    assert(slot(tdma_config_packed[1]) == 1 && slot(tdma_config_packed[2]) == 2);
+    uint8_t epoch = tdma_config_epoch;
+
+    /* Evidence after the snapshot starts a new batch even in the same tick. */
+    assert(ping(3, true));
+    assert(tdma_membership_deadline_ms == 2802);
+    service();
+    assert(tdma_active_mask == 7 && (uint32_t)atomic_get(&tdma_shadow_desired_mask) == 15);
+    now_ms = 3700;
+    service();
+    assert(tdma_active_mask == 7 && tdma_membership_wait_ms(500) == 1);
+    now_ms = 3701;
+    service();
+    assert(tdma_active_mask == 15 && tdma_config_epoch == (uint8_t)(epoch + 1));
+}
+
+static void deadline_anchors(void)
+{
+    reset_fixture(1, 1600); assert(tracker_store_restore() == 0);
+    assert(ping(0, true));
+    now_ms = 1800;
+    service();
+    assert(tdma_active_mask == 1 && tdma_last_reconfig_time == 1800);
+
+    reset_fixture(2, 899); assert(tracker_store_restore() == 0);
+    assert(ping(0, true)); service();
+    now_ms = 1000; service();
+    assert(tdma_last_reconfig_time == 1000);
+    now_ms = 1600; assert(ping(1, true)); service();
+    assert(tdma_membership_deadline_ms == 1701);
+    now_ms = 1999; service();
+    assert(tdma_active_mask == 1 && tdma_membership_wait_ms(500) == 1);
+    now_ms = 2000; service();
+    assert(tdma_active_mask == 3 && tdma_last_reconfig_time == 2000);
 
     reset_fixture(2, 0); assert(tracker_store_restore() == 0);
-    assert(ping(0, true));
-    host_forget_initial_id(0); host_forget_initial_id(1); stored_trackers = 0;
-    now_ms = 101; process_initial();
-    assert(!tdma_active_mask && !tdma_dynamic_active_count && !tdma_config_epoch);
+    assert(ping(0, true)); service(); force_layout();
+    assert(tdma_active_mask == 1 && tdma_last_reconfig_valid && tdma_last_reconfig_time == 0);
+    now_ms = 100; assert(ping(1, true)); service();
+    now_ms = 999; service();
+    assert(tdma_active_mask == 1 && tdma_membership_wait_ms(500) == 1);
+    now_ms = 1000; service();
+    assert(tdma_active_mask == 3 && tdma_last_reconfig_time == 1000);
 
-    /* If the regular owner publishes first, the pending fast window cannot
-     * seed another layout or turn the unassigned peer into an active member. */
-    reset_fixture(2, 1000); assert(tracker_store_restore() == 0);
-    assert(ping(0, true) && tdma_initial_started);
-    atomic_set(&tdma_shadow_desired_mask, BIT(1)); /* ordinary confirmed evidence */
-    now_ms = 1050; tdma_recalculate();
-    assert(tdma_initial_done && !tdma_initial_started && tdma_active_mask == BIT(1));
-    epoch = tdma_config_epoch;
-    now_ms = 1101;
-    assert(!tdma_initial_due((uint32_t)now_ms));
-    tdma_initial_process((uint32_t)now_ms);
-    assert(tdma_config_epoch == epoch && tdma_active_mask == BIT(1));
+    reset_fixture(1, (uint64_t)UINT32_MAX - 100); assert(tracker_store_restore() == 0);
+    assert(ping(0, true)); service();
+    assert(tdma_membership_deadline_armed && tdma_membership_deadline_ms == 0);
+    assert(tdma_membership_wait_ms(500) == 101);
+    now_ms = (uint64_t)UINT32_MAX + 1; service();
+    assert(tdma_active_mask == 1 && tdma_last_reconfig_time == (int64_t)now_ms);
 }
 
-static void restore_and_empty_roster(void)
+static void inject_before_snapshot(void)
+{
+    assert(ping(1, true));
+}
+
+static void expire_before_snapshot(void)
+{
+    now_ms += TDMA_SHADOW_FRESH_MS;
+}
+
+static void snapshot_and_reuse(void)
+{
+    reset_fixture(3, 10); assert(tracker_store_restore() == 0);
+    assert(ping(0, true)); service();
+    now_ms = 111; sync_hook = inject_before_snapshot; service();
+    assert(tdma_active_mask == 3 && slot(tdma_config_packed[1]) == 1);
+    assert(ping(2, true)); service();
+    assert(tdma_active_mask == 3 && (uint32_t)atomic_get(&tdma_shadow_desired_mask) == 7);
+    now_ms = 1111; service();
+    assert(tdma_active_mask == 7);
+
+    reset_fixture(1, 0); assert(tracker_store_restore() == 0);
+    assert(ping(0, true)); service();
+    now_ms = 101; sync_hook = expire_before_snapshot; service();
+    assert(!tdma_active_mask && !atomic_get(&tdma_shadow_desired_mask));
+    assert(!tdma_membership_deadline_armed && !tdma_last_reconfig_valid);
+    assert(ping(0, true)); service();
+    now_ms += 101; service();
+    assert(tdma_active_mask == 1);
+
+    reset_fixture(3, 10); assert(tracker_store_restore() == 0);
+    assert(ping(0, true) && ping(1, true) && ping(2, true)); service();
+    now_ms = 111; service();
+    assert(tdma_active_mask == 7);
+
+    now_ms = 120;
+    stored_trackers = 2; host_forget_id(2); force_layout();
+    assert(tdma_active_mask == 3 && tdma_last_reconfig_time == 120);
+    assert(slot(tdma_config_packed[2]) == 0xff && total(tdma_config_packed[2]) == 2);
+    stored_trackers = 3; now_ms = 130;
+    assert(ping(2, true));
+    stored_trackers = 2; host_forget_id(2);
+    assert(!atomic_get(&tdma_shadow_pending_join_mask) && !tdma_membership_deadline_armed);
+    stored_trackers = 3; now_ms = 140;
+    assert(ping(2, true)); service();
+    assert(tdma_membership_deadline_ms == 241);
+    now_ms = 1119; service();
+    assert(tdma_active_mask == 3 && tdma_membership_wait_ms(500) == 1);
+    now_ms = 1120; service();
+    assert(tdma_active_mask == 7 && slot(tdma_config_packed[2]) == 2);
+}
+
+static void empty_and_returning(void)
+{
+    reset_fixture(1, 0); assert(tracker_store_restore() == 0);
+    assert(ping(0, true)); service();
+    now_ms = 101; service();
+    uint8_t epoch = tdma_config_epoch;
+    now_ms = TDMA_SHADOW_LEAVE_GRACE_MS - 1; service();
+    assert(tdma_active_mask == 1 && atomic_get(&tdma_shadow_pending_leave_mask) == 1);
+    now_ms = TDMA_SHADOW_LEAVE_GRACE_MS; service();
+    assert(!tdma_active_mask && !tdma_dynamic_active_count);
+    assert(tdma_config_epoch == epoch && tdma_last_reconfig_time == (int64_t)now_ms);
+    for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
+        assert(slot(tdma_config_packed[i]) == 0xff && total(tdma_config_packed[i]) == 0);
+    }
+    now_ms++; service();
+    assert(tdma_last_reconfig_time == TDMA_SHADOW_LEAVE_GRACE_MS);
+    assert(ping(0, true)); service();
+    assert((uint32_t)atomic_get(&tdma_shadow_desired_mask) == 1 && !tdma_active_mask);
+    now_ms = TDMA_SHADOW_LEAVE_GRACE_MS + 999; service();
+    assert(!tdma_active_mask && tdma_membership_wait_ms(500) == 1);
+    now_ms++; service();
+    assert(tdma_active_mask == 1 && tdma_config_epoch == (uint8_t)(epoch + 1));
+}
+
+static void refresh_while_store_locked(void)
+{
+    assert(mutex_depth == 1);
+    now_ms = 1700;
+    assert(ping(0, true));
+    now_ms = 1800;
+}
+
+static void expire_while_store_locked(void)
+{
+    assert(mutex_depth == 1);
+    now_ms = 15100;
+}
+
+static void owner_store_lock_delay(void)
+{
+    reset_fixture(1, 1600); assert(tracker_store_restore() == 0);
+    assert(ping(0, true));
+    mutex_hook = refresh_while_store_locked;
+    host_early_owner_wake(1600, 2000);
+    assert(tdma_active_mask == 1 && tdma_last_reconfig_time == 1800);
+    assert((uint32_t)atomic_get(&tdma_shadow_last_seen_ms[0]) == 1700);
+
+    reset_fixture(1, 0); assert(tracker_store_restore() == 0);
+    assert(ping(0, true)); service();
+    now_ms = 101; service();
+    assert(tdma_active_mask == 1);
+    now_ms = 14900; mutex_hook = expire_while_store_locked;
+    host_early_owner_wake(14900, 15000);
+    assert(!tdma_active_mask && tdma_last_reconfig_time == 15100);
+}
+
+static void restore_retry(void)
 {
     reset_fixture(3, 25); restore_error = -EIO;
     assert(tracker_store_restore() == -EIO && !tracker_store_ready);
-    assert(!tdma_initial_started && !tdma_initial_allowed_mask);
+    assert(!tdma_membership_deadline_armed);
     now_ms = 1025; restore_error = 0;
-    assert(tracker_store_restore() == 0 && !tdma_initial_done);
-    assert(tdma_initial_allowed_mask == 7 && !tdma_dynamic_active_count);
-    assert(tracker_store_restore() == 0 && tdma_initial_allowed_mask == 7);
-    reset_fixture(0, 500);
-    assert(tracker_store_restore() == 0 && tracker_store_ready && tdma_initial_done);
-    stored_trackers = 1; assert(ping(0, true)); /* paired after cold restore */
-    assert(!tdma_initial_started && !tdma_initial_ping_mask && !tdma_config_epoch);
-    tdma_shadow_update((uint32_t)now_ms); tdma_recalculate();
-    now_ms += TDMA_SHADOW_JOIN_CONFIRM_MS; assert(ping(0, true));
-    tdma_shadow_update((uint32_t)now_ms); tdma_recalculate();
-    assert(tdma_active_mask == BIT(0) && tdma_config_epoch != 0);
+    assert(tracker_store_restore() == 0 && tracker_store_ready && stored_trackers == 3);
+    assert(tracker_store_restore() == 0 && stored_trackers == 3);
+    assert(!tdma_active_mask && !tdma_last_reconfig_valid);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc == 2) {
+        assert(!strcmp(argv[1], "owner-store-lock-delay"));
+        owner_store_lock_delay();
+        puts("Receiver owner lock-delay cases passed");
+        return 0;
+    }
+    assert(argc == 1);
     all_rosters(0);
     all_rosters((uint64_t)UINT32_MAX - 50U);
-    eligibility_and_stale();
-    later_join_and_removal();
-    restore_and_empty_roster();
-    puts("Receiver initial cohort cases passed");
+    invalid_and_stale_evidence();
+    fresh_joins_and_spacing();
+    deadline_anchors();
+    snapshot_and_reuse();
+    empty_and_returning();
+    owner_store_lock_delay();
+    restore_retry();
+    puts("Receiver membership admission cases passed");
     return 0;
 }

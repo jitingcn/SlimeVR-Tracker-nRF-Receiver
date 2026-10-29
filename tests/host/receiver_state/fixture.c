@@ -30,6 +30,9 @@ static void preempt(void);
 static unsigned irq_lock(void) { preempt(); unsigned key = irq_depth; irq_depth++; return key; }
 static void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth = key; preempt(); }
 static int tracker_store_lock, esb_pairing_msgq;
+static int tdma_membership_wake;
+static unsigned membership_wakes;
+static void k_sem_give(int *sem) { assert(sem == &tdma_membership_wake && !irq_depth); membership_wakes++; }
 static void k_mutex_lock(int *lock, int timeout) { (void)lock; (void)timeout; assert(!irq_depth && !mutex_depth); mutex_depth++; }
 static void k_mutex_unlock(int *lock) { (void)lock; assert(mutex_depth == 1 && !irq_depth); mutex_depth--; }
 static int64_t k_uptime_get(void) { return now_ms; }
@@ -54,7 +57,7 @@ static void raw_arq_reset(void) { raw_arq = 0; }
 static void esb_auto_loss_invalidate(void) { assert(irq_depth); invalidated++; }
 static void tracker_events_pairing_invalidate(uint32_t bits) { assert(irq_depth); (void)bits; }
 static void tracker_events_pairing_cleanup(void) { assert(!irq_depth); cleanup_calls++; }
-static void tdma_recalculate(void) { assert(!irq_depth && mutex_depth); recalc_calls++; }
+static void tdma_recalculate(bool forced) { assert(forced && !irq_depth && mutex_depth); recalc_calls++; }
 static void test_all_invalidate(void);
 
 /* PRODUCTION_DECLARATIONS */
@@ -109,28 +112,42 @@ int sys_read_checked(uint16_t key, void *data, size_t len)
 static void test_shadow(void)
 {
 	stored_trackers = 1;
+	tdma_active_mask = 0;
 	const uint32_t starts[] = {UINT32_MAX, 0, 1, INT32_MAX - 1u};
 	for (unsigned n = 0; n < sizeof(starts) / sizeof(starts[0]); n++) {
+		unsigned int key = irq_lock();
 		tdma_shadow_forget_tracker(0);
+		irq_unlock(key);
 		now_ms = starts[n];
+		unsigned wakes_before = membership_wakes;
 		tdma_shadow_observe(0, TDMA_SHADOW_EVIDENCE_PING);
-		tdma_shadow_update((uint32_t)now_ms);
 		assert(atomic_get(&tdma_shadow_pending_join_mask) == 1);
-		tdma_shadow_update((uint32_t)now_ms + TDMA_SHADOW_JOIN_CONFIRM_MS);
+		assert(membership_wakes == wakes_before + 1);
+		assert(tdma_membership_deadline_armed);
+		assert(tdma_membership_deadline_ms == (uint32_t)now_ms + 101u);
+		tdma_shadow_update((uint32_t)now_ms);
 		assert(atomic_get(&tdma_shadow_desired_mask) == 1);
+		assert(!atomic_get(&tdma_shadow_pending_join_mask));
+		assert(tdma_membership_deadline_armed);
+		tdma_active_mask = 1;
 		tdma_shadow_update((uint32_t)now_ms + TDMA_SHADOW_FRESH_MS);
 		assert(atomic_get(&tdma_shadow_pending_leave_mask) == 1);
 		tdma_shadow_update((uint32_t)now_ms + TDMA_SHADOW_LEAVE_GRACE_MS - 1);
 		assert(atomic_get(&tdma_shadow_desired_mask) == 1);
 		tdma_shadow_update((uint32_t)now_ms + TDMA_SHADOW_LEAVE_GRACE_MS);
 		assert(atomic_get(&tdma_shadow_desired_mask) == 0);
-		/* Timestamp sampled one tick after the stats loop's now remains fresh. */
-		tdma_shadow_forget_tracker(0);
+		assert(tdma_membership_deadline_armed);
+		tdma_active_mask = 0;
+		tdma_shadow_update((uint32_t)now_ms + TDMA_SHADOW_LEAVE_GRACE_MS);
+		assert(!tdma_membership_deadline_armed);
+		/* A sampled future tick is still fresh across uint32 wrap. */
 		tdma_shadow_observe(0, TDMA_SHADOW_EVIDENCE_DATA);
 		tdma_shadow_update((uint32_t)now_ms - 1);
-		assert(atomic_get(&tdma_shadow_pending_join_mask) == 1);
+		assert(atomic_get(&tdma_shadow_desired_mask) == 1);
+		key = irq_lock();
+		tdma_shadow_forget_tracker(0);
+		irq_unlock(key);
 	}
-	tdma_shadow_forget_tracker(0);
 }
 
 static void test_tuples(void)
