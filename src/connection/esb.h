@@ -154,8 +154,6 @@ int esb_initialize(bool);
 int esb_initialize_quiet(bool tx);
 void esb_deinitialize(void);
 
-void esb_set_addr_discovery(void);
-void esb_set_addr_paired(void);
 void esb_set_addr_unified(void);
 
 int esb_add_pair(uint64_t addr, bool checksum);
@@ -163,7 +161,6 @@ int esb_pop_pair(void);
 
 void esb_start_pairing(void);
 void esb_start_pairing_with_count(uint8_t target_count);
-void esb_reset_pair(void);
 void esb_finish_pair(void);
 int esb_clear(void);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
@@ -208,7 +205,6 @@ void esb_receive(void);
 bool esb_toggle_stats_detailed(void);                   // Toggle detailed stats on/off
 void esb_set_stats_detailed(uint32_t duration_seconds); // Enable for duration (0 = toggle)
 bool esb_get_stats_detailed_enabled(void);              // Get current status
-uint32_t esb_get_stats_detailed_remaining(void);        // Get remaining time (0 if no auto-disable)
 
 // Remote command API
 /* WOM control: 0=query, 1..35791=set, ESB_WOM_TIMEOUT_CLEAR=clear override,

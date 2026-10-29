@@ -259,15 +259,6 @@ bool button_read(void)
 #endif
 }
 
-void sys_request_system_off(void)
-{
-	LOG_INF("System shutdown requested");
-	reboot_counter_write(0);
-	set_led(SYS_LED_PATTERN_ONESHOT_POWEROFF, SYS_LED_PRIORITY_HIGHEST);
-	k_msleep(2000);
-	sys_reboot(SYS_REBOOT_COLD);
-}
-
 void sys_request_system_reboot(void)
 {
 	LOG_INF("System reboot requested");
@@ -426,7 +417,6 @@ void reboot_counter_write(uint8_t reboot_counter) {
 	nvs_write(&fs, RBT_CNT_ID, &reboot_counter, sizeof(reboot_counter));
 }
 
-// retained not implemented
 int sys_write_checked(uint16_t id, const void *data, size_t len)
 {
 	if (sys_nvs_init()) {
@@ -438,11 +428,6 @@ int sys_write_checked(uint16_t id, const void *data, size_t len)
 		return err;
 	}
 	return 0;
-}
-
-void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
-{
-	(void)sys_write_checked(id, data, len);
 }
 
 int sys_read_checked(uint16_t id, void *data, size_t len)

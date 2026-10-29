@@ -169,11 +169,6 @@ bool esb_ota_relay_is_target(uint8_t tracker_id)
 	return ota_relay.active && ota_relay.tracker[tracker_id].participating;
 }
 
-uint8_t esb_ota_relay_get_num_targets(void)
-{
-	return ota_relay.num_targets;
-}
-
 /* ── Ring Buffer Helpers ─────────────────────────────────────────── */
 
 /*

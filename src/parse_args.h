@@ -27,8 +27,6 @@
 #include <stdint.h>
 
 size_t parse_args(char *str, char *argv[], size_t size);
-int32_t parse_i32(const char *str, uint8_t base);
-uint32_t parse_u32(const char *str, uint8_t base);
 uint64_t parse_u64(const char *str, uint8_t base);
 
 #endif

@@ -2898,7 +2898,6 @@ int clocks_start(void)
 }
 /* ESB pipe addresses (base addresses big-endian). */
 static const uint8_t discovery_base_addr_0[4] = {0x62, 0x39, 0x8A, 0xF2};
-static const uint8_t discovery_base_addr_1[4] = {0x28, 0xFF, 0x50, 0xB8};
 static const uint8_t discovery_addr_prefix[8] = {0xFE, 0xFF, 0x29, 0x27, 0x09, 0x02, 0xB2, 0xD6};
 
 static uint8_t base_addr_0[4], base_addr_1[4], addr_prefix[8] = {0};
@@ -3065,39 +3064,6 @@ void esb_deinitialize(void)
 		esb_disable();
 	}
 	esb_initialized = false;
-}
-
-inline void esb_set_addr_discovery(void)
-{
-	memcpy(base_addr_0, discovery_base_addr_0, sizeof(base_addr_0));
-	memcpy(base_addr_1, discovery_base_addr_1, sizeof(base_addr_1));
-	memcpy(addr_prefix, discovery_addr_prefix, sizeof(addr_prefix));
-}
-
-inline void esb_set_addr_paired(void)
-{
-	// Generate addresses from device address
-	uint64_t *addr = (uint64_t *)NRF_FICR->DEVICEADDR; // Use device address as unique identifier (although it is
-													   // not actually guaranteed, see datasheet)
-	uint8_t buf[6] = {0};
-	memcpy(buf, addr, 6);
-	uint8_t addr_buffer[16] = {0};
-	for (int i = 0; i < 4; i++) {
-		addr_buffer[i] = buf[i];
-		addr_buffer[i + 4] = buf[i] + buf[4];
-	}
-	for (int i = 0; i < 8; i++) {
-		addr_buffer[i + 8] = buf[5] + i;
-	}
-	for (int i = 0; i < 16; i++) {
-		if (addr_buffer[i] == 0x00 || addr_buffer[i] == 0x55
-			|| addr_buffer[i] == 0xAA) { // Avoid invalid addresses (see nrf datasheet)
-			addr_buffer[i] += 8;
-		}
-	}
-	memcpy(base_addr_0, addr_buffer, sizeof(base_addr_0));
-	memcpy(base_addr_1, addr_buffer + 4, sizeof(base_addr_1));
-	memcpy(addr_prefix, addr_buffer + 8, sizeof(addr_prefix));
 }
 
 // Unified mode: pipe 0 uses discovery address (pairing), pipes 1-7 use paired address (data)
@@ -3402,12 +3368,6 @@ static void process_pairing_queue(void)
 		LOG_INF("New device registered, ack_handler will respond on next step 1");
 		set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
 	}
-}
-
-void esb_reset_pair(void)
-{
-	// In unified mode, just enable pairing (no ESB reinit needed)
-	esb_start_pairing();
 }
 
 void esb_finish_pair(void)
@@ -4268,19 +4228,6 @@ void esb_set_stats_detailed(uint32_t duration_seconds)
 bool esb_get_stats_detailed_enabled(void)
 {
 	return stats_detailed_enabled;
-}
-
-// Get remaining time for detailed stats (0 if disabled or no auto-disable)
-uint32_t esb_get_stats_detailed_remaining(void)
-{
-	if (!stats_detailed_enabled || stats_detailed_end_time == 0) {
-		return 0;
-	}
-	int64_t remaining = stats_detailed_end_time - k_uptime_get();
-	if (remaining <= 0) {
-		return 0;
-	}
-	return (uint32_t)(remaining / 1000);
 }
 
 void esb_set_channel_change_done_cb(esb_channel_change_done_cb_t cb)

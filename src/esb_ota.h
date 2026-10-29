@@ -90,11 +90,6 @@ bool esb_ota_relay_is_active(void);
  */
 bool esb_ota_relay_is_target(uint8_t tracker_id);
 
-/**
- * Get the number of active OTA targets.
- */
-uint8_t esb_ota_relay_get_num_targets(void);
-
 /** Return true while an OTA abort tombstone remains active for a tracker. */
 bool esb_ota_relay_abort_pending(uint8_t tracker_id);
 

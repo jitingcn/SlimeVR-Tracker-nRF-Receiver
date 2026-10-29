@@ -20,7 +20,6 @@
 uint8_t reboot_counter_read(void);
 void reboot_counter_write(uint8_t reboot_counter);
 
-void sys_write(uint16_t id, void* ptr, const void* data, size_t len);
 int sys_write_checked(uint16_t id, const void *data, size_t len);
 void sys_read(uint16_t id, void* data, size_t len);
 /* Raw NVS record length or negative errno; never clears the destination. */
@@ -28,7 +27,6 @@ int sys_read_checked(uint16_t id, void *data, size_t len);
 
 bool button_read(void);
 bool button_read_filtered(void);
-void sys_request_system_off(void);
 void sys_request_system_reboot(void);
 
 /* Enter bootloader DFU (UF2 default, or OTA when ota=true on Adafruit BL). */
