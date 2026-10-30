@@ -62,6 +62,62 @@ def static_thread_offsets(elf):
                 return offsets
     raise ValueError('ELF needs DWARF for _static_thread_data member offsets')
 
+def tracker_slot_layout(elf, symbol):
+    """Resolve the linked tracker_slots array's element and member types."""
+    base, storage = symbol
+    layouts = set()
+
+    def unqualified(die):
+        while die is not None and die.tag in (
+                'DW_TAG_typedef', 'DW_TAG_const_type',
+                'DW_TAG_volatile_type', 'DW_TAG_restrict_type'):
+            if 'DW_AT_type' not in die.attributes:
+                return None
+            die = die.get_DIE_from_attribute('DW_AT_type')
+        return die
+
+    for unit in elf.get_dwarf_info().iter_CUs():
+        for variable in unit.iter_DIEs():
+            name = variable.attributes.get('DW_AT_name')
+            if (variable.tag != 'DW_TAG_variable' or name is None
+                    or name.value != b'tracker_slots'
+                    or 'DW_AT_type' not in variable.attributes):
+                continue
+            array = unqualified(variable.get_DIE_from_attribute('DW_AT_type'))
+            if array is None or array.tag != 'DW_TAG_array_type' or 'DW_AT_type' not in array.attributes:
+                continue
+            slot = unqualified(array.get_DIE_from_attribute('DW_AT_type'))
+            if slot is None or slot.tag != 'DW_TAG_structure_type':
+                continue
+            slot_name = slot.attributes.get('DW_AT_name')
+            size = slot.attributes.get('DW_AT_byte_size')
+            if slot_name is None or slot_name.value != b'tracker_slot' or size is None:
+                continue
+            stride = size.value
+            if stride <= 0 or storage != 16 * stride or base % 4 or stride % 4:
+                continue
+            offsets = {}
+            for member in slot.iter_children():
+                member_name = member.attributes.get('DW_AT_name')
+                location = member.attributes.get('DW_AT_data_member_location')
+                if (member.tag != 'DW_TAG_member' or member_name is None
+                        or member_name.value not in (b'tdma_config_packed', b'tdma_prev_recv')
+                        or location is None or not isinstance(location.value, int)
+                        or 'DW_AT_type' not in member.attributes):
+                    continue
+                member_type = unqualified(member.get_DIE_from_attribute('DW_AT_type'))
+                member_size = member_type.attributes.get('DW_AT_byte_size') if member_type else None
+                offset = location.value
+                if member_size is not None and member_size.value == 4 and 0 <= offset <= stride - 4 and offset % 4 == 0:
+                    offsets[member_name.value.decode()] = offset
+            if {'tdma_config_packed', 'tdma_prev_recv'} <= offsets.keys():
+                layouts.add((stride, offsets['tdma_config_packed'], offsets['tdma_prev_recv']))
+    if len(layouts) != 1:
+        raise ValueError('ELF needs an unambiguous DWARF layout for the 16 tracker_slots')
+    stride, packed, prev_recv = layouts.pop()
+    return {'stride': stride, 'tdma_config_packed': packed, 'tdma_prev_recv': prev_recv}
+
+
 
 def log_package_layout(elf):
     """Extract the linked message/package fields and descriptor bitfield."""
@@ -153,7 +209,7 @@ def load_image(path):
 
 
 def replay(image, trackers, signal_mode=None):
-    symbols, functions, sections, offsets, log_layout = image
+    symbols, functions, sections, offsets, log_layout, slot_layout = image
     machine = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
     # The supported nRF52 receiver image address spaces. Peripheral memory is
     # inert: no RF/USB device emulation or timing claims are made by this test.
@@ -293,8 +349,11 @@ def replay(image, trackers, signal_mode=None):
                     'mask': word(symbols['tdma_active_mask'][0]),
                     'count': machine.mem_read(symbols['tdma_dynamic_active_count'][0], 1)[0],
                     'epoch': machine.mem_read(symbols['tdma_config_epoch'][0], 1)[0],
-                    'configs': list(struct.unpack(
-                        '<16I', machine.mem_read(symbols['tdma_config_packed'][0], 64))),
+                    'configs': [
+                        word(symbols['tracker_slots'][0] + tracker_id * slot_layout['stride']
+                             + slot_layout['tdma_config_packed'])
+                        for tracker_id in range(16)
+                    ],
                 }
             # ARM AAPCS aligns a 64-bit k_timeout_t after the semaphore pointer
             # to r2/r3. A 32-bit timeout occupies r1. Frequency/config come
@@ -427,7 +486,7 @@ def replay(image, trackers, signal_mode=None):
             loss_tick_times.append(uptime_ms())
 
     if signal_mode == 'recurring':
-        loss_baseline = symbols['tdma_prev_recv'][0]
+        loss_baseline = symbols['tracker_slots'][0] + slot_layout['tdma_prev_recv']
         machine.hook_add(UC_HOOK_MEM_WRITE, record_loss_tick,
                          begin=loss_baseline, end=loss_baseline + 3)
     machine.hook_add(UC_HOOK_CODE, hook)
@@ -539,7 +598,8 @@ def main():
     args = parser.parse_args()
     image = load_image(args.elf)
     with args.elf.open('rb') as stream:
-        image = (*image, log_package_layout(ELFFile(stream)))
+        elf = ELFFile(stream)
+        image = (*image, log_package_layout(elf), tracker_slot_layout(elf, image[0]['tracker_slots']))
     # Independent machines preserve linked startup state for every roster size.
     results = [replay(image, trackers) for trackers in (0, 1, 16)]
     results.extend(replay(image, trackers, mode) for trackers, mode in (

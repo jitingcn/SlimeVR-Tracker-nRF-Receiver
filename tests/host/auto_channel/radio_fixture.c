@@ -81,30 +81,20 @@ static struct esb_payload sent_payload, incoming;
 static bool incoming_ready;
 static const struct esb_payload *dma_payload;
 static unsigned status_errors;
-#if TEST_FEATURE_ON
 static unsigned irq_lock(void) { return 0; }
 static void irq_unlock(unsigned key) { (void)key; }
-#endif
 static int64_t k_uptime_get(void) { return 1234; }
 static uint32_t k_uptime_get_32(void) { return 1234; }
 static int k_msgq_put(void *queue, const void *item, int timeout);
 struct pairing_event { uint8_t packet[8]; };
 static int esb_pairing_msgq;
-static bool esb_pairing, pairing_new_devices_blocked;
+static bool esb_pairing;
+static atomic_t pairing_new_devices_blocked;
 static uint8_t stored_trackers = MAX_TRACKERS;
+/* SLOT DECLARATIONS */
 /* DIAGNOSTIC DECLARATIONS */
-static uint32_t pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
-static uint8_t last_ping_counter[MAX_TRACKERS], last_pong_queued_counter[MAX_TRACKERS];
-static bool ping_counter_initialized[MAX_TRACKERS], sequence_initialized[MAX_TRACKERS];
-static uint64_t last_ping_time[MAX_TRACKERS];
 static uint32_t decision_ready_mask, decision_fence_mask;
-static struct packet_stats { uint32_t restart_events; uint8_t status_received, status_lost; } tracker_stats[MAX_TRACKERS];
 static atomic_t test_all_state_valid, test_all_enabled, test_all_confirmed_mask, test_all_ready_after_ms[MAX_TRACKERS];
-static uint8_t tracker_remote_command[MAX_TRACKERS], pending_cmd_arg[MAX_TRACKERS];
-static uint16_t tracker_test_on_tps[MAX_TRACKERS], metadata_active_token[MAX_TRACKERS];
-static uint8_t metadata_active_mask[MAX_TRACKERS], metadata_active_chunk[MAX_TRACKERS];
-static uint16_t last_raw_seq[MAX_TRACKERS];
-static bool last_raw_valid[MAX_TRACKERS];
 static uint8_t last_pose[16];
 static unsigned data_evidence;
 static void (*remote_confirm_cb)(uint8_t, uint8_t);
@@ -146,12 +136,12 @@ static void data_collect_write(const uint8_t *packet, uint8_t length, int8_t rss
 static void esb_ota_relay_process_tracker_packet(const uint8_t *packet, uint8_t length)
 { (void)packet; (void)length; ++downstream_command; }
 static void esb_send_remote_command(uint8_t id, uint8_t command)
-{ tracker_remote_command[id] = command; ++downstream_command; }
+{ tracker_slots[id].tracker_remote_command = command; ++downstream_command; }
 static int k_msgq_get(void *queue, void *item, int timeout)
 { (void)queue; (void)item; (void)timeout; return -ENOMSG; }
 
 
-void event_handler(const struct esb_evt *event);
+static void event_handler(const struct esb_evt *event);
 static void esb_ack_handler_cb(const uint8_t *, uint8_t, uint32_t,
                                struct esb_payload *, bool *, bool *);
 static uint8_t esb_rf_channel_decode(uint8_t channel)

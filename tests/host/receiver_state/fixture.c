@@ -47,15 +47,20 @@ static const char *esb_pong_flag_name(uint8_t flag) { (void)flag; return "fixtur
 uint8_t stored_trackers;
 uint64_t stored_tracker_addr[MAX_TRACKERS];
 static unsigned rssi[MAX_TRACKERS], ota[MAX_TRACKERS], collection[MAX_TRACKERS];
-static unsigned raw_arq, invalidated, cleanup_calls, recalc_calls;
+static unsigned raw_arq, pairing_invalidations, pairing_invalidated_bits;
+static unsigned cleanup_calls, recalc_calls;
 static int collection_target = -1;
 static void hid_reset_rssi_smooth(uint8_t id) { assert(irq_depth); rssi[id] = 0; }
 static void esb_ota_forget_tracker(uint8_t id) { assert(!irq_depth && mutex_depth); ota[id] = 0; }
 static void data_collect_forget_tracker(uint8_t id) { assert(!irq_depth && mutex_depth); collection[id] = 0; }
 static bool data_collect_is_target(uint8_t id) { return collection_target == id; }
 static void raw_arq_reset(void) { raw_arq = 0; }
-static void esb_auto_loss_invalidate(void) { assert(irq_depth); invalidated++; }
-static void tracker_events_pairing_invalidate(uint32_t bits) { assert(irq_depth); (void)bits; }
+static void tracker_events_pairing_invalidate(uint32_t bits)
+{
+	assert(irq_depth);
+	pairing_invalidations++;
+	pairing_invalidated_bits |= bits;
+}
 static void tracker_events_pairing_cleanup(void) { assert(!irq_depth); cleanup_calls++; }
 static void tdma_recalculate(bool forced) { assert(forced && !irq_depth && mutex_depth); recalc_calls++; }
 static void test_all_invalidate(void);
@@ -70,9 +75,9 @@ static unsigned preempt_checks;
 static struct tuple capture(void)
 {
 	struct tuple t = {0};
-	for (unsigned i = 0; i < 3; i++) t.sens[i] = pending_sens_data[0][i];
-	t.axis = pending_sens_auto_axis[0]; t.turns = pending_sens_auto_revolutions[0];
-	t.command = tracker_remote_command[0]; t.arg = pending_cmd_arg[0];
+	for (unsigned i = 0; i < 3; i++) t.sens[i] = tracker_slots[0].pending_sens_data[i];
+	t.axis = tracker_slots[0].pending_sens_auto_axis; t.turns = tracker_slots[0].pending_sens_auto_revolutions;
+	t.command = tracker_slots[0].tracker_remote_command; t.arg = tracker_slots[0].pending_cmd_arg;
 	return t;
 }
 static bool same_tuple(struct tuple a, struct tuple b)
@@ -153,7 +158,7 @@ static void test_shadow(void)
 static void test_tuples(void)
 {
 	stored_trackers = 1; stored_tracker_addr[0] = 123;
-	now_ms = 10000; tracker_stats[0].last_packet_time = now_ms;
+	now_ms = 10000; tracker_slots[0].stats.last_packet_time = now_ms;
 	old_tuple = capture(); new_tuple = old_tuple;
 	new_tuple.sens[0] = 100; new_tuple.sens[1] = 200; new_tuple.sens[2] = 300;
 	new_tuple.command = ESB_PONG_FLAG_SENS_SET;
@@ -170,17 +175,132 @@ static void test_tuples(void)
 	assert(same_tuple(capture(), new_tuple));
 	old_tuple = capture(); new_tuple = old_tuple;
 	new_tuple.arg = 37; new_tuple.command = ESB_PONG_FLAG_DATA_COLLECT_ON;
-	last_raw_valid[0] = true; raw_arq = 99;
+	tracker_slots[0].last_raw_valid = true; raw_arq = 99;
 	esb_send_remote_command_arg(0, new_tuple.command, new_tuple.arg);
-	assert(same_tuple(capture(), new_tuple) && !last_raw_valid[0] && raw_arq == 0);
+	assert(same_tuple(capture(), new_tuple) && !tracker_slots[0].last_raw_valid && raw_arq == 0);
 	assert(preempt_checks >= 8);
 	observe_tuple = false;
 }
 
 #ifndef STATE_ONLY_LEGACY
+static void assert_bytes(const void *value, size_t length, uint8_t expected)
+{
+	const uint8_t *bytes = value;
+	for (size_t i = 0; i < length; ++i) assert(bytes[i] == expected);
+}
 /* GENERATED_SLOT_CHECKS */
+
+static void reset_one_slot(unsigned id)
+{
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	unsigned int key = irq_lock();
+	tracker_slot_reset(id);
+	irq_unlock(key);
+	k_mutex_unlock(&tracker_store_lock);
+}
+
+static void test_isolated_reset(void)
+{
+	seed_slot(0);
+	seed_slot(1);
+	metadata_next_token = 0x4567;
+	wom_next_token = 0x7654;
+	tdma_active_mask = BIT(1);
+	tdma_membership_deadline_ms = 654;
+	tdma_membership_deadline_armed = true;
+	tdma_shadow_desired_changed_at_ms = 555;
+	decision_ready_mask = 0x1234;
+	decision_fence_mask = 0;
+	atomic_set(&tdma_rx_discontinuity_pending, 0);
+	unsigned before = auto_loss_reset_epoch, pairing_before = pairing_invalidations;
+	reset_one_slot(0);
+	check_slot(0);
+	check_seeded_slot(1);
+	assert(ota[0] == 1 && collection[0] == 1 && ota[1] == 1 && collection[1] == 1);
+	assert(metadata_next_token == 0x4567 && wom_next_token == 0x7654);
+	assert(auto_loss_reset_epoch == before + 1 && pairing_invalidations == pairing_before + 1);
+	assert(!decision_ready_mask && decision_fence_mask == UINT32_MAX);
+	assert(atomic_get(&tdma_rx_discontinuity_pending) == 1);
+	assert(atomic_get(&tdma_shadow_desired_changed_at_ms) == 555);
+	assert(pairing_invalidated_bits == BIT(0));
+	assert(tdma_membership_deadline_armed && tdma_membership_deadline_ms == 654);
+
+	atomic_and(&tdma_shadow_pending_join_mask, (atomic_val_t)~BIT(1));
+	seed_slot(0);
+	reset_one_slot(0);
+	check_slot(0);
+	assert(!tdma_membership_deadline_armed);
+	assert(auto_loss_reset_epoch == before + 2 && pairing_invalidations == pairing_before + 2);
+}
+
+static void test_partial_resets(void)
+{
+	seed_slot(0);
+	seed_slot(1);
+	unsigned before = auto_loss_reset_epoch;
+	esb_rx_discontinuity();
+	assert(auto_loss_reset_epoch == before + 1);
+	check_discontinuity_slot(0);
+	check_discontinuity_slot(1);
+
+	seed_slot(0);
+	seed_slot(1);
+	tdma_loss_trigger_streak_ticks = tdma_loss_recover_streak_ticks = 1;
+	tdma_loss_probe_streak_ticks = tdma_loss_pool_ticks = 1;
+	tdma_loss_pool_received = tdma_loss_pool_gaps = 1;
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+	tdma_last_loss_step_ms = 1;
+	tdma_loss_last_permille = 1;
+#endif
+	esb_reset_all_stats();
+	assert(auto_loss_reset_epoch == before + 2);
+	check_stats_slot(0);
+	check_stats_slot(1);
+	assert(!tdma_loss_trigger_streak_ticks && !tdma_loss_recover_streak_ticks);
+	assert(!tdma_loss_probe_streak_ticks && !tdma_loss_pool_ticks);
+	assert(!tdma_loss_pool_received && !tdma_loss_pool_gaps);
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+	assert(!tdma_last_loss_step_ms && !tdma_loss_last_permille);
+#endif
+}
+
+static void test_reuse_tokens(void)
+{
+	stored_trackers = 1;
+	stored_tracker_addr[0] = 123;
+	now_ms = 10000;
+	tracker_slots[0].stats.last_packet_time = now_ms;
+	metadata_next_token = 100;
+	wom_next_token = 200;
+	uint16_t old_wom, new_wom, minutes, error;
+	assert(esb_request_metadata(0, 1, 3));
+	assert(tracker_slots[0].metadata_pending_token == 101);
+	assert(esb_send_remote_wom_command(0, 12, &old_wom) == BIT(0));
+	assert(old_wom == 201);
+	reset_one_slot(0);
+	assert(metadata_next_token == 101 && wom_next_token == 201);
+	tracker_slots[0].stats.last_packet_time = now_ms;
+	assert(esb_request_metadata(0, 1, 3));
+	assert(tracker_slots[0].metadata_pending_token == 102);
+	assert(esb_send_remote_wom_command(0, 12, &new_wom) == BIT(0));
+	assert(new_wom == 202);
+	tracker_slots[0].wom_advertised = true;
+	tracker_slots[0].wom_first_ping_counter = 5;
+	const uint8_t stale[] = {0, 12, 0, 201};
+	const uint8_t fresh[] = {0, 12, 0, 202};
+	remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, stale, 6);
+	assert(!esb_get_remote_wom_result(0, new_wom, &minutes, &error));
+	assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_WOM_CONTROL);
+	remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, fresh, 6);
+	assert(esb_get_remote_wom_result(0, new_wom, &minutes, &error));
+	assert(minutes == 12 && error == 0);
+	assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
+}
 static void test_slots(void)
 {
+	test_isolated_reset();
+	test_partial_resets();
+	test_reuse_tokens();
 	stored_trackers = 0; memset(stored_tracker_addr, 0, sizeof(stored_tracker_addr));
 	tracker_store_ready = false;
 	assert(esb_add_pair(123, false) == -EIO && esb_pop_pair() == -EIO);
@@ -192,7 +312,7 @@ static void test_slots(void)
 	save_error = -EIO;
 	assert(esb_pop_pair() == -EIO);
 	assert(stored_trackers == 1 && stored_tracker_addr[0] == 123);
-	assert(last_ping_time[0] != 0 && pending_sens_data[0][0] != 0 && rssi[0] != 0);
+	assert(tracker_slots[0].last_ping_time != 0 && tracker_slots[0].pending_sens_data[0] != 0 && rssi[0] != 0);
 	assert(esb_clear() == -EIO);
 	assert(stored_trackers == 1 && stored_tracker_addr[0] == 123);
 	assert(esb_add_pair(456, false) == -EIO && stored_trackers == 1);

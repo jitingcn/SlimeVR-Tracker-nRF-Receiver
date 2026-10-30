@@ -178,13 +178,18 @@ def main():
         layout_constants = '\n'.join(re.findall(
             r'^#define TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|'
             r'RECONFIG_MIN_MS|LOSS_RECONFIG_MIN_MS|CAP_LEVEL_MAX)\b[^\n]*', esb, re.M))
-        layout_names = '''tdma_cap_ladder tdma_config_packed tdma_config_epoch tdma_dynamic_active_count
+        layout_names = '''tdma_cap_ladder tdma_config_epoch tdma_dynamic_active_count
             tdma_dynamic_slot_ticks tdma_active_mask tdma_cap_level tdma_published_cap_level
             tdma_loss_trigger_streak_ticks tdma_loss_recover_streak_ticks
             tdma_loss_probe_streak_ticks tdma_loss_pool_received tdma_loss_pool_gaps
             tdma_loss_pool_ticks'''.split()
-        declarations = '\n'.join([layout_constants, extract.membership_declarations(esb)] +
-                                 [extract.declaration(esb, name) for name in layout_names])
+        declarations = '\n'.join([
+            layout_constants,
+            extract_block(esb, r'^struct packet_stats\s*\{', True),
+            extract_block(esb, r'^struct tracker_slot\s*\{', True),
+            'static struct tracker_slot tracker_slots[MAX_TRACKERS];',
+            extract.membership_declarations(esb),
+        ] + [extract.declaration(esb, name) for name in layout_names])
         declarations += '\n' + extract.diagnostic_loss_declarations(esb)
         (path/'esb_membership_declarations.inc').write_text(declarations)
         membership = '\n'.join(function(esb, name) for name in (

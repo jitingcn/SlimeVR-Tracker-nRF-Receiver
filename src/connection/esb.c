@@ -117,9 +117,69 @@ static const uint16_t tdma_cap_ladder[] = {220, 180, 150, 130, 115};
 #define TDMA_SYNC_EXTRAP_MAX_TICKS (10u * 32768u) /* skip frozen-skew extrapolation beyond this PING age */
 #define PING_CLEAN_REACQUIRE_STREAK 8u            /* consecutive dirty PINGs before re-baselining */
 
-// Dynamic TDMA config packed into uint32_t for atomic ISR access (ARM Cortex-M).
-// Layout: [31:24]=assigned_slot, [23:16]=total_slots, [15:8]=slot_ticks, [7:0]=epoch
-static volatile uint32_t tdma_config_packed[MAX_TRACKERS];
+struct packet_stats {
+	uint32_t total_received;    // Total number of packets received (excluding duplicates)
+	uint32_t normal_packets;    // Number of packets received in normal sequence
+	uint32_t gap_events;        // Number of gap events (potential packet loss)
+	uint32_t out_of_order;      // Number of out-of-order packets
+	uint32_t duplicate_packets; // Number of duplicate packets
+	uint32_t restart_events;    // Number of restart events
+	uint32_t total_gaps;        // Total number of gaps (estimated packet loss)
+	uint32_t last_sequence;     // Last normal sequence number
+	uint64_t last_packet_time;  // Timestamp of the last received packet
+	bool first_packet;          // Flag indicating if it's the first packet
+	// TPS calculation related
+	uint32_t packets_in_last_second; // Number of packets in the last second
+	uint64_t last_tps_time;          // Last TPS calculation timestamp
+	uint32_t current_tps;            // Current TPS (packets per second)
+	// Per-status-period counters (filled into status packet data[4]/data[5], reset after each status packet)
+	uint16_t status_received; // Packets received since last status packet
+	uint16_t status_lost;     // Packets lost (gaps) since last status packet
+};
+
+struct tracker_slot {
+	/* One aligned word: assigned slot, total slots, slot ticks, epoch. */
+	volatile uint32_t tdma_config_packed;
+	uint32_t tdma_prev_recv;
+	uint32_t tdma_prev_gaps;
+	uint32_t tdma_prev_restarts;
+	uint8_t last_packet_sequence;
+	bool sequence_initialized;
+	uint8_t last_ping_counter;
+	bool ping_counter_initialized;
+	uint64_t last_ping_time;
+	uint8_t last_pong_queued_counter;
+	uint8_t pipe_mismatch_count;
+	uint8_t crc_error_count;
+	uint16_t last_raw_seq;
+	bool last_raw_valid;
+	/* Shared ACK tuples are published under irq_lock with their command flag. */
+	volatile uint8_t tracker_remote_command;
+	volatile uint8_t pending_cmd_arg;
+	volatile uint16_t tracker_test_on_tps;
+	volatile int16_t pending_sens_data[3];
+	volatile uint8_t pending_sens_auto_axis;
+	volatile uint16_t pending_sens_auto_revolutions;
+	/* Active and pending metadata requests have independent tokens. */
+	volatile uint8_t metadata_active_mask;
+	volatile uint8_t metadata_active_chunk;
+	volatile uint16_t metadata_active_token;
+	volatile uint8_t metadata_pending_mask;
+	volatile uint8_t metadata_pending_chunk;
+	volatile uint16_t metadata_pending_token;
+	uint16_t wom_token;
+	uint16_t wom_minutes;
+	uint16_t wom_error;
+	bool wom_complete;
+	bool wom_advertised;
+	uint8_t wom_first_ping_counter;
+	struct packet_stats stats;
+	uint32_t decision_received;
+	uint32_t decision_gaps;
+};
+
+static struct tracker_slot tracker_slots[MAX_TRACKERS];
+
 static uint8_t tdma_config_epoch;         // wrapping counter, incremented on each recalc
 static uint8_t tdma_dynamic_active_count; // current number of active trackers
 static uint8_t tdma_dynamic_slot_ticks;   // current slot width in ticks
@@ -140,9 +200,6 @@ static uint8_t tdma_loss_pool_ticks;
 static int64_t tdma_last_loss_step_ms;   /* last applied ladder step (log only) */
 static uint32_t tdma_loss_last_permille; /* last judged window (log only) */
 #endif
-static uint32_t tdma_prev_recv[MAX_TRACKERS];
-static uint32_t tdma_prev_gaps[MAX_TRACKERS];
-static uint32_t tdma_prev_restarts[MAX_TRACKERS];
 static atomic_t tdma_rx_discontinuity_pending;
 static bool tdma_decision_ready;
 
@@ -180,43 +237,9 @@ K_MSGQ_DEFINE(esb_pairing_msgq, sizeof(struct pairing_event), 8, 4);
 static K_MUTEX_DEFINE(tracker_store_lock);
 static bool tracker_store_ready;
 
-static uint8_t last_packet_sequence[MAX_TRACKERS];    // Track the last packet sequence for each tracker
-static uint8_t last_ping_counter[MAX_TRACKERS] = {0}; // Track the last PING counter for each tracker
-static bool ping_counter_initialized[MAX_TRACKERS]
-	= {false};                                      // Flag indicating if a PING has been received from this tracker
-static uint64_t last_ping_time[MAX_TRACKERS] = {0}; // Track the last time a PING was received from each tracker
-static uint8_t last_pong_queued_counter[MAX_TRACKERS] = {0}; // Track the last PONG counter enqueued for each tracker
-static uint8_t pipe_mismatch_count[MAX_TRACKERS];
-static uint8_t crc_error_count[MAX_TRACKERS];
-static bool sequence_initialized[MAX_TRACKERS]; // Ordinary-data sequence anchor validity
-static uint16_t last_raw_seq[MAX_TRACKERS] = {0};
-static bool last_raw_valid[MAX_TRACKERS] = {false};
-// Shared ACK tuples are published under irq_lock, including their command flag.
-// Volatile alone does not make a multi-field command atomic.
-static volatile uint8_t tracker_remote_command[MAX_TRACKERS]; // Command flag for next PONG
-static volatile uint8_t pending_cmd_arg[MAX_TRACKERS];       // Optional byte carried in PONG data[8]
-static volatile uint16_t tracker_test_on_tps[MAX_TRACKERS];   // Optional TPS carried by TEST_MODE_ON
-static volatile int16_t pending_sens_data[MAX_TRACKERS][3];   // SENS_SET sensitivity data
-static volatile uint8_t pending_sens_auto_axis[MAX_TRACKERS];
-static volatile uint16_t pending_sens_auto_revolutions[MAX_TRACKERS];
-/* Metadata repair requests are lower priority than any existing PONG command.
- * Active and queued request fields are separate so a retry gets a fresh token
- * without replacing collection/control commands already in flight. */
-static volatile uint8_t metadata_active_mask[MAX_TRACKERS];
-static volatile uint8_t metadata_active_chunk[MAX_TRACKERS];
-static volatile uint16_t metadata_active_token[MAX_TRACKERS];
-static volatile uint8_t metadata_pending_mask[MAX_TRACKERS];
-static volatile uint8_t metadata_pending_chunk[MAX_TRACKERS];
-static volatile uint16_t metadata_pending_token[MAX_TRACKERS];
-static uint16_t metadata_next_token;
 /* Tokens survive slot cleanup so late replies cannot confirm a replacement. */
+static uint16_t metadata_next_token;
 static uint16_t wom_next_token;
-static uint16_t wom_token[MAX_TRACKERS];
-static uint16_t wom_minutes[MAX_TRACKERS];
-static uint16_t wom_error[MAX_TRACKERS];
-static bool wom_complete[MAX_TRACKERS];
-static bool wom_advertised[MAX_TRACKERS];
-static uint8_t wom_first_ping_counter[MAX_TRACKERS];
 /* Sticky state for commands addressed to "all": newly active trackers must
  * converge to the same test on/off state. Confirmed means the tracker has
  * executed and acknowledged the current desired state. */
@@ -439,9 +462,9 @@ static void test_all_invalidate(void)
  * first, and arm the join grace; reconciliation re-queues afterwards. */
 static void test_all_invalidate_tracker(uint8_t tracker_id, int64_t now_ms)
 {
-	uint8_t pending_cmd = tracker_remote_command[tracker_id];
+	uint8_t pending_cmd = tracker_slots[tracker_id].tracker_remote_command;
 	if (pending_cmd == ESB_PONG_FLAG_TEST_MODE_ON || pending_cmd == ESB_PONG_FLAG_TEST_MODE_OFF) {
-		tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
+		tracker_slots[tracker_id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
 	}
 	atomic_and(&test_all_confirmed_mask, (atomic_val_t)~BIT(tracker_id));
 	atomic_set(&test_all_ready_after_ms[tracker_id], (atomic_val_t)((uint32_t)now_ms + TEST_ALL_JOIN_CONFIG_GRACE_MS));
@@ -464,7 +487,7 @@ static void test_all_update_effective(uint8_t active_count, int64_t now, bool la
 		if (!(active_mask & BIT(i))) {
 			continue;
 		}
-		tracker_test_on_tps[i] = test_all_wire_tps();
+		tracker_slots[i].tracker_test_on_tps = test_all_wire_tps();
 		atomic_set(
 			&test_all_ready_after_ms[i],
 			(atomic_val_t)((uint32_t)now + (layout_changed ? TEST_ALL_JOIN_CONFIG_GRACE_MS : 0))
@@ -494,7 +517,7 @@ static void test_all_note_layout(uint32_t old_mask, uint32_t new_mask, int64_t n
 			/* Refresh the joined tracker's TPS even on a same-count swap:
 			 * update_effective skips unchanged effective rates. */
 			if (atomic_get(&test_all_enabled)) {
-				tracker_test_on_tps[i] = test_all_wire_tps();
+				tracker_slots[i].tracker_test_on_tps = test_all_wire_tps();
 			}
 			/* First allow a NORMAL PONG to deliver the new TDMA layout;
 			 * then converge the newly active tracker to test all state. */
@@ -522,11 +545,11 @@ static void test_all_reconcile(int64_t now)
 		for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
 			uint32_t ready_after = (uint32_t)atomic_get(&test_all_ready_after_ms[i]);
 			if (!(pending_mask & BIT(i)) || (int32_t)((uint32_t)now - ready_after) < 0
-				|| tracker_remote_command[i] != ESB_PONG_FLAG_NORMAL) {
+				|| tracker_slots[i].tracker_remote_command != ESB_PONG_FLAG_NORMAL) {
 				continue;
 			}
 			if (enabled) {
-				tracker_test_on_tps[i] = test_all_wire_tps();
+				tracker_slots[i].tracker_test_on_tps = test_all_wire_tps();
 			}
 			__asm__ volatile("" ::: "memory"); /* TPS published before the flag the ISR acts on */
 			/* Re-read right before publishing: if an EVENT-path recovery
@@ -535,7 +558,7 @@ static void test_all_reconcile(int64_t now)
 			if ((uint32_t)atomic_get(&test_all_ready_after_ms[i]) != ready_after) {
 				continue;
 			}
-			tracker_remote_command[i] = command;
+			tracker_slots[i].tracker_remote_command = command;
 			queued_mask |= BIT(i);
 		}
 		requested = test_all_requested_value();
@@ -655,7 +678,7 @@ static void tdma_recalculate(bool forced)
 			if (new_mask & BIT(i)) {
 				assigned = slot++;
 			}
-			tdma_config_packed[i] = tdma_pack_config(assigned, active_count, slot_ticks, epoch);
+			tracker_slots[i].tdma_config_packed = tdma_pack_config(assigned, active_count, slot_ticks, epoch);
 		}
 		tdma_dynamic_active_count = active_count;
 		tdma_dynamic_slot_ticks = slot_ticks;
@@ -793,33 +816,9 @@ static volatile bool pairing_new_devices_blocked = false; // When true, only all
 static uint8_t receiver_device_addr[6] = {0};
 
 
-// Packet statistics structure
-struct packet_stats {
-	uint32_t total_received;    // Total number of packets received (excluding duplicates)
-	uint32_t normal_packets;    // Number of packets received in normal sequence
-	uint32_t gap_events;        // Number of gap events (potential packet loss)
-	uint32_t out_of_order;      // Number of out-of-order packets
-	uint32_t duplicate_packets; // Number of duplicate packets
-	uint32_t restart_events;    // Number of restart events
-	uint32_t total_gaps;        // Total number of gaps (estimated packet loss)
-	uint32_t last_sequence;     // Last normal sequence number
-	uint64_t last_packet_time;  // Timestamp of the last received packet
-	bool first_packet;          // Flag indicating if it's the first packet
-	// TPS calculation related
-	uint32_t packets_in_last_second; // Number of packets in the last second
-	uint64_t last_tps_time;          // Last TPS calculation timestamp
-	uint32_t current_tps;            // Current TPS (packets per second)
-	// Per-status-period counters (filled into status packet data[4]/data[5], reset after each status packet)
-	uint16_t status_received; // Packets received since last status packet
-	uint16_t status_lost;     // Packets lost (gaps) since last status packet
-};
-
-static struct packet_stats tracker_stats[MAX_TRACKERS] = {0};
 static uint32_t auto_loss_reset_epoch;
 /* Decision evidence is distinct from lifetime/status diagnostics. A fence
  * drops only the interval crossing a known boundary, never decoder state. */
-static uint32_t decision_received[MAX_TRACKERS];
-static uint32_t decision_gaps[MAX_TRACKERS];
 static uint32_t decision_ready_mask;
 static uint32_t decision_fence_mask = UINT32_MAX;
 
@@ -839,8 +838,8 @@ static void decision_accept(uint8_t tracker_id, uint8_t gaps)
 		return;
 	}
 	decision_ready_mask |= bit;
-	decision_received[tracker_id]++;
-	decision_gaps[tracker_id] += gaps;
+	tracker_slots[tracker_id].decision_received++;
+	tracker_slots[tracker_id].decision_gaps += gaps;
 }
 
 void esb_auto_loss_invalidate(void)
@@ -859,7 +858,9 @@ void esb_rx_discontinuity(void)
 	 * must be discarded before delivery can resume. Never use for home
 	 * beacons or individual automatic energy measurements. */
 	unsigned int key = irq_lock();
-	memset(sequence_initialized, 0, sizeof(sequence_initialized));
+	for (uint8_t i = 0; i < MAX_TRACKERS; ++i) {
+		tracker_slots[i].sequence_initialized = false;
+	}
 	esb_auto_loss_invalidate();
 	irq_unlock(key);
 }
@@ -869,9 +870,9 @@ void esb_get_auto_loss_snapshot(struct esb_auto_loss_snapshot *out)
 	BUILD_ASSERT(MAX_TRACKERS == ESB_AUTO_LOSS_TRACKERS);
 	unsigned int key = irq_lock();
 	for (uint8_t i = 0; i < MAX_TRACKERS; ++i) {
-		out->tracker[i].received = decision_received[i];
-		out->tracker[i].gaps = decision_gaps[i];
-		out->tracker[i].restarts = tracker_stats[i].restart_events;
+		out->tracker[i].received = tracker_slots[i].decision_received;
+		out->tracker[i].gaps = tracker_slots[i].decision_gaps;
+		out->tracker[i].restarts = tracker_slots[i].stats.restart_events;
 	}
 	out->reset_epoch = auto_loss_reset_epoch;
 	out->active_mask = tdma_active_mask;
@@ -931,76 +932,52 @@ struct tdma_stats {
 	uint32_t violations;
 	int32_t phase_ema_q8;
 	bool phase_initialized;
-#if defined(CONFIG_TDMA_DIAGNOSTICS)
 	uint32_t phase_hist[RX_PHASE_BUCKETS];
 	uint32_t raw_phase_hist[RX_PHASE_BUCKETS];
 	int32_t raw_min_offset;
 	int32_t raw_max_offset;
 	uint32_t rssi_hist[RX_RSSI_BUCKETS];
 	uint32_t rssi_count;
-#endif
 };
 
 
-static struct tdma_stats g_tdma_stats[MAX_TRACKERS] = {0};
+struct tracker_diag {
+	struct tdma_stats stats;
+	int32_t g_last_ping_rx_time_diff_ticks;
+	bool g_last_ping_rx_time_diff_valid;
+	/* RADIO timestamps avoid EVENT IRQ scheduling delay. */
+	volatile uint32_t g_ping_isr_rx_ticks;
+	volatile bool g_ping_isr_rx_ticks_valid;
+	volatile uint32_t g_last_isr_rx_ticks;
+	volatile bool g_last_isr_rx_valid;
+	/* 0 = unavailable, 1 = initial estimate, 2 = mature estimate. */
+	uint8_t g_bias_ppb_valid;
+	int32_t g_bias_ppb;
+	int32_t g_bias_ref_offset;
+	uint32_t g_bias_ref_ticks;
+	uint32_t g_last_ping_isr_rx_ticks_raw;
+	uint8_t g_ping_dirty_streak;
+	uint32_t g_ping_reject_count;
+	uint32_t g_extrap_skip_count;
+};
 
-/* Last observed time-sync error from PING (rx_ticks - expected_rx_ticks), per tracker.
- * Used only for diagnostics to understand TDMA phase offset on receiver side.
- *
- * IMPORTANT: g_last_ping_rx_time_diff_ticks is computed from the RADIO ISR timestamp
- * (g_ping_isr_rx_ticks), NOT from the EVENT_IRQ current_rx_ticks.  The EVENT_IRQ fires
- * at priority 2, which can be delayed by Zephyr kernel critical sections (spinlocks)
- * by 10-25+ ticks relative to the actual packet receipt.  Using the EVENT_IRQ timestamp
- * would inflate clock_bias by that scheduling jitter, causing data packets to appear
- * 15-20 ticks early in tdma_check_slot() — i.e. false violations with Mean ≈ −15. */
-static int32_t g_last_ping_rx_time_diff_ticks[MAX_TRACKERS] = {0};
-static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS] = {0};
-
-/* RADIO ISR timestamp (priority 1) captured in esb_ack_handler_cb for each PING.
- * Written from RADIO ISR (prio 1), read from EVENT ISR (prio 2).
- * 32-bit aligned write on ARM Cortex-M4 is atomic, so no lock needed. */
-static volatile uint32_t g_ping_isr_rx_ticks[MAX_TRACKERS] = {0};
-static volatile bool g_ping_isr_rx_ticks_valid[MAX_TRACKERS] = {false};
-
-/* Per-tracker RADIO ISR timestamp for ALL packets (PING + data).
- * Now works for NoACK data packets too, since the ESB library was patched
- * to always call ack_handler regardless of the no_ack flag.
- * Used by tdma_check_slot() for accurate phase measurement. */
-static volatile uint32_t g_last_isr_rx_ticks[MAX_TRACKERS] = {0};
-static volatile bool g_last_isr_rx_valid[MAX_TRACKERS] = {false};
-
-/* Clock bias drift rate estimation (ppb = parts per billion).
- * Uses a long-baseline approach: hold a reference point and measure
- * total drift over time, averaging out PING retransmission noise.
- *
- * g_bias_ppb: estimated drift rate in ppb, positive = tracker clock
- *   is fast relative to receiver.
- * g_bias_ref_offset: clock_bias at the reference point.
- * g_bias_ref_ticks: receiver ticks at the reference point.
- * g_last_ping_isr_rx_ticks_raw: ticks of the most recent PING,
- *   used as elapsed-time baseline for per-packet extrapolation. */
-static uint8_t g_bias_ppb_valid[MAX_TRACKERS] = {0};
-static int32_t g_bias_ppb[MAX_TRACKERS] = {0};
-static int32_t g_bias_ref_offset[MAX_TRACKERS] = {0};
-static uint32_t g_bias_ref_ticks[MAX_TRACKERS] = {0};
-static uint32_t g_last_ping_isr_rx_ticks_raw[MAX_TRACKERS] = {0};
-static uint8_t g_ping_dirty_streak[MAX_TRACKERS] = {0};  /* consecutive rejected PINGs */
-static uint32_t g_ping_reject_count[MAX_TRACKERS] = {0}; /* total rejected PINGs since stats reset */
-static uint32_t g_extrap_skip_count[MAX_TRACKERS] = {0}; /* extrapolations skipped due to stale baseline */
+static struct tracker_diag tracker_diags[MAX_TRACKERS];
 
 #endif
 
 static void tdma_sync_stats_reset(void)
 {
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-	memset(g_tdma_stats, 0, sizeof(g_tdma_stats));
-	memset(g_last_ping_rx_time_diff_valid, 0, sizeof(g_last_ping_rx_time_diff_valid));
-	memset(g_bias_ppb_valid, 0, sizeof(g_bias_ppb_valid));
-	memset(g_last_ping_isr_rx_ticks_raw, 0, sizeof(g_last_ping_isr_rx_ticks_raw));
-	memset(g_last_ping_rx_time_diff_ticks, 0, sizeof(g_last_ping_rx_time_diff_ticks));
-	memset(g_ping_dirty_streak, 0, sizeof(g_ping_dirty_streak));
-	memset(g_ping_reject_count, 0, sizeof(g_ping_reject_count));
-	memset(g_extrap_skip_count, 0, sizeof(g_extrap_skip_count));
+	for (uint8_t i = 0; i < MAX_TRACKERS; ++i) {
+		memset(&tracker_diags[i].stats, 0, sizeof(tracker_diags[i].stats));
+		tracker_diags[i].g_last_ping_rx_time_diff_valid = false;
+		tracker_diags[i].g_bias_ppb_valid = 0;
+		tracker_diags[i].g_last_ping_isr_rx_ticks_raw = 0;
+		tracker_diags[i].g_last_ping_rx_time_diff_ticks = 0;
+		tracker_diags[i].g_ping_dirty_streak = 0;
+		tracker_diags[i].g_ping_reject_count = 0;
+		tracker_diags[i].g_extrap_skip_count = 0;
+	}
 #endif
 }
 
@@ -1022,13 +999,13 @@ static void tdma_loss_controller_update(int64_t now)
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
 		uint32_t r = evidence.tracker[i].received;
 		uint32_t g = evidence.tracker[i].gaps;
-		uint32_t prev_r = tdma_prev_recv[i];
-		uint32_t prev_g = tdma_prev_gaps[i];
+		uint32_t prev_r = tracker_slots[i].tdma_prev_recv;
+		uint32_t prev_g = tracker_slots[i].tdma_prev_gaps;
 		uint32_t restarts = evidence.tracker[i].restarts;
-		bool restarted = restarts != tdma_prev_restarts[i];
-		tdma_prev_restarts[i] = restarts;
-		tdma_prev_recv[i] = r;
-		tdma_prev_gaps[i] = g;
+		bool restarted = restarts != tracker_slots[i].tdma_prev_restarts;
+		tracker_slots[i].tdma_prev_restarts = restarts;
+		tracker_slots[i].tdma_prev_recv = r;
+		tracker_slots[i].tdma_prev_gaps = g;
 		/* A reset/restart is not a loss window. Never carry recovery evidence
 		 * across a sequence epoch, even when other trackers remain active. */
 		if (!(tdma_active_mask & BIT(i))) {
@@ -1161,7 +1138,7 @@ static void tdma_loss_controller_tick(int64_t now)
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 /**
  * Check if a packet from a tracker arrived in its assigned TDMA slot.
- * Uses dynamic parameters from tdma_config_packed[].
+ * Uses the tracker's packed dynamic TDMA parameters.
  *
  * @param tracker_id   The tracker's ID (0-15)
  * @param rx_ticks     Receiver time in ticks when packet arrived (EVENT_IRQ fallback)
@@ -1176,12 +1153,12 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks, int8_t rssi)
 	 * (delayed 10-25+ ticks by kernel scheduling).  The ISR timestamp is
 	 * now available for ALL packets including NoACK data, thanks to the
 	 * ESB library patch that always calls on_radio_disabled_rx_dpl(). */
-	if (g_last_isr_rx_valid[tracker_id]) {
-		rx_ticks = g_last_isr_rx_ticks[tracker_id];
+	if (tracker_diags[tracker_id].g_last_isr_rx_valid) {
+		rx_ticks = tracker_diags[tracker_id].g_last_isr_rx_ticks;
 	}
 
 	/* Read dynamic TDMA config (atomic 32-bit load) */
-	uint32_t cfg = tdma_config_packed[tracker_id];
+	uint32_t cfg = tracker_slots[tracker_id].tdma_config_packed;
 	uint8_t expected_slot = (cfg >> 24) & 0xFF;
 	uint8_t total_slots = (cfg >> 16) & 0xFF;
 	uint8_t slot_ticks = (cfg >> 8) & 0xFF;
@@ -1199,19 +1176,19 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks, int8_t rssi)
 	 * using the measured drift rate (ppb) to keep it accurate
 	 * between PING sync intervals.
 	 */
-	int32_t clock_bias = g_last_ping_rx_time_diff_valid[tracker_id] ? g_last_ping_rx_time_diff_ticks[tracker_id] : 0;
+	int32_t clock_bias = tracker_diags[tracker_id].g_last_ping_rx_time_diff_valid ? tracker_diags[tracker_id].g_last_ping_rx_time_diff_ticks : 0;
 
 	/* Drift extrapolation: bias changes linearly between PINGs.
 	 * Use the long-baseline ppb estimate to correct for drift
 	 * since the last PING, keeping the effective bias accurate
 	 * throughout the sync interval. */
-	if (clock_bias && g_last_ping_isr_rx_ticks_raw[tracker_id] != 0 && g_bias_ppb_valid[tracker_id]) {
-		uint32_t elapsed = rx_ticks - g_last_ping_isr_rx_ticks_raw[tracker_id];
+	if (clock_bias && tracker_diags[tracker_id].g_last_ping_isr_rx_ticks_raw != 0 && tracker_diags[tracker_id].g_bias_ppb_valid) {
+		uint32_t elapsed = rx_ticks - tracker_diags[tracker_id].g_last_ping_isr_rx_ticks_raw;
 		if (elapsed <= TDMA_SYNC_EXTRAP_MAX_TICKS) {
-			int32_t drift_comp = (int32_t)((int64_t)g_bias_ppb[tracker_id] * elapsed / 1000000000LL);
+			int32_t drift_comp = (int32_t)((int64_t)tracker_diags[tracker_id].g_bias_ppb * elapsed / 1000000000LL);
 			clock_bias += drift_comp;
 		} else {
-			g_extrap_skip_count[tracker_id]++;
+			tracker_diags[tracker_id].g_extrap_skip_count++;
 		}
 	}
 
@@ -1237,7 +1214,7 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks, int8_t rssi)
 		ref_offset += frame_ticks;
 	}
 
-	struct tdma_stats *stats = &g_tdma_stats[tracker_id];
+	struct tdma_stats *stats = &tracker_diags[tracker_id].stats;
 	stats->count++;
 
 	/* Update receiver-time phase and RSSI distributions. */
@@ -1344,20 +1321,20 @@ static void remote_wom_receive(uint8_t id, uint8_t flag, const uint8_t data[4], 
 	uint16_t value = ((uint16_t)data[0] << 8) | data[1];
 	uint16_t token = ((uint16_t)data[2] << 8) | data[3];
 	unsigned int key = irq_lock();
-	if (tracker_remote_command[id] == ESB_PONG_FLAG_WOM_CONTROL &&
-	    token != 0 && token == wom_token[id] && !wom_complete[id] &&
-	    wom_advertised[id] && counter != wom_first_ping_counter[id]) {
+	if (tracker_slots[id].tracker_remote_command == ESB_PONG_FLAG_WOM_CONTROL &&
+	    token != 0 && token == tracker_slots[id].wom_token && !tracker_slots[id].wom_complete &&
+	    tracker_slots[id].wom_advertised && counter != tracker_slots[id].wom_first_ping_counter) {
 		bool success = flag == ESB_PING_FLAG_WOM_RESULT &&
-			(wom_minutes[id] == ESB_WOM_ENTER ? value == ESB_WOM_ENTER :
-			 wom_minutes[id] == ESB_WOM_TIMEOUT_CLEAR ? value == 0 :
+			(tracker_slots[id].wom_minutes == ESB_WOM_ENTER ? value == ESB_WOM_ENTER :
+			 tracker_slots[id].wom_minutes == ESB_WOM_TIMEOUT_CLEAR ? value == 0 :
 			 (value >= 1 && value <= ESB_WOM_TIMEOUT_MAX_MINUTES &&
-			  (wom_minutes[id] == 0 || wom_minutes[id] == value)));
+			  (tracker_slots[id].wom_minutes == 0 || tracker_slots[id].wom_minutes == value)));
 		bool failure = flag == ESB_PING_FLAG_WOM_ERROR && value != 0;
 		if (success || failure) {
-			wom_minutes[id] = success ? value : 0;
-			wom_error[id] = failure ? value : 0;
-			wom_complete[id] = true;
-			tracker_remote_command[id] = ESB_PONG_FLAG_NORMAL;
+			tracker_slots[id].wom_minutes = success ? value : 0;
+			tracker_slots[id].wom_error = failure ? value : 0;
+			tracker_slots[id].wom_complete = true;
+			tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
 		}
 	}
 	irq_unlock(key);
@@ -1390,7 +1367,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		return 2;
 	}
 
-	struct packet_stats *stats = &tracker_stats[tracker_id];
+	struct packet_stats *stats = &tracker_slots[tracker_id].stats;
 	uint64_t current_time = k_uptime_get();
 	// Update TPS calculation
 	if (stats->last_tps_time == 0) {
@@ -1408,11 +1385,11 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 	stats->last_packet_time = current_time;
 
 	// First packet, accept directly
-	if (!sequence_initialized[tracker_id]) {
+	if (!tracker_slots[tracker_id].sequence_initialized) {
 		// Update received packet count
 		stats->total_received++;
-		last_packet_sequence[tracker_id] = received_seq;
-		sequence_initialized[tracker_id] = true;
+		tracker_slots[tracker_id].last_packet_sequence = received_seq;
+		tracker_slots[tracker_id].sequence_initialized = true;
 		stats->normal_packets++;
 		stats->last_sequence = received_seq;
 		stats->first_packet = false;
@@ -1422,7 +1399,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		return 0;
 	}
 
-	uint8_t last_seq = last_packet_sequence[tracker_id];
+	uint8_t last_seq = tracker_slots[tracker_id].last_packet_sequence;
 	uint8_t expected_seq = (last_seq + 1) & 0xFF;
 
 	LOG_DBG(
@@ -1436,7 +1413,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 	if (received_seq == expected_seq) {
 		// Update received packet count
 		stats->total_received++;
-		last_packet_sequence[tracker_id] = received_seq;
+		tracker_slots[tracker_id].last_packet_sequence = received_seq;
 		stats->normal_packets++;
 		stats->last_sequence = received_seq;
 		stats->status_received++;
@@ -1481,7 +1458,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		stats->restart_events++;
 		decision_ready_mask &= ~BIT(tracker_id);
 		decision_fence_mask |= BIT(tracker_id);
-		last_packet_sequence[tracker_id] = received_seq;
+		tracker_slots[tracker_id].last_packet_sequence = received_seq;
 		stats->last_sequence = received_seq;
 		stats->status_received++;
 		// Restart events are kept at WARNING level because this is important information
@@ -1504,7 +1481,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		stats->status_received++;
 		stats->status_lost += gaps;
 		decision_accept(tracker_id, gaps);
-		last_packet_sequence[tracker_id] = received_seq;
+		tracker_slots[tracker_id].last_packet_sequence = received_seq;
 		stats->last_sequence = received_seq;
 		// Log single gap only at DEBUG level to reduce output (summary statistics will show total gaps)
 		LOG_DBG("Gap detected: tracker=%d, seq=%d, gap=%d (forward=%d)", tracker_id, received_seq, gaps, diff_forward);
@@ -1520,7 +1497,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 // Prints statistics for a single tracker
 static void print_tracker_stats(uint8_t tracker_id)
 {
-	struct packet_stats *stats = &tracker_stats[tracker_id];
+	struct packet_stats *stats = &tracker_slots[tracker_id].stats;
 
 	if (stats->total_received == 0 && stats->duplicate_packets == 0) {
 		return;
@@ -1568,7 +1545,7 @@ static void print_tracker_stats(uint8_t tracker_id)
 static void print_tracker_stats_batch(void)
 {
 	for (int i = 0; i < MAX_TRACKERS; i++) {
-		if (tracker_stats[i].total_received > 0 || tracker_stats[i].duplicate_packets > 0) {
+		if (tracker_slots[i].stats.total_received > 0 || tracker_slots[i].stats.duplicate_packets > 0) {
 			print_tracker_stats(i);
 		}
 	}
@@ -1598,7 +1575,7 @@ static void esb_stats_thread(void)
 
 		// Update TPS for each tracker
 		for (int i = 0; i < MAX_TRACKERS; i++) {
-			struct packet_stats *stats = &tracker_stats[i];
+			struct packet_stats *stats = &tracker_slots[i].stats;
 			if (stats->last_tps_time == 0) {
 				continue;
 			}
@@ -1626,7 +1603,7 @@ static void esb_stats_thread(void)
 		if (now - last_tps_print_time >= TPS_CALCULATION_INTERVAL_MS) {
 			uint32_t total_tps = 0;
 			for (int i = 0; i < MAX_TRACKERS; i++) {
-				total_tps += tracker_stats[i].current_tps;
+				total_tps += tracker_slots[i].stats.current_tps;
 			}
 			LOG_INF("Total TPS: %u", total_tps);
 			last_tps_print_time = now;
@@ -1655,7 +1632,7 @@ static void esb_stats_thread(void)
 			if (now - last_detailed_log_time >= STATS_PRINT_INTERVAL_MS) {
 				bool has_data = false;
 				for (int i = 0; i < MAX_TRACKERS; i++) {
-					if (tracker_stats[i].total_received > 0) {
+					if (tracker_slots[i].stats.total_received > 0) {
 						has_data = true;
 						break;
 					}
@@ -1882,8 +1859,8 @@ static void esb_ack_handler_cb(
 	if (data_length > 1 && pipe_id > 0) {
 		uint8_t tid = pdu_data[1];
 		if (tid < MAX_TRACKERS) {
-			g_last_isr_rx_ticks[tid] = k_uptime_ticks();
-			g_last_isr_rx_valid[tid] = true;
+			tracker_diags[tid].g_last_isr_rx_ticks = k_uptime_ticks();
+			tracker_diags[tid].g_last_isr_rx_valid = true;
 		}
 	}
 #endif
@@ -1905,17 +1882,17 @@ static void esb_ack_handler_cb(
 		uint8_t cmd = ESB_PONG_FLAG_CHANNEL_CONFIRM;
 		bool ota_aborting = false;
 		if (!channel_confirm) {
-			cmd = tracker_remote_command[tracker_id];
+			cmd = tracker_slots[tracker_id].tracker_remote_command;
 			/* Keep an active metadata request on duplicate PINGs until its echo
 			 * arrives; channel probes must leave both pending and active tuples alone. */
 			unsigned int metadata_key = irq_lock();
-			if (cmd == ESB_PONG_FLAG_NORMAL && metadata_active_mask[tracker_id] != 0) {
+			if (cmd == ESB_PONG_FLAG_NORMAL && tracker_slots[tracker_id].metadata_active_mask != 0) {
 				cmd = ESB_PONG_FLAG_METADATA_REQUEST;
-			} else if (cmd == ESB_PONG_FLAG_NORMAL && metadata_pending_mask[tracker_id] != 0) {
-				metadata_active_mask[tracker_id] = metadata_pending_mask[tracker_id];
-				metadata_active_chunk[tracker_id] = metadata_pending_chunk[tracker_id];
-				metadata_active_token[tracker_id] = metadata_pending_token[tracker_id];
-				metadata_pending_mask[tracker_id] = 0;
+			} else if (cmd == ESB_PONG_FLAG_NORMAL && tracker_slots[tracker_id].metadata_pending_mask != 0) {
+				tracker_slots[tracker_id].metadata_active_mask = tracker_slots[tracker_id].metadata_pending_mask;
+				tracker_slots[tracker_id].metadata_active_chunk = tracker_slots[tracker_id].metadata_pending_chunk;
+				tracker_slots[tracker_id].metadata_active_token = tracker_slots[tracker_id].metadata_pending_token;
+				tracker_slots[tracker_id].metadata_pending_mask = 0;
 				cmd = ESB_PONG_FLAG_METADATA_REQUEST;
 			}
 			irq_unlock(metadata_key);
@@ -1939,15 +1916,15 @@ static void esb_ack_handler_cb(
 			/* Drain a previous tracker outcome before issuing a new WOM
 			 * transaction. In particular, receiver reboot must not reuse a
 			 * token against a still-cached success or error on the tracker. */
-			if (cmd == ESB_PONG_FLAG_WOM_CONTROL && !wom_advertised[tracker_id] &&
+			if (cmd == ESB_PONG_FLAG_WOM_CONTROL && !tracker_slots[tracker_id].wom_advertised &&
 			    (pdu_data[7] & 0x7f) != ESB_PONG_FLAG_NORMAL) {
 				cmd = ESB_PONG_FLAG_NORMAL;
 			}
 		}
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 		if (pipe_id == 1U + (tracker_id % 7)) {
-			g_ping_isr_rx_ticks[tracker_id] = rx_ticks;
-			g_ping_isr_rx_ticks_valid[tracker_id] = true;
+			tracker_diags[tracker_id].g_ping_isr_rx_ticks = rx_ticks;
+			tracker_diags[tracker_id].g_ping_isr_rx_ticks_valid = true;
 		}
 #endif
 
@@ -1962,9 +1939,9 @@ static void esb_ack_handler_cb(
 
 		if (cmd == ESB_PONG_FLAG_SENS_SET) {
 			/* SENS_SET overrides time sync bytes with sensitivity data */
-			int16_t s0 = pending_sens_data[tracker_id][0];
-			int16_t s1 = pending_sens_data[tracker_id][1];
-			int16_t s2 = pending_sens_data[tracker_id][2];
+			int16_t s0 = tracker_slots[tracker_id].pending_sens_data[0];
+			int16_t s1 = tracker_slots[tracker_id].pending_sens_data[1];
+			int16_t s2 = tracker_slots[tracker_id].pending_sens_data[2];
 			ack_payload->data[3] = (s0 >> 8) & 0xFF;
 			ack_payload->data[4] = (s0) & 0xFF;
 			ack_payload->data[5] = (s1 >> 8) & 0xFF;
@@ -1974,8 +1951,8 @@ static void esb_ack_handler_cb(
 			ack_payload->data[10] = 0;
 			ack_payload->data[11] = 0;
 		} else if (cmd == ESB_PONG_FLAG_SENS_AUTO) {
-			uint16_t rev = pending_sens_auto_revolutions[tracker_id];
-			ack_payload->data[3] = pending_sens_auto_axis[tracker_id];
+			uint16_t rev = tracker_slots[tracker_id].pending_sens_auto_revolutions;
+			ack_payload->data[3] = tracker_slots[tracker_id].pending_sens_auto_axis;
 			ack_payload->data[4] = (rev >> 8) & 0xFF;
 			ack_payload->data[5] = (rev) & 0xFF;
 			ack_payload->data[6] = 0;
@@ -1997,22 +1974,22 @@ static void esb_ack_handler_cb(
 				ack_payload->data[10] = (ch >> 8) & 0xFF;
 				ack_payload->data[11] = (ch) & 0xFF;
 			} else if (cmd == ESB_PONG_FLAG_WOM_CONTROL) {
-				ack_payload->data[8] = wom_minutes[tracker_id] >> 8;
-				ack_payload->data[9] = wom_minutes[tracker_id] & 0xff;
-				ack_payload->data[10] = wom_token[tracker_id] >> 8;
-				ack_payload->data[11] = wom_token[tracker_id] & 0xff;
+				ack_payload->data[8] = tracker_slots[tracker_id].wom_minutes >> 8;
+				ack_payload->data[9] = tracker_slots[tracker_id].wom_minutes & 0xff;
+				ack_payload->data[10] = tracker_slots[tracker_id].wom_token >> 8;
+				ack_payload->data[11] = tracker_slots[tracker_id].wom_token & 0xff;
 			} else if (cmd == ESB_PONG_FLAG_TEST_MODE_ON) {
-				ack_payload->data[8] = (tracker_test_on_tps[tracker_id] >> 8) & 0xFF;
-				ack_payload->data[9] = tracker_test_on_tps[tracker_id] & 0xFF;
+				ack_payload->data[8] = (tracker_slots[tracker_id].tracker_test_on_tps >> 8) & 0xFF;
+				ack_payload->data[9] = tracker_slots[tracker_id].tracker_test_on_tps & 0xFF;
 				ack_payload->data[10] = 0;
 			} else if (cmd == ESB_PONG_FLAG_METADATA_REQUEST) {
-				ack_payload->data[8] = metadata_active_mask[tracker_id];
-				ack_payload->data[9] = metadata_active_chunk[tracker_id];
-				uint16_t token = metadata_active_token[tracker_id];
+				ack_payload->data[8] = tracker_slots[tracker_id].metadata_active_mask;
+				ack_payload->data[9] = tracker_slots[tracker_id].metadata_active_chunk;
+				uint16_t token = tracker_slots[tracker_id].metadata_active_token;
 				ack_payload->data[10] = (token >> 8) & 0xFF;
 				ack_payload->data[11] = token & 0xFF;
 			} else if (cmd == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
-				ack_payload->data[8] = pending_cmd_arg[tracker_id];
+				ack_payload->data[8] = tracker_slots[tracker_id].pending_cmd_arg;
 				ack_payload->data[9] = 0;
 				ack_payload->data[10] = 0;
 				ack_payload->data[11] = 0;
@@ -2027,7 +2004,7 @@ static void esb_ack_handler_cb(
 				ack_payload->data[11] = 0;
 			} else if (cmd == ESB_PONG_FLAG_NORMAL) {
 				/* Preserve the legacy TDMA tuple byte for byte. */
-				uint32_t cfg = tdma_config_packed[tracker_id];
+				uint32_t cfg = tracker_slots[tracker_id].tdma_config_packed;
 				ack_payload->data[8] = (cfg >> 24) & 0xFF;
 				ack_payload->data[9] = (cfg >> 16) & 0xFF;
 				ack_payload->data[10] = (cfg >> 8) & 0xFF;
@@ -2060,13 +2037,13 @@ static void esb_ack_handler_cb(
 		if (*has_ack_payload && ack_payload->length == ESB_PONG_LEN &&
 		    ack_payload->data[0] == ESB_PONG_TYPE &&
 		    ack_payload->data[7] == ESB_PONG_FLAG_WOM_CONTROL &&
-		    tracker_remote_command[tracker_id] == ESB_PONG_FLAG_WOM_CONTROL &&
-		    wom_token[tracker_id] != 0 &&
-		    (((uint16_t)ack_payload->data[8] << 8) | ack_payload->data[9]) == wom_minutes[tracker_id] &&
-		    (((uint16_t)ack_payload->data[10] << 8) | ack_payload->data[11]) == wom_token[tracker_id] &&
-		    !wom_advertised[tracker_id]) {
-			wom_first_ping_counter[tracker_id] = counter;
-			wom_advertised[tracker_id] = true;
+		    tracker_slots[tracker_id].tracker_remote_command == ESB_PONG_FLAG_WOM_CONTROL &&
+		    tracker_slots[tracker_id].wom_token != 0 &&
+		    (((uint16_t)ack_payload->data[8] << 8) | ack_payload->data[9]) == tracker_slots[tracker_id].wom_minutes &&
+		    (((uint16_t)ack_payload->data[10] << 8) | ack_payload->data[11]) == tracker_slots[tracker_id].wom_token &&
+		    !tracker_slots[tracker_id].wom_advertised) {
+			tracker_slots[tracker_id].wom_first_ping_counter = counter;
+			tracker_slots[tracker_id].wom_advertised = true;
 		}
 		return;
 	}
@@ -2109,32 +2086,32 @@ static int composite_body_length(uint8_t type)
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 static void account_ping_clock(uint8_t tracker_id, uint32_t expected_rx_ticks, uint32_t current_rx_ticks)
 {
-	struct tdma_stats *stats = &g_tdma_stats[tracker_id];
+	struct tdma_stats *stats = &tracker_diags[tracker_id].stats;
 
 	/* Use RADIO ISR timestamp to avoid EVENT_IRQ scheduling jitter. */
 	uint32_t isr_rx_ticks
-		= g_ping_isr_rx_ticks_valid[tracker_id] ? g_ping_isr_rx_ticks[tracker_id] : current_rx_ticks;
+		= tracker_diags[tracker_id].g_ping_isr_rx_ticks_valid ? tracker_diags[tracker_id].g_ping_isr_rx_ticks : current_rx_ticks;
 	int32_t rx_time_diff_ticks = (int32_t)(isr_rx_ticks - expected_rx_ticks);
 
 	/* The tracker estimates TX start, but the ISR samples after the complete
 	 * PING. Remove the 13-byte 2 Mbps on-air time. Retransmissions have an
 	 * additional retry interval and are excluded by the clean-PING gate. */
-	int32_t prev_bias = g_last_ping_rx_time_diff_valid[tracker_id]
-		? g_last_ping_rx_time_diff_ticks[tracker_id] : 0;
+	int32_t prev_bias = tracker_diags[tracker_id].g_last_ping_rx_time_diff_valid
+		? tracker_diags[tracker_id].g_last_ping_rx_time_diff_ticks : 0;
 	#define PING_TX_START_TO_RX_TICKS 5
 
 	bool clean_ping;
-	if (!g_last_ping_rx_time_diff_valid[tracker_id]) {
+	if (!tracker_diags[tracker_id].g_last_ping_rx_time_diff_valid) {
 		clean_ping = true;
-	} else if (rx_time_diff_ticks <= g_last_ping_rx_time_diff_ticks[tracker_id]
+	} else if (rx_time_diff_ticks <= tracker_diags[tracker_id].g_last_ping_rx_time_diff_ticks
 					     + PING_TX_START_TO_RX_TICKS + 2) {
-		g_ping_dirty_streak[tracker_id] = 0;
+		tracker_diags[tracker_id].g_ping_dirty_streak = 0;
 		clean_ping = true;
 	} else {
-		g_ping_reject_count[tracker_id]++;
-		if (++g_ping_dirty_streak[tracker_id] >= PING_CLEAN_REACQUIRE_STREAK) {
-			g_ping_dirty_streak[tracker_id] = 0;
-			g_bias_ppb_valid[tracker_id] = 0;
+		tracker_diags[tracker_id].g_ping_reject_count++;
+		if (++tracker_diags[tracker_id].g_ping_dirty_streak >= PING_CLEAN_REACQUIRE_STREAK) {
+			tracker_diags[tracker_id].g_ping_dirty_streak = 0;
+			tracker_diags[tracker_id].g_bias_ppb_valid = 0;
 			prev_bias = 0;
 			clean_ping = true;
 		} else {
@@ -2142,37 +2119,37 @@ static void account_ping_clock(uint8_t tracker_id, uint32_t expected_rx_ticks, u
 		}
 	}
 	if (clean_ping) {
-		g_last_ping_rx_time_diff_ticks[tracker_id] = rx_time_diff_ticks - PING_TX_START_TO_RX_TICKS;
-		g_last_ping_rx_time_diff_valid[tracker_id] = true;
+		tracker_diags[tracker_id].g_last_ping_rx_time_diff_ticks = rx_time_diff_ticks - PING_TX_START_TO_RX_TICKS;
+		tracker_diags[tracker_id].g_last_ping_rx_time_diff_valid = true;
 	}
 
 	if (clean_ping && prev_bias != 0) {
-		if (!g_bias_ppb_valid[tracker_id]) {
-			g_bias_ref_offset[tracker_id] = g_last_ping_rx_time_diff_ticks[tracker_id];
-			g_bias_ref_ticks[tracker_id] = isr_rx_ticks;
-			g_bias_ppb[tracker_id] = 0;
-			g_bias_ppb_valid[tracker_id] = 1;
+		if (!tracker_diags[tracker_id].g_bias_ppb_valid) {
+			tracker_diags[tracker_id].g_bias_ref_offset = tracker_diags[tracker_id].g_last_ping_rx_time_diff_ticks;
+			tracker_diags[tracker_id].g_bias_ref_ticks = isr_rx_ticks;
+			tracker_diags[tracker_id].g_bias_ppb = 0;
+			tracker_diags[tracker_id].g_bias_ppb_valid = 1;
 		} else {
-			uint32_t elapsed = isr_rx_ticks - g_bias_ref_ticks[tracker_id];
+			uint32_t elapsed = isr_rx_ticks - tracker_diags[tracker_id].g_bias_ref_ticks;
 			if (elapsed >= 32768u) {
-				int32_t new_bias = g_last_ping_rx_time_diff_ticks[tracker_id];
-				int64_t total_drift = (int64_t)(new_bias - g_bias_ref_offset[tracker_id]);
+				int32_t new_bias = tracker_diags[tracker_id].g_last_ping_rx_time_diff_ticks;
+				int64_t total_drift = (int64_t)(new_bias - tracker_diags[tracker_id].g_bias_ref_offset);
 				int32_t raw_ppb = (int32_t)(total_drift * 1000000000LL / elapsed);
-				if (g_bias_ppb_valid[tracker_id] > 1) {
-					g_bias_ppb[tracker_id] += (raw_ppb - g_bias_ppb[tracker_id]) / 4;
+				if (tracker_diags[tracker_id].g_bias_ppb_valid > 1) {
+					tracker_diags[tracker_id].g_bias_ppb += (raw_ppb - tracker_diags[tracker_id].g_bias_ppb) / 4;
 				} else {
-					g_bias_ppb[tracker_id] = raw_ppb;
-					g_bias_ppb_valid[tracker_id] = 2;
+					tracker_diags[tracker_id].g_bias_ppb = raw_ppb;
+					tracker_diags[tracker_id].g_bias_ppb_valid = 2;
 				}
 			}
 			if (elapsed > 60u * 32768u) {
-				g_bias_ref_offset[tracker_id] = g_last_ping_rx_time_diff_ticks[tracker_id];
-				g_bias_ref_ticks[tracker_id] = isr_rx_ticks;
+				tracker_diags[tracker_id].g_bias_ref_offset = tracker_diags[tracker_id].g_last_ping_rx_time_diff_ticks;
+				tracker_diags[tracker_id].g_bias_ref_ticks = isr_rx_ticks;
 			}
 		}
 	}
 	if (clean_ping) {
-		g_last_ping_isr_rx_ticks_raw[tracker_id] = isr_rx_ticks;
+		tracker_diags[tracker_id].g_last_ping_isr_rx_ticks_raw = isr_rx_ticks;
 	}
 
 	if (stats->count > 0 && esb_get_stats_detailed_enabled()) {
@@ -2234,11 +2211,11 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 	}
 
 	if (payload->pipe != 1 + (tracker_id % 7)) {
-		pipe_mismatch_count[tracker_id]++;
+		tracker_slots[tracker_id].pipe_mismatch_count++;
 		LOG_DBG(
 			"PING pipe mismatch (x%u): id=%u, expected "
 			"pipe=%u got pipe=%u",
-			pipe_mismatch_count[tracker_id],
+			tracker_slots[tracker_id].pipe_mismatch_count,
 			tracker_id,
 			1 + (tracker_id % 7),
 			payload->pipe
@@ -2249,11 +2226,11 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 	uint8_t crc_calc = crc8_ccitt(0x07, payload->data, ESB_PING_LEN - 1);
 	if (payload->data[ESB_PING_LEN - 1] != crc_calc) {
 		// CRC error - only log warning if consecutive errors occur
-		crc_error_count[tracker_id]++;
+		tracker_slots[tracker_id].crc_error_count++;
 
 		LOG_DBG(
 			"PING CRC mismatch (x%u): id=%u expected %02X got %02X",
-			crc_error_count[tracker_id],
+			tracker_slots[tracker_id].crc_error_count,
 			tracker_id,
 			crc_calc,
 			payload->data[ESB_PING_LEN - 1]
@@ -2286,11 +2263,11 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 #endif
 
 	// First PING received for this tracker - accept directly, no sequence check
-	if (!ping_counter_initialized[tracker_id]) {
-		ping_counter_initialized[tracker_id] = true;
-		last_ping_counter[tracker_id] = counter;
-		last_ping_time[tracker_id] = k_uptime_get();
-		last_pong_queued_counter[tracker_id] = 0xFF; // Mark as not queued
+	if (!tracker_slots[tracker_id].ping_counter_initialized) {
+		tracker_slots[tracker_id].ping_counter_initialized = true;
+		tracker_slots[tracker_id].last_ping_counter = counter;
+		tracker_slots[tracker_id].last_ping_time = k_uptime_get();
+		tracker_slots[tracker_id].last_pong_queued_counter = 0xFF; // Mark as not queued
 		LOG_DBG("First PING from tracker %u, ctr=%u, initializing", tracker_id, counter);
 		// Continue processing, send PONG
 	} else {
@@ -2302,23 +2279,23 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 		bool is_tracker_restart = false;
 
 		// Check for timeout - if no PING received for more than 5 seconds, reset expectation
-		if (last_ping_time[tracker_id] > 0
-			&& (current_time - last_ping_time[tracker_id]) > PING_TIMEOUT_MS) {
+		if (tracker_slots[tracker_id].last_ping_time > 0
+			&& (current_time - tracker_slots[tracker_id].last_ping_time) > PING_TIMEOUT_MS) {
 			LOG_WRN(
 				"PING timeout (%llu ms), resetting tracker %u counter tracking",
-				current_time - last_ping_time[tracker_id],
+				current_time - tracker_slots[tracker_id].last_ping_time,
 				tracker_id
 			);
-			last_ping_counter[tracker_id] = counter;
-			last_ping_time[tracker_id] = current_time;
-			last_pong_queued_counter[tracker_id] = 0xFF;
+			tracker_slots[tracker_id].last_ping_counter = counter;
+			tracker_slots[tracker_id].last_ping_time = current_time;
+			tracker_slots[tracker_id].last_pong_queued_counter = 0xFF;
 			if (atomic_get(&test_all_state_valid)) {
 				test_all_invalidate_tracker(tracker_id, (int64_t)current_time);
 			}
 			// Continue processing this PING
 		} else {
 			// Calculate difference
-			int counter_diff = (int)counter - (int)last_ping_counter[tracker_id];
+			int counter_diff = (int)counter - (int)tracker_slots[tracker_id].last_ping_counter;
 			if (counter_diff < 0) {
 				counter_diff += 256; // Handle wrap-around
 			}
@@ -2344,7 +2321,7 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 					LOG_DBG(
 						"Tracker restart detected: id=%u old_ctr=%u new_ctr=%u (backward=%d)",
 						tracker_id,
-						last_ping_counter[tracker_id],
+						tracker_slots[tracker_id].last_ping_counter,
 						counter,
 						backward_amount
 					);
@@ -2355,7 +2332,7 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 						"Long packet loss with wraparound: id=%u last=%u new=%u (backward=%d, "
 						"accepting)",
 						tracker_id,
-						last_ping_counter[tracker_id],
+						tracker_slots[tracker_id].last_ping_counter,
 						counter,
 						backward_amount
 					);
@@ -2366,21 +2343,21 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 			}
 
 			// Update timestamp
-			last_ping_time[tracker_id] = current_time;
+			tracker_slots[tracker_id].last_ping_time = current_time;
 		}
 
 		// Handle various cases
 		if (is_tracker_restart) {
 			// Tracker restarted, reset counter tracking
-			last_ping_counter[tracker_id] = counter;
+			tracker_slots[tracker_id].last_ping_counter = counter;
 			// Reset PONG queue tracking
-			last_pong_queued_counter[tracker_id] = 0xFF;
+			tracker_slots[tracker_id].last_pong_queued_counter = 0xFF;
 			/* The first data sequence after reboot is unrelated to
 			 * the old stream; retain totals but re-anchor admission. */
-			sequence_initialized[tracker_id] = false;
+			tracker_slots[tracker_id].sequence_initialized = false;
 			decision_ready_mask &= ~BIT(tracker_id);
 			decision_fence_mask |= BIT(tracker_id);
-			tracker_stats[tracker_id].restart_events++;
+			tracker_slots[tracker_id].stats.restart_events++;
 			if (atomic_get(&test_all_state_valid)) {
 				test_all_invalidate_tracker(tracker_id, (int64_t)current_time);
 			}
@@ -2390,7 +2367,7 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 			LOG_DBG("Duplicate PING detected: id=%u ctr=%u (retransmit or retry)", tracker_id, counter);
 
 			// Check if we already queued a PONG for this counter
-			if (counter == last_pong_queued_counter[tracker_id]) {
+			if (counter == tracker_slots[tracker_id].last_pong_queued_counter) {
 				LOG_DBG("PONG already queued for ctr=%u, skipping duplicate queue", counter);
 				// Don't queue again, tracker will get PONG on next packet
 				return;
@@ -2398,19 +2375,19 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 		} else if (is_out_of_order) {
 			// Out-of-order PING - this is an old packet that arrived late
 			// Don't process it to avoid sending stale PONG
-			int backward_amount = 256 - ((int)counter - (int)last_ping_counter[tracker_id] + 256) % 256;
+			int backward_amount = 256 - ((int)counter - (int)tracker_slots[tracker_id].last_ping_counter + 256) % 256;
 			LOG_WRN(
 				"Out-of-order PING: id=%u ctr=%u (expected >%u, -%d backward), SKIPPING",
 				tracker_id,
 				counter,
-				last_ping_counter[tracker_id],
+				tracker_slots[tracker_id].last_ping_counter,
 				backward_amount
 			);
 			// Don't update last_ping_counter, don't queue PONG
 			return;
 		} else if (is_large_gap) {
 			// Large gap detected - possible packet loss
-			int counter_diff = (int)counter - (int)last_ping_counter[tracker_id];
+			int counter_diff = (int)counter - (int)tracker_slots[tracker_id].last_ping_counter;
 			if (counter_diff < 0) {
 				counter_diff += 256;
 			}
@@ -2418,7 +2395,7 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 				LOG_WRN(
 					"Large PING counter gap: id=%u last=%u new=%u (gap=%d)",
 					tracker_id,
-					last_ping_counter[tracker_id],
+					tracker_slots[tracker_id].last_ping_counter,
 					counter,
 					counter_diff
 				);
@@ -2427,19 +2404,19 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 
 		// Update last seen counter (only if not out-of-order and not skipped)
 		if (!is_out_of_order) {
-			last_ping_counter[tracker_id] = counter;
+			tracker_slots[tracker_id].last_ping_counter = counter;
 		}
 	} // End of else branch for ping_counter_initialized
 
 	remote_wom_receive(tracker_id, ping_ack_flag, &payload->data[8], counter);
 	if (ping_ack_flag == ESB_PONG_FLAG_METADATA_REQUEST) {
 		uint16_t echoed_token = ((uint16_t)payload->data[10] << 8) | payload->data[11];
-		bool metadata_matches = metadata_active_mask[tracker_id] != 0 &&
-			payload->data[8] == metadata_active_mask[tracker_id] &&
-			payload->data[9] == metadata_active_chunk[tracker_id] &&
-			echoed_token == metadata_active_token[tracker_id];
+		bool metadata_matches = tracker_slots[tracker_id].metadata_active_mask != 0 &&
+			payload->data[8] == tracker_slots[tracker_id].metadata_active_mask &&
+			payload->data[9] == tracker_slots[tracker_id].metadata_active_chunk &&
+			echoed_token == tracker_slots[tracker_id].metadata_active_token;
 		if (metadata_matches) {
-			metadata_active_mask[tracker_id] = 0;
+			tracker_slots[tracker_id].metadata_active_mask = 0;
 			LOG_DBG("Tracker %u confirmed metadata token=%u", tracker_id, echoed_token);
 		}
 	}
@@ -2450,12 +2427,12 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 		uint16_t ping_ack_tps = ping_ack_flag == ESB_PONG_FLAG_TEST_MODE_ON
 			? ((uint16_t)payload->data[8] << 8) | payload->data[9] : 0;
 		bool test_payload_matches = ping_ack_flag != ESB_PONG_FLAG_TEST_MODE_ON
-			|| ping_ack_tps == tracker_test_on_tps[tracker_id];
+			|| ping_ack_tps == tracker_slots[tracker_id].tracker_test_on_tps;
 		bool batch_payload_matches = ping_ack_flag != ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
-			|| payload->data[8] == pending_cmd_arg[tracker_id];
-		if (tracker_remote_command[tracker_id] == ping_ack_flag
+			|| payload->data[8] == tracker_slots[tracker_id].pending_cmd_arg;
+		if (tracker_slots[tracker_id].tracker_remote_command == ping_ack_flag
 		    && test_payload_matches && batch_payload_matches) {
-			tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
+			tracker_slots[tracker_id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
 			/* Confirmations are frequent under load — keep UART off EVENT IRQ. */
 			LOG_DBG(
 				"Tracker %u confirmed command %s (0x%02X)",
@@ -2483,7 +2460,7 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 
 	/* PONG is now built by ack_handler in radio ISR context.
 	 * event_handler only needs to track sequence state. */
-	last_pong_queued_counter[tracker_id] = counter;
+	tracker_slots[tracker_id].last_pong_queued_counter = counter;
 }
 
 static void esb_receive_composite(const struct esb_payload *payload, uint32_t event_ticks)
@@ -2605,7 +2582,7 @@ static void esb_receive_composite(const struct esb_payload *payload, uint32_t ev
 
 		/* For status packets (type 3), fill packet loss stats */
 		if (sub_type == 3) {
-			struct packet_stats *stats = &tracker_stats[tracker_id];
+			struct packet_stats *stats = &tracker_slots[tracker_id].stats;
 			pkt[4] = stats->status_received;
 			pkt[5] = stats->status_lost;
 			pkt[6] = 0;
@@ -2820,7 +2797,7 @@ void event_handler(struct esb_evt const *event)
 				// Forward packet for other cases (normal, potential loss, reboot)
 				// For status packets (type 3), fill in packet loss statistics before forwarding
 				if (rx_payload.data[0] == 3) {
-					struct packet_stats *stats = &tracker_stats[tracker_id];
+					struct packet_stats *stats = &tracker_slots[tracker_id].stats;
 					rx_payload.data[4] = stats->status_received;
 					rx_payload.data[5] = stats->status_lost;
 					rx_payload.data[6] = 0; // windows_hit (not implemented)
@@ -2851,15 +2828,15 @@ void event_handler(struct esb_evt const *event)
 					if (is_target) {
 						if (pkt_type == ESB_RAW_IMU_TYPE || pkt_type == ESB_RAW_IMU_QUAT_TYPE) {
 							uint16_t seq = sys_get_be16(&rx_payload.data[2]);
-							if (last_raw_valid[tracker_id] && last_raw_seq[tracker_id] == seq) {
+							if (tracker_slots[tracker_id].last_raw_valid && tracker_slots[tracker_id].last_raw_seq == seq) {
 								break;
 							}
-							last_raw_seq[tracker_id] = seq;
-							last_raw_valid[tracker_id] = true;
+							tracker_slots[tracker_id].last_raw_seq = seq;
+							tracker_slots[tracker_id].last_raw_valid = true;
 						}
 						data_collect_write(rx_payload.data, rx_payload.length, rx_payload.rssi);
 					} else if (!data_collect_is_active() && !data_collect_batch_is_active()) {
-						uint8_t pending = tracker_remote_command[tracker_id];
+						uint8_t pending = tracker_slots[tracker_id].tracker_remote_command;
 						if (pending != ESB_PONG_FLAG_DATA_COLLECT_OFF &&
 						    pending != ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF) {
 							esb_send_remote_command(tracker_id, ESB_PONG_FLAG_DATA_COLLECT_OFF);
@@ -3102,61 +3079,61 @@ void esb_set_addr_unified(void)
 /* Caller holds tracker_store_lock and irq_lock. A slot is a new session. */
 static void tracker_slot_reset(uint8_t id)
 {
-	last_packet_sequence[id] = 0;
-	sequence_initialized[id] = false;
-	last_ping_counter[id] = 0;
-	ping_counter_initialized[id] = false;
-	last_ping_time[id] = 0;
-	last_pong_queued_counter[id] = 0;
-	pipe_mismatch_count[id] = 0;
-	crc_error_count[id] = 0;
-	last_raw_seq[id] = 0;
-	last_raw_valid[id] = false;
-	tracker_remote_command[id] = ESB_PONG_FLAG_NORMAL;
-	wom_token[id] = 0;
-	wom_minutes[id] = 0;
-	wom_error[id] = 0;
-	wom_complete[id] = false;
-	wom_advertised[id] = false;
-	wom_first_ping_counter[id] = 0;
-	pending_cmd_arg[id] = 0;
-	tracker_test_on_tps[id] = 0;
+	tracker_slots[id].last_packet_sequence = 0;
+	tracker_slots[id].sequence_initialized = false;
+	tracker_slots[id].last_ping_counter = 0;
+	tracker_slots[id].ping_counter_initialized = false;
+	tracker_slots[id].last_ping_time = 0;
+	tracker_slots[id].last_pong_queued_counter = 0;
+	tracker_slots[id].pipe_mismatch_count = 0;
+	tracker_slots[id].crc_error_count = 0;
+	tracker_slots[id].last_raw_seq = 0;
+	tracker_slots[id].last_raw_valid = false;
+	tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
+	tracker_slots[id].wom_token = 0;
+	tracker_slots[id].wom_minutes = 0;
+	tracker_slots[id].wom_error = 0;
+	tracker_slots[id].wom_complete = false;
+	tracker_slots[id].wom_advertised = false;
+	tracker_slots[id].wom_first_ping_counter = 0;
+	tracker_slots[id].pending_cmd_arg = 0;
+	tracker_slots[id].tracker_test_on_tps = 0;
 	for (unsigned int axis = 0; axis < 3; axis++) {
-		pending_sens_data[id][axis] = 0;
+		tracker_slots[id].pending_sens_data[axis] = 0;
 	}
-	pending_sens_auto_axis[id] = 0;
-	pending_sens_auto_revolutions[id] = 0;
-	metadata_active_mask[id] = 0;
-	metadata_active_chunk[id] = 0;
-	metadata_active_token[id] = 0;
-	metadata_pending_mask[id] = 0;
-	metadata_pending_chunk[id] = 0;
-	metadata_pending_token[id] = 0;
+	tracker_slots[id].pending_sens_auto_axis = 0;
+	tracker_slots[id].pending_sens_auto_revolutions = 0;
+	tracker_slots[id].metadata_active_mask = 0;
+	tracker_slots[id].metadata_active_chunk = 0;
+	tracker_slots[id].metadata_active_token = 0;
+	tracker_slots[id].metadata_pending_mask = 0;
+	tracker_slots[id].metadata_pending_chunk = 0;
+	tracker_slots[id].metadata_pending_token = 0;
 	atomic_and(&test_all_confirmed_mask, (atomic_val_t)~BIT(id));
 	atomic_set(&test_all_ready_after_ms[id], 0);
-	tdma_config_packed[id] = 0;
-	tdma_prev_recv[id] = 0;
-	tdma_prev_gaps[id] = 0;
-	tdma_prev_restarts[id] = 0;
-	memset(&tracker_stats[id], 0, sizeof(tracker_stats[id]));
-	decision_received[id] = 0;
-	decision_gaps[id] = 0;
+	tracker_slots[id].tdma_config_packed = 0;
+	tracker_slots[id].tdma_prev_recv = 0;
+	tracker_slots[id].tdma_prev_gaps = 0;
+	tracker_slots[id].tdma_prev_restarts = 0;
+	memset(&tracker_slots[id].stats, 0, sizeof(tracker_slots[id].stats));
+	tracker_slots[id].decision_received = 0;
+	tracker_slots[id].decision_gaps = 0;
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-	memset(&g_tdma_stats[id], 0, sizeof(g_tdma_stats[id]));
-	g_last_ping_rx_time_diff_ticks[id] = 0;
-	g_last_ping_rx_time_diff_valid[id] = false;
-	g_ping_isr_rx_ticks[id] = 0;
-	g_ping_isr_rx_ticks_valid[id] = false;
-	g_last_isr_rx_ticks[id] = 0;
-	g_last_isr_rx_valid[id] = false;
-	g_bias_ppb_valid[id] = 0;
-	g_bias_ppb[id] = 0;
-	g_bias_ref_offset[id] = 0;
-	g_bias_ref_ticks[id] = 0;
-	g_last_ping_isr_rx_ticks_raw[id] = 0;
-	g_ping_dirty_streak[id] = 0;
-	g_ping_reject_count[id] = 0;
-	g_extrap_skip_count[id] = 0;
+	memset(&tracker_diags[id].stats, 0, sizeof(tracker_diags[id].stats));
+	tracker_diags[id].g_last_ping_rx_time_diff_ticks = 0;
+	tracker_diags[id].g_last_ping_rx_time_diff_valid = false;
+	tracker_diags[id].g_ping_isr_rx_ticks = 0;
+	tracker_diags[id].g_ping_isr_rx_ticks_valid = false;
+	tracker_diags[id].g_last_isr_rx_ticks = 0;
+	tracker_diags[id].g_last_isr_rx_valid = false;
+	tracker_diags[id].g_bias_ppb_valid = 0;
+	tracker_diags[id].g_bias_ppb = 0;
+	tracker_diags[id].g_bias_ref_offset = 0;
+	tracker_diags[id].g_bias_ref_ticks = 0;
+	tracker_diags[id].g_last_ping_isr_rx_ticks_raw = 0;
+	tracker_diags[id].g_ping_dirty_streak = 0;
+	tracker_diags[id].g_ping_reject_count = 0;
+	tracker_diags[id].g_extrap_skip_count = 0;
 #endif
 	channel_target_mask &= ~BIT(id);
 	tdma_shadow_forget_tracker(id);
@@ -3444,7 +3421,7 @@ uint32_t esb_send_remote_wom_command(uint8_t target_id, uint16_t minutes, uint16
 	for (uint8_t id = 0; id < stored_trackers && id < MAX_TRACKERS; id++) {
 		if (stored_tracker_addr[id] != 0 &&
 		    (target_id == id || (target_id == 0xff &&
-		     tracker_stats[id].last_packet_time >= scan_start_time))) {
+		     tracker_slots[id].stats.last_packet_time >= scan_start_time))) {
 			mask |= BIT(id);
 		}
 	}
@@ -3456,13 +3433,13 @@ uint32_t esb_send_remote_wom_command(uint8_t target_id, uint16_t minutes, uint16
 			if (!(mask & BIT(id))) {
 				continue;
 			}
-			wom_token[id] = wom_next_token;
-			wom_minutes[id] = minutes;
-			wom_error[id] = 0;
-			wom_complete[id] = false;
-			wom_advertised[id] = false;
-			wom_first_ping_counter[id] = 0;
-			tracker_remote_command[id] = ESB_PONG_FLAG_WOM_CONTROL;
+			tracker_slots[id].wom_token = wom_next_token;
+			tracker_slots[id].wom_minutes = minutes;
+			tracker_slots[id].wom_error = 0;
+			tracker_slots[id].wom_complete = false;
+			tracker_slots[id].wom_advertised = false;
+			tracker_slots[id].wom_first_ping_counter = 0;
+			tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_WOM_CONTROL;
 		}
 		*token_out = wom_next_token;
 	}
@@ -3477,18 +3454,18 @@ bool esb_get_remote_wom_result(uint8_t id, uint16_t token, uint16_t *minutes, ui
 		return false;
 	}
 	unsigned int key = irq_lock();
-	bool matches = wom_token[id] == token;
+	bool matches = tracker_slots[id].wom_token == token;
 	/* Another control command displaced the pending request: never treat its
 	 * eventual generic confirmation as proof of a completed WOM command. */
-	if (matches && !wom_complete[id] && tracker_remote_command[id] != ESB_PONG_FLAG_WOM_CONTROL) {
-		wom_minutes[id] = 0;
-		wom_error[id] = ECANCELED;
-		wom_complete[id] = true;
+	if (matches && !tracker_slots[id].wom_complete && tracker_slots[id].tracker_remote_command != ESB_PONG_FLAG_WOM_CONTROL) {
+		tracker_slots[id].wom_minutes = 0;
+		tracker_slots[id].wom_error = ECANCELED;
+		tracker_slots[id].wom_complete = true;
 	}
-	bool complete = matches && wom_complete[id];
+	bool complete = matches && tracker_slots[id].wom_complete;
 	if (complete) {
-		*minutes = wom_minutes[id];
-		*error = wom_error[id];
+		*minutes = tracker_slots[id].wom_minutes;
+		*error = tracker_slots[id].wom_error;
 	}
 	irq_unlock(key);
 	return complete;
@@ -3498,16 +3475,16 @@ void esb_cancel_remote_wom_command(uint32_t mask, uint16_t token)
 {
 	unsigned int key = irq_lock();
 	for (uint8_t id = 0; id < MAX_TRACKERS; id++) {
-		if ((mask & BIT(id)) && token != 0 && wom_token[id] == token) {
-			if (tracker_remote_command[id] == ESB_PONG_FLAG_WOM_CONTROL) {
-				tracker_remote_command[id] = ESB_PONG_FLAG_NORMAL;
+		if ((mask & BIT(id)) && token != 0 && tracker_slots[id].wom_token == token) {
+			if (tracker_slots[id].tracker_remote_command == ESB_PONG_FLAG_WOM_CONTROL) {
+				tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
 			}
-			wom_token[id] = 0;
-			wom_minutes[id] = 0;
-			wom_error[id] = 0;
-			wom_complete[id] = false;
-			wom_advertised[id] = false;
-			wom_first_ping_counter[id] = 0;
+			tracker_slots[id].wom_token = 0;
+			tracker_slots[id].wom_minutes = 0;
+			tracker_slots[id].wom_error = 0;
+			tracker_slots[id].wom_complete = false;
+			tracker_slots[id].wom_advertised = false;
+			tracker_slots[id].wom_first_ping_counter = 0;
 		}
 	}
 	irq_unlock(key);
@@ -3521,10 +3498,10 @@ void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z)
 	int16_t sensitivity[3] = {(int16_t)(x * 100.0f), (int16_t)(y * 100.0f),
 				 (int16_t)(z * 100.0f)};
 	unsigned int key = irq_lock();
-	pending_sens_data[tracker_id][0] = sensitivity[0];
-	pending_sens_data[tracker_id][1] = sensitivity[1];
-	pending_sens_data[tracker_id][2] = sensitivity[2];
-	tracker_remote_command[tracker_id] = ESB_PONG_FLAG_SENS_SET;
+	tracker_slots[tracker_id].pending_sens_data[0] = sensitivity[0];
+	tracker_slots[tracker_id].pending_sens_data[1] = sensitivity[1];
+	tracker_slots[tracker_id].pending_sens_data[2] = sensitivity[2];
+	tracker_slots[tracker_id].tracker_remote_command = ESB_PONG_FLAG_SENS_SET;
 	irq_unlock(key);
 	LOG_INF("Queued SENS_SET for tracker %u: %.2f, %.2f, %.2f", tracker_id, (double)x, (double)y, (double)z);
 }
@@ -3539,17 +3516,17 @@ bool esb_send_remote_command_sens_auto(uint8_t tracker_id, uint8_t axis, uint16_
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	unsigned int key = irq_lock();
 	bool active = tracker_id < stored_trackers && stored_tracker_addr[tracker_id] != 0
-			   && tracker_stats[tracker_id].last_packet_time > 0
-			   && now - tracker_stats[tracker_id].last_packet_time <= PING_TIMEOUT_MS;
+			   && tracker_slots[tracker_id].stats.last_packet_time > 0
+			   && now - tracker_slots[tracker_id].stats.last_packet_time <= PING_TIMEOUT_MS;
 	if (!active) {
 		irq_unlock(key);
 		k_mutex_unlock(&tracker_store_lock);
 		LOG_WRN("SENS_AUTO not queued for inactive tracker %u", tracker_id);
 		return false;
 	}
-	pending_sens_auto_axis[tracker_id] = axis;
-	pending_sens_auto_revolutions[tracker_id] = revolutions;
-	tracker_remote_command[tracker_id] = ESB_PONG_FLAG_SENS_AUTO;
+	tracker_slots[tracker_id].pending_sens_auto_axis = axis;
+	tracker_slots[tracker_id].pending_sens_auto_revolutions = revolutions;
+	tracker_slots[tracker_id].tracker_remote_command = ESB_PONG_FLAG_SENS_AUTO;
 	irq_unlock(key);
 	k_mutex_unlock(&tracker_store_lock);
 
@@ -3572,10 +3549,10 @@ uint32_t esb_send_remote_command_sens_auto_all(uint8_t axis, uint16_t revolution
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	unsigned int key = irq_lock();
 	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
-		if (stored_tracker_addr[i] != 0 && tracker_stats[i].last_packet_time >= scan_start_time) {
-			pending_sens_auto_axis[i] = axis;
-			pending_sens_auto_revolutions[i] = revolutions;
-			tracker_remote_command[i] = ESB_PONG_FLAG_SENS_AUTO;
+		if (stored_tracker_addr[i] != 0 && tracker_slots[i].stats.last_packet_time >= scan_start_time) {
+			tracker_slots[i].pending_sens_auto_axis = axis;
+			tracker_slots[i].pending_sens_auto_revolutions = revolutions;
+			tracker_slots[i].tracker_remote_command = ESB_PONG_FLAG_SENS_AUTO;
 			mask |= (1u << i);
 			count++;
 		}
@@ -3598,7 +3575,7 @@ static uint32_t esb_scan_active_mask(int64_t scan_start_time)
 	uint32_t mask = 0;
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
-		if (stored_tracker_addr[i] != 0 && tracker_stats[i].last_packet_time >= scan_start_time) {
+		if (stored_tracker_addr[i] != 0 && tracker_slots[i].stats.last_packet_time >= scan_start_time) {
 			mask |= (1u << i);
 		}
 	}
@@ -3610,7 +3587,7 @@ static void esb_publish_flag_mask(uint8_t command_flag, uint32_t mask)
 {
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
 		if (mask & BIT(i)) {
-			tracker_remote_command[i] = command_flag;
+			tracker_slots[i].tracker_remote_command = command_flag;
 		}
 	}
 }
@@ -3621,14 +3598,14 @@ static void esb_publish_flag_mask(uint8_t command_flag, uint32_t mask)
 static void esb_publish_test_flag_mask(uint8_t command_flag, uint32_t mask, uint32_t now_u32)
 {
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
-		if (!(mask & BIT(i)) || tracker_remote_command[i] != ESB_PONG_FLAG_NORMAL) {
+		if (!(mask & BIT(i)) || tracker_slots[i].tracker_remote_command != ESB_PONG_FLAG_NORMAL) {
 			continue;
 		}
 		uint32_t ready_after = (uint32_t)atomic_get(&test_all_ready_after_ms[i]);
 		if ((int32_t)(now_u32 - ready_after) < 0) {
 			continue;
 		}
-		tracker_remote_command[i] = command_flag;
+		tracker_slots[i].tracker_remote_command = command_flag;
 	}
 }
 
@@ -3646,9 +3623,9 @@ uint32_t esb_send_remote_command_test_on(uint8_t tracker_id, uint16_t tps)
 	test_all_invalidate();
 	/* Publish the TPS before the flag: the ACK handler (radio ISR) echoes it
 	 * as soon as it observes the command flag. */
-	tracker_test_on_tps[tracker_id] = tps;
+	tracker_slots[tracker_id].tracker_test_on_tps = tps;
 	__asm__ volatile("" ::: "memory");
-	tracker_remote_command[tracker_id] = ESB_PONG_FLAG_TEST_MODE_ON;
+	tracker_slots[tracker_id].tracker_remote_command = ESB_PONG_FLAG_TEST_MODE_ON;
 	irq_unlock(key);
 	LOG_INF("Queued TEST_MODE_ON (target %u TPS) for tracker %u", tps, tracker_id);
 	return BIT(tracker_id);
@@ -3662,9 +3639,9 @@ uint32_t esb_send_remote_command_test_off(uint8_t tracker_id)
 	unsigned int key = irq_lock();
 	atomic_inc(&test_all_generation);
 	test_all_invalidate();
-	tracker_test_on_tps[tracker_id] = 0;
+	tracker_slots[tracker_id].tracker_test_on_tps = 0;
 	__asm__ volatile("" ::: "memory");
-	tracker_remote_command[tracker_id] = ESB_PONG_FLAG_TEST_MODE_OFF;
+	tracker_slots[tracker_id].tracker_remote_command = ESB_PONG_FLAG_TEST_MODE_OFF;
 	irq_unlock(key);
 	LOG_INF("Queued TEST_MODE_OFF for tracker %u", tracker_id);
 	return BIT(tracker_id);
@@ -3705,7 +3682,7 @@ uint32_t esb_send_remote_command_test_on_all(uint16_t tps)
 	uint16_t wire_tps = test_all_wire_tps();
 	uint32_t now_u32 = (uint32_t)k_uptime_get();
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
-		tracker_test_on_tps[i] = wire_tps;
+		tracker_slots[i].tracker_test_on_tps = wire_tps;
 		/* Keep an armed recovery/join grace so reconciliation honors the
 		 * remaining window; only expired timers reset. */
 		uint32_t ready_after = (uint32_t)atomic_get(&test_all_ready_after_ms[i]);
@@ -3751,7 +3728,7 @@ uint32_t esb_send_remote_command_test_off_all(void)
 	test_all_effective_tps = 0;
 	uint32_t now_u32 = (uint32_t)k_uptime_get();
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
-		tracker_test_on_tps[i] = 0;
+		tracker_slots[i].tracker_test_on_tps = 0;
 		uint32_t ready_after = (uint32_t)atomic_get(&test_all_ready_after_ms[i]);
 		if ((int32_t)(now_u32 - ready_after) >= 0) {
 			atomic_set(&test_all_ready_after_ms[i], 0);
@@ -3877,8 +3854,8 @@ bool esb_request_metadata(uint8_t tracker_id, uint8_t mask, uint8_t chunk)
 	}
 	int64_t now = k_uptime_get();
 	if (tracker_id >= stored_trackers || stored_tracker_addr[tracker_id] == 0 ||
-	    tracker_stats[tracker_id].last_packet_time == 0 ||
-	    now - tracker_stats[tracker_id].last_packet_time > PING_TIMEOUT_MS) {
+	    tracker_slots[tracker_id].stats.last_packet_time == 0 ||
+	    now - tracker_slots[tracker_id].stats.last_packet_time > PING_TIMEOUT_MS) {
 		return false;
 	}
 	unsigned int key = irq_lock();
@@ -3886,9 +3863,9 @@ bool esb_request_metadata(uint8_t tracker_id, uint8_t mask, uint8_t chunk)
 	if (metadata_next_token == 0) {
 		metadata_next_token = 1;
 	}
-	metadata_pending_token[tracker_id] = metadata_next_token;
-	metadata_pending_mask[tracker_id] = mask;
-	metadata_pending_chunk[tracker_id] = chunk;
+	tracker_slots[tracker_id].metadata_pending_token = metadata_next_token;
+	tracker_slots[tracker_id].metadata_pending_mask = mask;
+	tracker_slots[tracker_id].metadata_pending_chunk = chunk;
 	uint16_t token = metadata_next_token;
 	irq_unlock(key);
 	LOG_INF("Queued metadata request tracker=%u mask=0x%02X chunk=%u token=%u", tracker_id, mask, chunk,
@@ -3901,8 +3878,8 @@ void esb_clear_remote_ota_abort(uint8_t tracker_id)
 		return;
 	}
 	unsigned int key = irq_lock();
-	if (tracker_remote_command[tracker_id] == ESB_PONG_FLAG_OTA_ABORT) {
-		tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
+	if (tracker_slots[tracker_id].tracker_remote_command == ESB_PONG_FLAG_OTA_ABORT) {
+		tracker_slots[tracker_id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
 	}
 	irq_unlock(key);
 }
@@ -3925,13 +3902,13 @@ void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8
 		unsigned int key = irq_lock();
 		if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON ||
 		    command_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
-			last_raw_valid[tracker_id] = false;
+			tracker_slots[tracker_id].last_raw_valid = false;
 		}
 		if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON) {
 			raw_arq_reset();
 		}
-		pending_cmd_arg[tracker_id] = arg;
-		tracker_remote_command[tracker_id] = command_flag;
+		tracker_slots[tracker_id].pending_cmd_arg = arg;
+		tracker_slots[tracker_id].tracker_remote_command = command_flag;
 		irq_unlock(key);
 		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", esb_pong_flag_name(command_flag),
 			command_flag, tracker_id);
@@ -4040,7 +4017,7 @@ void esb_print_health_snapshot(void)
 	uint64_t now = k_uptime_get();
 
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
-		const struct packet_stats *stats = &tracker_stats[i];
+		const struct packet_stats *stats = &tracker_slots[i].stats;
 		if (stats->total_received > 0 || stats->duplicate_packets > 0) {
 			observed_mask |= BIT(i);
 		}
@@ -4115,25 +4092,25 @@ void esb_print_health_snapshot(void)
 		if (!(tdma_active_mask & BIT(i))) {
 			continue;
 		}
-		uint8_t slot = (tdma_config_packed[i] >> 24) & 0xFF;
+		uint8_t slot = (tracker_slots[i].tdma_config_packed >> 24) & 0xFF;
 		if (slot < tdma_dynamic_active_count) {
 			slot_owner[slot] = i;
 		}
 	}
 
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
-		const struct packet_stats *stats = &tracker_stats[i];
+		const struct packet_stats *stats = &tracker_slots[i].stats;
 		if (!(observed_mask & BIT(i))) {
 			continue;
 		}
-		uint8_t assigned_slot = (tdma_config_packed[i] >> 24) & 0xFF;
+		uint8_t assigned_slot = (tracker_slots[i].tdma_config_packed >> 24) & 0xFF;
 		uint8_t predecessor_slot = assigned_slot == 0
 			? tdma_dynamic_active_count - 1U : assigned_slot - 1U;
 		uint8_t predecessor_id = predecessor_slot < MAX_TRACKERS
 			? slot_owner[predecessor_slot] : 0xFF;
 		uint64_t age_ms = stats->last_packet_time > 0 && stats->last_packet_time <= now
 			? now - stats->last_packet_time : 0;
-		const struct tdma_stats *tdma = &g_tdma_stats[i];
+		const struct tdma_stats *tdma = &tracker_diags[i].stats;
 		if (tdma->count > 0) {
 			LOG_INF(
 				"HEALTH RX trk=%u slot=%u pred=%u n=%u adj_min_p50_p99_max=%d/%d/%d/%d raw_min_p50_p99_max=%d/%d/%d/%d rssi_p10_p50=%d/%d viol=%u",
@@ -4153,18 +4130,18 @@ void esb_print_health_snapshot(void)
 				receiver_rssi_percentile(tdma, 50, 100),
 				tdma->violations
 			);
-			int64_t sync_age_ms = g_last_ping_isr_rx_ticks_raw[i] != 0
-				? k_ticks_to_ms_floor64((uint32_t)k_uptime_ticks() - g_last_ping_isr_rx_ticks_raw[i]) : -1;
+			int64_t sync_age_ms = tracker_diags[i].g_last_ping_isr_rx_ticks_raw != 0
+				? k_ticks_to_ms_floor64((uint32_t)k_uptime_ticks() - tracker_diags[i].g_last_ping_isr_rx_ticks_raw) : -1;
 			LOG_INF(
 				"HEALTH SYNC trk=%u bias=%d skew_ppb=%d bias_valid=%u skew_valid=%u ping_age_ms=%lld ping_rej=%u extrap_skip=%u",
 				i,
-				g_last_ping_rx_time_diff_ticks[i],
-				g_bias_ppb_valid[i] ? g_bias_ppb[i] : 0,
-				g_last_ping_rx_time_diff_valid[i] ? 1 : 0,
-				g_bias_ppb_valid[i],
+				tracker_diags[i].g_last_ping_rx_time_diff_ticks,
+				tracker_diags[i].g_bias_ppb_valid ? tracker_diags[i].g_bias_ppb : 0,
+				tracker_diags[i].g_last_ping_rx_time_diff_valid ? 1 : 0,
+				tracker_diags[i].g_bias_ppb_valid,
 				sync_age_ms,
-				g_ping_reject_count[i],
-				g_extrap_skip_count[i]
+				tracker_diags[i].g_ping_reject_count,
+				tracker_diags[i].g_extrap_skip_count
 			);
 		}
 		LOG_INF(
@@ -4187,10 +4164,10 @@ void esb_reset_all_stats(void)
 	unsigned int key = irq_lock();
 	esb_auto_loss_invalidate();
 	for (int i = 0; i < MAX_TRACKERS; i++) {
-		memset(&tracker_stats[i], 0, sizeof(struct packet_stats));
-		ping_counter_initialized[i] = false;
-		last_ping_counter[i] = 0;
-		last_pong_queued_counter[i] = 0;
+		memset(&tracker_slots[i].stats, 0, sizeof(struct packet_stats));
+		tracker_slots[i].ping_counter_initialized = false;
+		tracker_slots[i].last_ping_counter = 0;
+		tracker_slots[i].last_pong_queued_counter = 0;
 	}
 	irq_unlock(key);
 	tdma_sync_stats_reset();
@@ -4199,9 +4176,11 @@ void esb_reset_all_stats(void)
 	tdma_last_loss_step_ms = 0;
 	tdma_loss_last_permille = 0;
 #endif
-	memset(tdma_prev_recv, 0, sizeof(tdma_prev_recv));
-	memset(tdma_prev_gaps, 0, sizeof(tdma_prev_gaps));
-	memset(tdma_prev_restarts, 0, sizeof(tdma_prev_restarts));
+	for (uint8_t i = 0; i < MAX_TRACKERS; ++i) {
+		tracker_slots[i].tdma_prev_recv = 0;
+		tracker_slots[i].tdma_prev_gaps = 0;
+		tracker_slots[i].tdma_prev_restarts = 0;
+	}
 	LOG_INF("All packet statistics have been reset");
 }
 // Toggle detailed statistics display on/off

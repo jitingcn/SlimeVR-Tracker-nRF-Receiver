@@ -7,9 +7,10 @@
 #define MAX_TRACKERS 16
 #define BIT(i) (1u << (i))
 #define K_FOREVER 0
-#define LOG_INF(...) ((void)0)
-#define LOG_DBG(...) ((void)0)
-#define LOG_ERR(...) ((void)0)
+static void host_log(const char *format, ...) { (void)format; }
+#define LOG_INF(...) host_log(__VA_ARGS__)
+#define LOG_DBG(...) host_log(__VA_ARGS__)
+#define LOG_ERR(...) host_log(__VA_ARGS__)
 static void host_warning(const char *format, ...) { (void)format; }
 #define LOG_WRN(...) host_warning(__VA_ARGS__)
 #define ARG_UNUSED(x) ((void)(x))
@@ -34,10 +35,12 @@ static void host_warning(const char *format, ...) { (void)format; }
 #define ESB_PONG_FLAG_DATA_COLLECT_OFF 35
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF 53
 typedef int atomic_t;
+typedef int atomic_val_t;
 typedef void (*esb_channel_change_done_cb_t)(bool);
 typedef void (*esb_remote_confirm_cb_t)(uint8_t, uint8_t);
 static int atomic_get(atomic_t *p) { return *p; }
 static void atomic_set(atomic_t *p, int v) { *p = v; }
+static int atomic_inc(atomic_t *p) { int old = *p; ++*p; return old; }
 static bool atomic_cas(atomic_t *p, int old, int value) {
     if (*p != old) return false;
     *p = value;
@@ -67,24 +70,49 @@ static void data_collect_batch_stop(void) { batch = false; }
 static bool data_collect_batch_is_target(uint8_t id) { return (collecting_mask & BIT(id)) != 0; }
 static uint8_t stored_trackers, receiver_rf_channel, physical_channel, durable_channel;
 static uint64_t stored_tracker_addr[MAX_TRACKERS];
-static uint8_t tracker_remote_command[MAX_TRACKERS], pending_cmd_arg[MAX_TRACKERS];
-static bool last_raw_valid[MAX_TRACKERS];
+/* SLOT DECLARATIONS */
 static void raw_arq_reset(void) {}
 static bool rx_running, fault_status, auto_enabled;
 static bool esb_pairing;
 static uint32_t auto_generation;
 static uint32_t auto_loss_reset_epoch;
-static bool sequence_initialized[MAX_TRACKERS];
-static uint8_t last_packet_sequence[MAX_TRACKERS];
+static atomic_t test_all_generation, test_all_broadcasting;
+static uint16_t metadata_next_token;
 static atomic_t tdma_rx_discontinuity_pending;
 static bool stale_fifo;
 static int esb_flush_rx(void) { assert(!rx_running); stale_fifo = false; return 0; }
 static bool auto_channel_decision_valid(uint32_t generation) {
     return auto_enabled && auto_generation == generation;
 }
-static unsigned int irq_lock(void) { return 0; }
-static void irq_unlock(unsigned int key) {}
-static uint16_t tracker_test_on_tps[MAX_TRACKERS];
+static unsigned irq_depth, radio_attempts, radio_deferred, radio_deliveries;
+static bool radio_pending, radio_running;
+static void (*radio_hook)(void);
+static void host_deliver_radio(void) {
+    assert(!irq_depth && radio_hook && !radio_running);
+    radio_running = true;
+    ++radio_deliveries;
+    radio_hook();
+    radio_running = false;
+}
+static void host_radio_preempt(void) {
+    if (!radio_hook) return;
+    ++radio_attempts;
+    if (irq_depth || radio_running) {
+        ++radio_deferred;
+        radio_pending = true;
+    } else {
+        host_deliver_radio();
+    }
+}
+static unsigned int irq_lock(void) { return irq_depth++; }
+static void irq_unlock(unsigned int key) {
+    assert(irq_depth == key + 1);
+    irq_depth = key;
+    if (!irq_depth && radio_pending && !radio_running) {
+        radio_pending = false;
+        host_deliver_radio();
+    }
+}
 static atomic_t test_all_state_valid, test_all_enabled, test_all_confirmed_mask;
 static uint16_t test_all_wire_tps(void) { return 0; }
 static int fail_stop, fail_set, fail_start, fail_store;
@@ -126,22 +154,9 @@ static void auto_channel_migration_complete(uint32_t generation, uint8_t old_hom
 }
 struct payload { uint8_t data[13]; };
 struct esb_payload { uint8_t data[64]; uint8_t length, pipe; bool noack; };
-static uint32_t tdma_config_packed[MAX_TRACKERS];
-static uint8_t metadata_active_mask[MAX_TRACKERS], metadata_pending_mask[MAX_TRACKERS];
-static uint8_t metadata_active_chunk[MAX_TRACKERS], metadata_pending_chunk[MAX_TRACKERS];
-static uint16_t metadata_active_token[MAX_TRACKERS], metadata_pending_token[MAX_TRACKERS];
-static bool wom_advertised[MAX_TRACKERS];
-static uint8_t wom_first_ping_counter[MAX_TRACKERS];
-static uint16_t wom_next_token, wom_token[MAX_TRACKERS], wom_minutes[MAX_TRACKERS], wom_error[MAX_TRACKERS];
-static bool wom_complete[MAX_TRACKERS];
-static int16_t pending_sens_data[MAX_TRACKERS][3];
-static uint8_t pending_sens_auto_axis[MAX_TRACKERS];
-static uint16_t pending_sens_auto_revolutions[MAX_TRACKERS];
+static uint16_t wom_next_token;
 /* DIAGNOSTIC DECLARATIONS */
-static uint32_t pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
-static uint8_t last_ping_counter[MAX_TRACKERS], last_pong_queued_counter[MAX_TRACKERS], echo_counter[MAX_TRACKERS];
-static bool ping_counter_initialized[MAX_TRACKERS];
-static uint64_t last_ping_time[MAX_TRACKERS];
+static uint8_t echo_counter[MAX_TRACKERS];
 static esb_remote_confirm_cb_t remote_confirm_cb;
 enum tdma_shadow_evidence { TDMA_SHADOW_EVIDENCE_PING, TDMA_SHADOW_EVIDENCE_DATA };
 static void tdma_shadow_observe(uint8_t id, enum tdma_shadow_evidence evidence) {}
@@ -154,7 +169,8 @@ static const char *esb_pong_flag_name(uint8_t flag) { return "command"; }
 static uint32_t sys_get_be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
-static bool pairing_new_devices_blocked, ota_target, ota_payload;
+static atomic_t pairing_new_devices_blocked;
+static bool ota_target, ota_payload;
 static uint8_t receiver_device_addr[6] = {1, 2, 3, 4, 5, 6};
 static int channel_get_error;
 static uint32_t k_uptime_ticks(void) { return 0x12345678; }
@@ -199,20 +215,27 @@ static void reset(unsigned count) {
     tracker_store_lock = 0;
     stored_trackers = count;
     memset(stored_tracker_addr, 0, sizeof(stored_tracker_addr));
-    memset(tracker_remote_command, 0, sizeof(tracker_remote_command));
-    memset(abort_pending, 0, sizeof(abort_pending));
-    memset(metadata_active_mask, 0, sizeof(metadata_active_mask));
-    memset(metadata_pending_mask, 0, sizeof(metadata_pending_mask));
-    memset(echo_counter, 0, sizeof(echo_counter));
-    memset(ping_counter_initialized, 0, sizeof(ping_counter_initialized));
-    memset(last_ping_time, 0, sizeof(last_ping_time));
+    for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
+        tracker_slots[i].tracker_remote_command = 0;
+        tracker_slots[i].metadata_active_mask = 0;
+        tracker_slots[i].metadata_pending_mask = 0;
+        tracker_slots[i].ping_counter_initialized = false;
+        tracker_slots[i].last_ping_time = 0;
+        tracker_slots[i].tdma_config_packed = 0;
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-    memset(g_last_ping_rx_time_diff_valid, 0, sizeof(g_last_ping_rx_time_diff_valid));
-    memset(g_bias_ppb_valid, 0, sizeof(g_bias_ppb_valid));
-    memset(g_ping_dirty_streak, 0, sizeof(g_ping_dirty_streak));
+        tracker_diags[i].g_last_ping_rx_time_diff_valid = false;
+        tracker_diags[i].g_bias_ppb_valid = 0;
+        tracker_diags[i].g_ping_dirty_streak = 0;
 #endif
-    memset(tdma_config_packed, 0, sizeof(tdma_config_packed));
-    ota_target = ota_payload = pairing_new_devices_blocked = false;
+    }
+    memset(abort_pending, 0, sizeof(abort_pending));
+    radio_hook = NULL;
+    radio_pending = radio_running = false;
+    radio_attempts = radio_deferred = radio_deliveries = 0;
+    assert(!irq_depth);
+    memset(echo_counter, 0, sizeof(echo_counter));
+    ota_target = ota_payload = false;
+    atomic_set(&pairing_new_devices_blocked, 0);
     channel_get_error = 0;
     for (unsigned i = 0; i < count; i++) stored_tracker_addr[i] = 100 + i;
     receiver_rf_channel = physical_channel = durable_channel = 22;
@@ -247,6 +270,134 @@ static struct esb_payload test_pong(uint8_t flags) {
     assert(ack.data[12] == crc8_ccitt(0x07, ack.data, 12));
     return ack;
 }
+static uint8_t publication_old[9], publication_new[9];
+static void observe_publication(void) {
+    struct esb_payload ack = test_pong(0);
+    assert(!memcmp(ack.data + 3, publication_old, sizeof(publication_old)) ||
+           !memcmp(ack.data + 3, publication_new, sizeof(publication_new)));
+}
+static void arm_publication(const uint8_t old[9], const uint8_t next[9]) {
+    struct esb_payload ack = test_pong(0);
+    assert(!memcmp(ack.data + 3, old, sizeof(publication_old)));
+    memcpy(publication_old, old, sizeof(publication_old));
+    memcpy(publication_new, next, sizeof(publication_new));
+    radio_attempts = radio_deferred = radio_deliveries = 0;
+    radio_hook = observe_publication;
+}
+static void finish_publication(unsigned stores) {
+    assert(!irq_depth && !radio_pending);
+    assert(radio_attempts == stores && radio_deferred == stores && radio_deliveries == 1);
+    radio_hook = NULL;
+    struct esb_payload ack = test_pong(0);
+    assert(!memcmp(ack.data + 3, publication_new, sizeof(publication_new)));
+}
+static void test_command_publication(void) {
+    static const uint8_t sens_old[9] = {
+        0, 100, 0, 200, ESB_PONG_FLAG_SENS_SET, 1, 44, 0, 0,
+    };
+    static const uint8_t sens_new[9] = {
+        1, 144, 0xfe, 0x0c, ESB_PONG_FLAG_SENS_SET, 2, 88, 0, 0,
+    };
+    static const uint8_t auto_old[9] = {
+        1, 0x12, 0x34, 0, ESB_PONG_FLAG_SENS_AUTO, 0, 0, 0, 0,
+    };
+    static const uint8_t auto_new[9] = {
+        2, 0xab, 0xcd, 0, ESB_PONG_FLAG_SENS_AUTO, 0, 0, 0, 0,
+    };
+    static const uint8_t tps_old[9] = {
+        0x12, 0x34, 0x56, 0x78, ESB_PONG_FLAG_TEST_MODE_ON, 0x12, 0x34, 0, 0,
+    };
+    static const uint8_t tps_new[9] = {
+        0x12, 0x34, 0x56, 0x78, ESB_PONG_FLAG_TEST_MODE_ON, 0x24, 0x68, 0, 0,
+    };
+    static const uint8_t tps_off[9] = {
+        0x12, 0x34, 0x56, 0x78, ESB_PONG_FLAG_TEST_MODE_OFF, 0, 0, 0, 0,
+    };
+    static const uint8_t normal[9] = {
+        0x12, 0x34, 0x56, 0x78, ESB_PONG_FLAG_NORMAL, 0, 0, 0, 0,
+    };
+    static const uint8_t metadata_first[9] = {
+        0x12, 0x34, 0x56, 0x78, ESB_PONG_FLAG_METADATA_REQUEST, 1, 2, 0x12, 0x34,
+    };
+    static const uint8_t metadata_second[9] = {
+        0x12, 0x34, 0x56, 0x78, ESB_PONG_FLAG_METADATA_REQUEST, 4, 5, 0x12, 0x35,
+    };
+
+    reset(1);
+    esb_send_remote_command_sens(0, 1, 2, 3);
+    arm_publication(sens_old, sens_new);
+    esb_send_remote_command_sens(0, 4, -5, 6);
+    finish_publication(4);
+
+    reset(1);
+    tracker_slots[0].stats.last_packet_time = now;
+    assert(esb_send_remote_command_sens_auto(0, 1, 0x1234));
+    arm_publication(auto_old, auto_new);
+    assert(esb_send_remote_command_sens_auto(0, 2, 0xabcd));
+    finish_publication(3);
+
+    reset(1);
+    tracker_slots[0].stats.last_packet_time = now;
+    assert(esb_send_remote_command_sens_auto(0, 1, 0x1234));
+    arm_publication(auto_old, auto_new);
+    assert(esb_send_remote_command_sens_auto_all(2, 0xabcd) == BIT(0));
+    finish_publication(3);
+
+    reset(1);
+    assert(esb_send_remote_command_test_on(0, 0x1234) == BIT(0));
+    arm_publication(tps_old, tps_new);
+    assert(esb_send_remote_command_test_on(0, 0x2468) == BIT(0));
+    finish_publication(2);
+    arm_publication(tps_new, tps_off);
+    assert(esb_send_remote_command_test_off(0) == BIT(0));
+    finish_publication(2);
+
+    reset(1);
+    tracker_slots[0].stats.last_packet_time = now;
+    metadata_next_token = 0x1233;
+    arm_publication(normal, metadata_first);
+    assert(esb_request_metadata(0, 1, 2));
+    finish_publication(3);
+    assert(tracker_slots[0].metadata_active_mask == 1 &&
+           tracker_slots[0].metadata_active_chunk == 2 &&
+           tracker_slots[0].metadata_active_token == 0x1234 &&
+           tracker_slots[0].metadata_pending_mask == 0);
+    arm_publication(metadata_first, metadata_first);
+    assert(esb_request_metadata(0, 4, 5));
+    finish_publication(3);
+    assert(tracker_slots[0].metadata_active_mask == 1 &&
+           tracker_slots[0].metadata_active_chunk == 2 &&
+           tracker_slots[0].metadata_active_token == 0x1234 &&
+           tracker_slots[0].metadata_pending_mask == 4 &&
+           tracker_slots[0].metadata_pending_chunk == 5 &&
+           tracker_slots[0].metadata_pending_token == 0x1235);
+
+    struct esb_payload echo_packet = {.length = ESB_PING_LEN, .pipe = 1};
+    echo_packet.data[0] = ESB_PING_TYPE;
+    echo_packet.data[1] = 0;
+    echo_packet.data[2] = 1;
+    echo_packet.data[7] = ESB_PONG_FLAG_METADATA_REQUEST;
+    echo_packet.data[8] = 1;
+    echo_packet.data[9] = 2;
+    echo_packet.data[10] = 0x12;
+    echo_packet.data[11] = 0x35;
+    echo_packet.data[12] = crc8_ccitt(0x07, echo_packet.data, 12);
+    esb_receive_ping(&echo_packet, 0);
+    assert(tracker_slots[0].metadata_active_mask == 1 &&
+           tracker_slots[0].metadata_pending_mask == 4);
+    echo_packet.data[2] = 2;
+    echo_packet.data[11] = 0x34;
+    echo_packet.data[12] = crc8_ccitt(0x07, echo_packet.data, 12);
+    esb_receive_ping(&echo_packet, 0);
+    assert(tracker_slots[0].metadata_active_mask == 0 &&
+           tracker_slots[0].metadata_pending_mask == 4);
+    struct esb_payload ack = test_pong(0);
+    assert(!memcmp(ack.data + 3, metadata_second, sizeof(metadata_second)));
+    assert(tracker_slots[0].metadata_active_mask == 4 &&
+           tracker_slots[0].metadata_active_chunk == 5 &&
+           tracker_slots[0].metadata_active_token == 0x1235 &&
+           tracker_slots[0].metadata_pending_mask == 0);
+}
 static void assert_channel_confirm(struct esb_payload p, uint8_t channel) {
     assert(p.data[7] == ESB_PONG_FLAG_CHANNEL_CONFIRM);
     assert(p.data[8] == channel && p.data[9] == ESB_CHANNEL_CONFIRM_VERSION);
@@ -261,7 +412,7 @@ static void test_channel_pongs(void) {
         physical_channel = channel;
         for (unsigned total = 1; total <= 16; ++total) {
             for (unsigned slot = 0; slot < total; ++slot) {
-                tdma_config_packed[0] = slot << 24 | total << 16 | 32 << 8 | 0xFE;
+                tracker_slots[0].tdma_config_packed = slot << 24 | total << 16 | 32 << 8 | 0xFE;
                 struct esb_payload p = test_pong(0);
                 uint8_t legacy[13] = {
                     ESB_PONG_TYPE, 0, 7, 0x12, 0x34, 0x56, 0x78,
@@ -275,7 +426,7 @@ static void test_channel_pongs(void) {
     }
     uint32_t inactive[] = {0, 0xFF000007, 0xFF102007};
     for (unsigned i = 0; i < sizeof(inactive) / sizeof(inactive[0]); ++i) {
-        tdma_config_packed[0] = inactive[i];
+        tracker_slots[0].tdma_config_packed = inactive[i];
         struct esb_payload p = test_pong(0);
         assert(p.data[8] == (uint8_t)(inactive[i] >> 24));
         assert(p.data[9] == (uint8_t)(inactive[i] >> 16));
@@ -286,19 +437,19 @@ static void test_channel_pongs(void) {
     physical_channel = 84;
     receiver_rf_channel = ESB_RF_CHANNEL_DEFAULT;
     assert(esb_set_all_trackers_channel(85) == 0);
-    tracker_remote_command[0] = ESB_PONG_FLAG_MEOW;
-    metadata_pending_mask[0] = 1;
+    tracker_slots[0].tracker_remote_command = ESB_PONG_FLAG_MEOW;
+    tracker_slots[0].metadata_pending_mask = 1;
     assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), 84);
-    assert(tracker_remote_command[0] == ESB_PONG_FLAG_MEOW);
-    assert(metadata_pending_mask[0] == 1 && metadata_active_mask[0] == 0);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_MEOW);
+    assert(tracker_slots[0].metadata_pending_mask == 1 && tracker_slots[0].metadata_active_mask == 0);
     struct esb_payload p = test_pong(0);
     assert(p.data[7] == ESB_PONG_FLAG_SET_CHANNEL);
     assert(p.data[8] == 0 && p.data[9] == 0 && p.data[10] == 0 && p.data[11] == 85);
     /* Flagged echoes retain real low-seven-bit acknowledgements only. */
     echo(0, ESB_PING_FLAG_CHANNEL_CONFIRM);
-    assert(tracker_remote_command[0] == ESB_PONG_FLAG_MEOW);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_MEOW);
     echo(0, ESB_PING_FLAG_CHANNEL_CONFIRM | ESB_PONG_FLAG_MEOW);
-    assert(tracker_remote_command[0] == ESB_PONG_FLAG_NORMAL);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
     reset(1);
     physical_channel = 84;
     abort_pending[0] = true;
@@ -320,33 +471,33 @@ static void test_channel_pongs(void) {
     /* Controls keep their established argument layouts and queue state. */
     reset(1);
     physical_channel = 84;
-    tracker_remote_command[0] = ESB_PONG_FLAG_OTA_QUERY_INFO;
+    tracker_slots[0].tracker_remote_command = ESB_PONG_FLAG_OTA_QUERY_INFO;
     assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), 84);
-    assert(tracker_remote_command[0] == ESB_PONG_FLAG_OTA_QUERY_INFO);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_OTA_QUERY_INFO);
     assert(test_pong(0).data[7] == ESB_PONG_FLAG_OTA_QUERY_INFO);
-    tracker_remote_command[0] = ESB_PONG_FLAG_SENS_SET;
-    pending_sens_data[0][0] = 0x1234;
-    pending_sens_data[0][1] = 0x5678;
-    pending_sens_data[0][2] = 0x2345;
+    tracker_slots[0].tracker_remote_command = ESB_PONG_FLAG_SENS_SET;
+    tracker_slots[0].pending_sens_data[0] = 0x1234;
+    tracker_slots[0].pending_sens_data[1] = 0x5678;
+    tracker_slots[0].pending_sens_data[2] = 0x2345;
     p = test_pong(0);
     assert(p.data[7] == ESB_PONG_FLAG_SENS_SET);
     assert(p.data[3] == 0x12 && p.data[4] == 0x34);
     assert(p.data[5] == 0x56 && p.data[6] == 0x78);
     assert(p.data[8] == 0x23 && p.data[9] == 0x45);
     assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), 84);
-    assert(tracker_remote_command[0] == ESB_PONG_FLAG_SENS_SET);
-    tracker_remote_command[0] = ESB_PONG_FLAG_NORMAL;
-    metadata_pending_mask[0] = 3;
-    metadata_pending_chunk[0] = 4;
-    metadata_pending_token[0] = 0x5678;
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_SENS_SET);
+    tracker_slots[0].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
+    tracker_slots[0].metadata_pending_mask = 3;
+    tracker_slots[0].metadata_pending_chunk = 4;
+    tracker_slots[0].metadata_pending_token = 0x5678;
     assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), 84);
-    assert(metadata_pending_mask[0] == 3 && metadata_active_mask[0] == 0);
+    assert(tracker_slots[0].metadata_pending_mask == 3 && tracker_slots[0].metadata_active_mask == 0);
     p = test_pong(0);
     assert(p.data[7] == ESB_PONG_FLAG_METADATA_REQUEST);
     assert(p.data[8] == 3 && p.data[9] == 4 && p.data[10] == 0x56 && p.data[11] == 0x78);
     assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), 84);
-    assert(metadata_active_mask[0] == 3 && metadata_active_chunk[0] == 4 &&
-           metadata_active_token[0] == 0x5678);
+    assert(tracker_slots[0].metadata_active_mask == 3 && tracker_slots[0].metadata_active_chunk == 4 &&
+           tracker_slots[0].metadata_active_token == 0x5678);
     p = test_pong(0);
     assert(p.data[7] == ESB_PONG_FLAG_METADATA_REQUEST);
     assert(p.data[8] == 3 && p.data[9] == 4 && p.data[10] == 0x56 && p.data[11] == 0x78);
@@ -361,6 +512,19 @@ static void test_channel_pongs(void) {
     esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
     assert(has && !suppress && ack.length == 8 && ack.data[1] == 0);
     assert(ack.data[0] == pair[0] && !memcmp(ack.data + 2, receiver_device_addr, 6));
+    atomic_set(&pairing_new_devices_blocked, 1);
+    esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
+    assert(has && !suppress && ack.length == 8 && ack.data[1] == 0);
+    assert(ack.data[0] == pair[0] && !memcmp(ack.data + 2, receiver_device_addr, 6));
+    pair[1] = 0;
+    pair[2] = 101;
+    pair[0] = crc8_ccitt(0x07, pair + 2, 6);
+    if (!pair[0]) pair[0] = 8;
+    esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
+    assert(!has && suppress);
+    atomic_set(&pairing_new_devices_blocked, 0);
+    esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
+    assert(!has && !suppress);
 }
 static void test_wom_timeouts(void) {
     reset(3);
@@ -374,10 +538,10 @@ static void test_wom_timeouts(void) {
     assert(p.data[3] == 0x12 && p.data[4] == 0x34 && p.data[5] == 0x56 && p.data[6] == 0x78);
     assert(p.data[8] == 0 && p.data[9] == 10 && p.data[10] == (token >> 8) && p.data[11] == (token & 255));
     assert(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM).data[7] == ESB_PONG_FLAG_CHANNEL_CONFIRM);
-    assert(wom_token[0] == token && tracker_remote_command[0] == ESB_PONG_FLAG_WOM_CONTROL);
+    assert(tracker_slots[0].wom_token == token && tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_WOM_CONTROL);
     uint8_t reply[4] = {0, 10, token >> 8, token & 255};
     echo(0, ESB_PONG_FLAG_WOM_CONTROL);
-    assert(tracker_remote_command[0] == ESB_PONG_FLAG_WOM_CONTROL);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_WOM_CONTROL);
     remote_wom_receive(0, ESB_PONG_FLAG_WOM_CONTROL, reply, 8);
     assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
     reply[1] = 0;
@@ -402,7 +566,7 @@ static void test_wom_timeouts(void) {
     remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
     assert(!esb_get_remote_wom_result(0, next, &minutes, &error));
     esb_cancel_remote_wom_command(BIT(0), token);
-    assert(wom_token[0] == next);
+    assert(tracker_slots[0].wom_token == next);
     test_pong(0);
     reply[0] = 0; reply[1] = 0; reply[2] = next >> 8; reply[3] = next & 255;
     remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
@@ -423,14 +587,14 @@ static void test_wom_timeouts(void) {
     esb_send_remote_command(0, ESB_PONG_FLAG_MEOW);
     assert(esb_get_remote_wom_result(0, token, &minutes, &error) && error == ECANCELED);
     esb_cancel_remote_wom_command(BIT(0), token);
-    assert(tracker_remote_command[0] == ESB_PONG_FLAG_MEOW && wom_token[0] == 0);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_MEOW && tracker_slots[0].wom_token == 0);
     wom_next_token = UINT16_MAX;
     assert(esb_send_remote_wom_command(0, 1, &token) == BIT(0) && token == 1);
-    tracker_stats[0].last_packet_time = now + 1000;
-    tracker_stats[1].last_packet_time = now - 1;
-    tracker_stats[2].last_packet_time = now + 1000;
+    tracker_slots[0].stats.last_packet_time = now + 1000;
+    tracker_slots[1].stats.last_packet_time = now - 1;
+    tracker_slots[2].stats.last_packet_time = now + 1000;
     assert(esb_send_remote_wom_command(255, 0, &token) == (BIT(0) | BIT(2)));
-    assert(wom_token[0] == token && wom_token[2] == token);
+    assert(tracker_slots[0].wom_token == token && tracker_slots[2].wom_token == token);
     esb_cancel_remote_wom_command(BIT(0) | BIT(2), token);
     assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
     /* A rebooted receiver can reuse a cached tracker token. The first incoming
@@ -442,10 +606,10 @@ static void test_wom_timeouts(void) {
     remote_wom_receive(0, stale[7], &stale[8], stale[2]);
     assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
     test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM);
-    assert(!wom_advertised[0]);
+    assert(!tracker_slots[0].wom_advertised);
     abort_pending[0] = true;
     test_pong(0);
-    assert(!wom_advertised[0]);
+    assert(!tracker_slots[0].wom_advertised);
     abort_pending[0] = false;
     struct esb_payload ack = {0};
     bool has = false, suppress = false;
@@ -453,23 +617,23 @@ static void test_wom_timeouts(void) {
     ota_ping[12] = crc8_ccitt(0x07, ota_ping, 12);
     ota = ota_target = ota_payload = true;
     esb_ack_handler_cb(ota_ping, sizeof(ota_ping), 1, &ack, &has, &suppress);
-    assert(has && ack.length == 17 && ack.data[0] == 0xAB && !wom_advertised[0]);
+    assert(has && ack.length == 17 && ack.data[0] == 0xAB && !tracker_slots[0].wom_advertised);
     ota = ota_target = ota_payload = false;
     stale[12] = crc8_ccitt(0x07, stale, 12);
     esb_ack_handler_cb(stale, sizeof(stale), 1, &ack, &has, &suppress);
-    assert(has && ack.data[7] == ESB_PONG_FLAG_NORMAL && !wom_advertised[0]);
+    assert(has && ack.data[7] == ESB_PONG_FLAG_NORMAL && !tracker_slots[0].wom_advertised);
     remote_wom_receive(0, stale[7], &stale[8], stale[2]);
     assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
     stale[7] = ESB_PING_FLAG_WOM_ERROR;
     stale[12] = crc8_ccitt(0x07, stale, 12);
     esb_ack_handler_cb(stale, sizeof(stale), 1, &ack, &has, &suppress);
-    assert(ack.data[7] == ESB_PONG_FLAG_NORMAL && !wom_advertised[0]);
+    assert(ack.data[7] == ESB_PONG_FLAG_NORMAL && !tracker_slots[0].wom_advertised);
     remote_wom_receive(0, stale[7], &stale[8], stale[2]);
     assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
     stale[7] = ESB_PONG_FLAG_NORMAL;
     stale[12] = crc8_ccitt(0x07, stale, 12);
     esb_ack_handler_cb(stale, sizeof(stale), 1, &ack, &has, &suppress);
-    assert(ack.data[7] == ESB_PONG_FLAG_WOM_CONTROL && wom_first_ping_counter[0] == 41);
+    assert(ack.data[7] == ESB_PONG_FLAG_WOM_CONTROL && tracker_slots[0].wom_first_ping_counter == 41);
     stale[7] = ESB_PING_FLAG_WOM_RESULT;
     remote_wom_receive(0, stale[7], &stale[8], stale[2]);
     assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
@@ -478,7 +642,7 @@ static void test_wom_timeouts(void) {
     stale[9] = 20;
     stale[12] = crc8_ccitt(0x07, stale, 12);
     esb_ack_handler_cb(stale, sizeof(stale), 1, &ack, &has, &suppress);
-    assert(wom_first_ping_counter[0] == 41);
+    assert(tracker_slots[0].wom_first_ping_counter == 41);
     remote_wom_receive(0, stale[7], &stale[8], stale[2]);
     assert(esb_get_remote_wom_result(0, token, &minutes, &error) && minutes == 20 && !error);
     assert(esb_send_remote_wom_command(0, ESB_WOM_TIMEOUT_CLEAR, &token) == BIT(0));
@@ -506,7 +670,8 @@ static void test_wom_timeouts(void) {
     remote_wom_receive(0, ESB_PING_FLAG_WOM_ERROR, reply, 8);
     assert(esb_get_remote_wom_result(0, token, &minutes, &error) && !minutes && error == EIO);
     assert(esb_send_remote_wom_command(255, ESB_WOM_TIMEOUT_CLEAR, &token) == (BIT(0) | BIT(2)));
-    assert(wom_minutes[0] == ESB_WOM_TIMEOUT_CLEAR && wom_minutes[2] == ESB_WOM_TIMEOUT_CLEAR);
+    assert(tracker_slots[0].wom_minutes == ESB_WOM_TIMEOUT_CLEAR &&
+           tracker_slots[2].wom_minutes == ESB_WOM_TIMEOUT_CLEAR);
 }
 static void test_wom_enter(void) {
     reset(3);
@@ -547,13 +712,14 @@ static void test_wom_enter(void) {
     reply[0] = 0; reply[1] = EBUSY; reply[2] = token >> 8; reply[3] = token & 255;
     remote_wom_receive(0, ESB_PING_FLAG_WOM_ERROR, reply, 8);
     assert(esb_get_remote_wom_result(0, token, &value, &error) && !value && error == EBUSY);
-    tracker_stats[0].last_packet_time = now + 1000;
-    tracker_stats[1].last_packet_time = now - 1;
-    tracker_stats[2].last_packet_time = now + 1000;
+    tracker_slots[0].stats.last_packet_time = now + 1000;
+    tracker_slots[1].stats.last_packet_time = now - 1;
+    tracker_slots[2].stats.last_packet_time = now + 1000;
     assert(esb_send_remote_wom_command(255, ESB_WOM_ENTER, &token) == (BIT(0) | BIT(2)));
-    assert(wom_minutes[0] == ESB_WOM_ENTER && wom_minutes[2] == ESB_WOM_ENTER);
+    assert(tracker_slots[0].wom_minutes == ESB_WOM_ENTER && tracker_slots[2].wom_minutes == ESB_WOM_ENTER);
 }
 int main(void) {
+    test_command_publication();
     test_wom_enter();
     test_wom_timeouts();
     test_channel_pongs();
@@ -561,8 +727,10 @@ int main(void) {
      * resetting admission, including storage-error rollback. */
     for (unsigned rollback = 0; rollback < 2; ++rollback) {
         reset(2);
-        memset(sequence_initialized, 0, sizeof(sequence_initialized));
-        memset(tracker_stats, 0, sizeof(tracker_stats));
+        for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
+            tracker_slots[i].sequence_initialized = false;
+            memset(&tracker_slots[i].stats, 0, sizeof(tracker_slots[i].stats));
+        }
         assert(check_packet_sequence(0, 100) == 0);
         assert(check_packet_sequence(1, 255) == 0);
         assert(esb_set_all_trackers_channel(26) == 0);
@@ -576,9 +744,9 @@ int main(void) {
         assert(check_packet_sequence(0, 63) == 2);
         assert(check_packet_sequence(1, 220) == 0);
         assert(check_packet_sequence(1, 220) == 4);
-        assert(tracker_stats[0].total_received == 2);
-        assert(tracker_stats[0].total_gaps == 0 && tracker_stats[0].restart_events == 0);
-        assert(tracker_stats[1].total_received == 2);
+        assert(tracker_slots[0].stats.total_received == 2);
+        assert(tracker_slots[0].stats.total_gaps == 0 && tracker_slots[0].stats.restart_events == 0);
+        assert(tracker_slots[1].stats.total_received == 2);
     }
     /* No live traffic, partial traffic, all traffic: delivery is not a barrier. */
     for (unsigned count = 0; count <= 3; count++) {
@@ -610,7 +778,7 @@ int main(void) {
     esb_send_remote_command_arg(0, 10, 0); /* Reject raw channel opcode injection. */
     assert_wire(0, 10, 31);
     assert_wire(1, 10, 31);
-    assert(tracker_remote_command[0] == 4 && pending_cmd_arg[0] == 77);
+    assert(tracker_slots[0].tracker_remote_command == 4 && tracker_slots[0].pending_cmd_arg == 77);
     echo(0, ESB_PONG_FLAG_SET_CHANNEL); /* No echo can end the announcement. */
     channel_change_poll();
     assert(completed == 0 && physical_channel == 22);

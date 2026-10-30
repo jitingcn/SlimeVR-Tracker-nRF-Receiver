@@ -50,19 +50,19 @@ constants = '\n'.join(unique(rf'^#define {name}\s+[^\n]+') for name in (
 ladder = unique(r'^static const uint16_t tdma_cap_ladder\[\] = [^\n]+;')
 packet_type = extract_block(source, r'^struct packet_stats\s*\{', semicolon=True)
 phase_type = extract_block(source, r'^struct tdma_stats\s*\{', semicolon=True)
-diag_names = (
-    'g_tdma_stats', 'g_last_ping_rx_time_diff_ticks', 'g_last_ping_rx_time_diff_valid',
-    'g_bias_ppb_valid', 'g_bias_ppb', 'g_last_ping_isr_rx_ticks_raw',
-    'g_ping_reject_count', 'g_extrap_skip_count',
-    'tdma_loss_last_permille', 'tdma_last_loss_step_ms',
-)
+slot_type = extract_block(source, r'^struct tracker_slot\s*\{', semicolon=True)
+diag_type = extract_block(source, r'^struct tracker_diag\s*\{', semicolon=True)
+slot_declaration = unique(r'^static struct tracker_slot tracker_slots\[MAX_TRACKERS\];')
+diag_declaration = unique(r'^static struct tracker_diag tracker_diags\[MAX_TRACKERS\];')
 diag_declarations = '\n'.join(unique(
     rf'^static[ \t]+(?:volatile[ \t]+)?(?:const[ \t]+)?'
-    rf'(?:[A-Za-z_]\w*[ \t]+)+{re.escape(name)}\b[^;]*;') for name in diag_names)
+    rf'(?:[A-Za-z_]\w*[ \t]+)+{name}\b[^;]*;')
+    for name in ('tdma_loss_last_permille', 'tdma_last_loss_step_ms'))
 fixture = (HERE / 'fixture.c').read_text()
 fixture = fixture.replace('/* PRODUCTION TYPES */', '\n'.join((
-    constants, ladder, packet_type,
-    '#if defined(CONFIG_TDMA_DIAGNOSTICS)', phase_type, diag_declarations, '#endif',
+    constants, ladder, packet_type, slot_type, slot_declaration,
+    '#if defined(CONFIG_TDMA_DIAGNOSTICS)', phase_type, diag_type,
+    diag_declaration, diag_declarations, '#endif',
 )))
 fixture = fixture.replace('/* PRODUCTION HEALTH EXPORT */', export)
 fixture = fixture.replace('/* PRODUCTION HEALTH */', health)

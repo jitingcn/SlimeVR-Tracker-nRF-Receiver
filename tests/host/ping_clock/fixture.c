@@ -12,6 +12,8 @@
 #define BIT(n) (1u << (n))
 #define ARG_UNUSED(x) ((void)(x))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define CLAMP(v, lo, hi) MIN(MAX((v), (lo)), (hi))
 #define TEST_ALL_JOIN_CONFIG_GRACE_MS 1500
 #define K_NO_WAIT 0
 #define AC_FRAME_SIZE 16
@@ -61,50 +63,15 @@ static unsigned error_count;
 
 struct esb_payload { uint8_t length, pipe; bool noack; int8_t rssi; uint8_t data[64]; };
 struct esb_evt { int evt_id; unsigned tx_attempts; };
-#if defined(CONFIG_TDMA_DIAGNOSTICS)
-struct tdma_stats {
-    uint32_t count, violations;
-    int64_t sum_offset;
-    uint64_t sum_sq_offset;
-    bool phase_initialized;
-    int32_t phase_ema_q8, min_offset, max_offset;
-};
-static struct tdma_stats g_tdma_stats[MAX_TRACKERS];
-static int32_t g_last_ping_rx_time_diff_ticks[MAX_TRACKERS];
-static bool g_last_ping_rx_time_diff_valid[MAX_TRACKERS];
-static volatile uint32_t g_ping_isr_rx_ticks[MAX_TRACKERS];
-static volatile bool g_ping_isr_rx_ticks_valid[MAX_TRACKERS];
-static volatile uint32_t g_last_isr_rx_ticks[MAX_TRACKERS];
-static volatile bool g_last_isr_rx_valid[MAX_TRACKERS];
-static uint8_t g_bias_ppb_valid[MAX_TRACKERS];
-static int32_t g_bias_ppb[MAX_TRACKERS], g_bias_ref_offset[MAX_TRACKERS];
-static uint32_t g_bias_ref_ticks[MAX_TRACKERS], g_last_ping_isr_rx_ticks_raw[MAX_TRACKERS];
-static uint8_t g_ping_dirty_streak[MAX_TRACKERS];
-static uint32_t g_ping_reject_count[MAX_TRACKERS];
-#endif
-static uint8_t pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
-static uint8_t last_ping_counter[MAX_TRACKERS], last_pong_queued_counter[MAX_TRACKERS];
-static bool ping_counter_initialized[MAX_TRACKERS], sequence_initialized[MAX_TRACKERS];
-static uint64_t last_ping_time[MAX_TRACKERS];
+/* PRODUCTION STATE */
 static uint32_t decision_ready_mask, decision_fence_mask;
-static struct packet_stats { uint32_t restart_events; uint8_t status_received, status_lost; } tracker_stats[MAX_TRACKERS];
 static atomic_t test_all_state_valid, test_all_enabled, test_all_confirmed_mask;
 static atomic_t test_all_ready_after_ms[MAX_TRACKERS];
 static atomic_t home_beacon_tx_result;
-static uint8_t tracker_remote_command[MAX_TRACKERS], pending_cmd_arg[MAX_TRACKERS];
-static uint16_t tracker_test_on_tps[MAX_TRACKERS];
-static uint8_t metadata_active_mask[MAX_TRACKERS], metadata_pending_mask[MAX_TRACKERS];
-static uint8_t metadata_active_chunk[MAX_TRACKERS], metadata_pending_chunk[MAX_TRACKERS];
-static uint16_t metadata_active_token[MAX_TRACKERS], metadata_pending_token[MAX_TRACKERS];
-static int16_t pending_sens_data[MAX_TRACKERS][3];
-static uint8_t pending_sens_auto_axis[MAX_TRACKERS];
-static uint16_t pending_sens_auto_revolutions[MAX_TRACKERS];
-static uint16_t wom_minutes[MAX_TRACKERS], wom_token[MAX_TRACKERS];
-static bool wom_advertised[MAX_TRACKERS];
-static uint8_t wom_first_ping_counter[MAX_TRACKERS], pending_channel;
-static volatile uint32_t tdma_config_packed[MAX_TRACKERS];
+static uint8_t pending_channel;
 static uint8_t receiver_device_addr[6], stored_trackers = MAX_TRACKERS;
-static bool esb_pairing, pairing_new_devices_blocked;
+static bool esb_pairing;
+static atomic_t pairing_new_devices_blocked;
 static struct esb_payload rx_payload, incoming;
 static bool incoming_ready;
 static uint32_t now_ticks;
@@ -118,8 +85,6 @@ static uint8_t poses[16][16], raw_packets[16][64], raw_lengths[16], event_packet
 static uint8_t ota_packets[16][64], ota_lengths[16];
 static uint8_t sequence_last[MAX_TRACKERS];
 static bool sequence_seen[MAX_TRACKERS], raw_target;
-static uint16_t last_raw_seq[MAX_TRACKERS];
-static bool last_raw_valid[MAX_TRACKERS];
 static struct esb_payload fifo[32];
 static uint32_t fifo_ticks[32];
 static unsigned fifo_count, fifo_next;
@@ -248,7 +213,7 @@ static void data_collect_write(const uint8_t *packet, uint8_t length, int8_t rss
     memcpy(raw_packets[raw_count], packet, length);
     raw_lengths[raw_count++] = length;
 }
-static void esb_send_remote_command(uint8_t id, uint8_t command) { tracker_remote_command[id] = command; }
+static void esb_send_remote_command(uint8_t id, uint8_t command) { tracker_slots[id].tracker_remote_command = command; }
 static int k_msgq_put(void *queue, const void *item, int timeout)
 {
     (void)timeout;
@@ -285,17 +250,17 @@ static struct clock_state snapshot(void)
 {
     struct clock_state s = {0};
     for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
-        s.bias[i] = g_last_ping_rx_time_diff_ticks[i];
-        s.bias_valid[i] = g_last_ping_rx_time_diff_valid[i];
-        s.ppb[i] = g_bias_ppb[i];
-        s.ppb_valid[i] = g_bias_ppb_valid[i];
-        s.ref_offset[i] = g_bias_ref_offset[i];
-        s.ref_ticks[i] = g_bias_ref_ticks[i];
-        s.raw[i] = g_last_ping_isr_rx_ticks_raw[i];
-        s.dirty[i] = g_ping_dirty_streak[i];
-        s.rejects[i] = g_ping_reject_count[i];
-        s.radio_ticks[i] = g_ping_isr_rx_ticks[i];
-        s.radio_valid[i] = g_ping_isr_rx_ticks_valid[i];
+        s.bias[i] = tracker_diags[i].g_last_ping_rx_time_diff_ticks;
+        s.bias_valid[i] = tracker_diags[i].g_last_ping_rx_time_diff_valid;
+        s.ppb[i] = tracker_diags[i].g_bias_ppb;
+        s.ppb_valid[i] = tracker_diags[i].g_bias_ppb_valid;
+        s.ref_offset[i] = tracker_diags[i].g_bias_ref_offset;
+        s.ref_ticks[i] = tracker_diags[i].g_bias_ref_ticks;
+        s.raw[i] = tracker_diags[i].g_last_ping_isr_rx_ticks_raw;
+        s.dirty[i] = tracker_diags[i].g_ping_dirty_streak;
+        s.rejects[i] = tracker_diags[i].g_ping_reject_count;
+        s.radio_ticks[i] = tracker_diags[i].g_ping_isr_rx_ticks;
+        s.radio_valid[i] = tracker_diags[i].g_ping_isr_rx_ticks_valid;
     }
     return s;
 }
@@ -319,17 +284,17 @@ static void seed(void)
 {
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
-        g_last_ping_rx_time_diff_ticks[i] = 8;
-        g_last_ping_rx_time_diff_valid[i] = true;
-        g_bias_ppb_valid[i] = 1;
-        g_bias_ppb[i] = 17;
-        g_bias_ref_offset[i] = 5;
-        g_bias_ref_ticks[i] = 100000;
-        g_last_ping_isr_rx_ticks_raw[i] = 100100;
-        g_ping_isr_rx_ticks[i] = 100100;
-        g_ping_isr_rx_ticks_valid[i] = true;
-        g_ping_dirty_streak[i] = 7;
-        g_ping_reject_count[i] = 10;
+        tracker_diags[i].g_last_ping_rx_time_diff_ticks = 8;
+        tracker_diags[i].g_last_ping_rx_time_diff_valid = true;
+        tracker_diags[i].g_bias_ppb_valid = 1;
+        tracker_diags[i].g_bias_ppb = 17;
+        tracker_diags[i].g_bias_ref_offset = 5;
+        tracker_diags[i].g_bias_ref_ticks = 100000;
+        tracker_diags[i].g_last_ping_isr_rx_ticks_raw = 100100;
+        tracker_diags[i].g_ping_isr_rx_ticks = 100100;
+        tracker_diags[i].g_ping_isr_rx_ticks_valid = true;
+        tracker_diags[i].g_ping_dirty_streak = 7;
+        tracker_diags[i].g_ping_reject_count = 10;
     }
 #endif
 }
@@ -378,6 +343,30 @@ static void confirm(uint8_t id, uint8_t flag)
     confirmed_id = id;
     confirmed_flag = flag;
 }
+static void test_late_metadata(void)
+{
+    const uint8_t id = 2;
+    tracker_slots[id].metadata_active_mask = 1;
+    tracker_slots[id].metadata_active_chunk = 3;
+    tracker_slots[id].metadata_active_token = 102;
+    now_ticks = 1000;
+    struct esb_payload p = packet(ESB_PING_TYPE, id, 3, 1, 990, ESB_PONG_FLAG_METADATA_REQUEST);
+    p.data[8] = 1;
+    p.data[9] = 3;
+    p.data[10] = 0;
+    p.data[11] = 101;
+    p.data[ESB_PING_LEN - 1] = crc8_ccitt(0x07, p.data, ESB_PING_LEN - 1);
+    dispatch(&p);
+    assert(tracker_slots[id].metadata_active_mask == 1);
+    assert(tracker_slots[id].metadata_active_token == 102);
+    p.data[2] = 2;
+    p.data[11] = 102;
+    p.data[ESB_PING_LEN - 1] = crc8_ccitt(0x07, p.data, ESB_PING_LEN - 1);
+    dispatch(&p);
+    assert(tracker_slots[id].metadata_active_mask == 0);
+    assert(tracker_slots[id].metadata_active_token == 102);
+}
+
 static void test_invalid(const char *which)
 {
     const uint8_t id = 2;
@@ -390,7 +379,7 @@ static void test_invalid(const char *which)
         p.data[ESB_PING_LEN - 1] ^= 1;
     } else if (strcmp(which, "wrong-pipe") == 0) {
         p = packet(ESB_PING_TYPE, id, 4, 1, 0, ESB_PONG_FLAG_CALIBRATE);
-        tracker_remote_command[id] = ESB_PONG_FLAG_CALIBRATE;
+        tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
         remote_confirm_cb = confirm;
     } else if (strcmp(which, "out-of-range") == 0) {
         p = packet(ESB_PING_TYPE, MAX_TRACKERS, 3, 1, 0, ESB_PONG_FLAG_NORMAL);
@@ -417,19 +406,19 @@ static void test_invalid(const char *which)
 #endif
     assert(shadow_count == 0);
     if (strcmp(which, "wrong-pipe") == 0) {
-        assert(pipe_mismatch_count[id] == 1);
-        assert(ping_counter_initialized[id] && last_ping_counter[id] == 1);
-        assert(tracker_remote_command[id] == ESB_PONG_FLAG_NORMAL);
+        assert(tracker_slots[id].pipe_mismatch_count == 1);
+        assert(tracker_slots[id].ping_counter_initialized && tracker_slots[id].last_ping_counter == 1);
+        assert(tracker_slots[id].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
         assert(confirmations == 1 && confirmed_id == id && confirmed_flag == ESB_PONG_FLAG_CALIBRATE);
     }
-    if (strcmp(which, "bad-crc") == 0) assert(crc_error_count[id] == 1);
+    if (strcmp(which, "bad-crc") == 0) assert(tracker_slots[id].crc_error_count == 1);
 }
 static void test_valid(void)
 {
     const uint8_t id = 2;
     seed();
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-    g_ping_dirty_streak[id] = 3;
+    tracker_diags[id].g_ping_dirty_streak = 3;
     struct clock_state expected = snapshot();
 #endif
     struct esb_payload p = packet(ESB_PING_TYPE, id, 3, 1, 132754, ESB_PONG_FLAG_NORMAL);
@@ -454,14 +443,14 @@ static void test_valid(void)
     expected.dirty[id] = 0;
     equal_state(&expected);
 #endif
-    assert(shadow_count == 1 && ping_counter_initialized[id]);
+    assert(shadow_count == 1 && tracker_slots[id].ping_counter_initialized);
 }
 static void test_valid_dirty(void)
 {
     const uint8_t id = 2;
     seed();
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-    g_ping_dirty_streak[id] = 3;
+    tracker_diags[id].g_ping_dirty_streak = 3;
     struct clock_state expected = snapshot();
 #endif
     struct esb_payload p = packet(ESB_PING_TYPE, id, 3, 1, 132600, ESB_PONG_FLAG_NORMAL);
@@ -515,8 +504,8 @@ static void test_event_fallback(void)
     const uint8_t id = 2;
     seed();
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-    g_ping_isr_rx_ticks_valid[id] = false;
-    g_ping_dirty_streak[id] = 3;
+    tracker_diags[id].g_ping_isr_rx_ticks_valid = false;
+    tracker_diags[id].g_ping_dirty_streak = 3;
     struct clock_state expected = snapshot();
 #endif
     struct esb_payload p = packet(ESB_PING_TYPE, id, 3, 1, 132754, ESB_PONG_FLAG_NORMAL);
@@ -537,7 +526,7 @@ static void test_interleaved_pipe(void)
     const uint8_t id = 2;
     seed();
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-    g_ping_dirty_streak[id] = 3;
+    tracker_diags[id].g_ping_dirty_streak = 3;
     struct clock_state expected = snapshot();
 #endif
     struct esb_payload valid = packet(ESB_PING_TYPE, id, 3, 1, 132754, ESB_PONG_FLAG_NORMAL);
@@ -557,7 +546,7 @@ static void test_interleaved_pipe(void)
     assert(has_ack && ack.pipe == 3 && ack.data[0] == ESB_PONG_TYPE);
     assert(sys_get_be32(&ack.data[3]) == 133000);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-    assert(g_last_isr_rx_ticks[id] == 133000 && g_last_isr_rx_valid[id]);
+    assert(tracker_diags[id].g_last_isr_rx_ticks == 133000 && tracker_diags[id].g_last_isr_rx_valid);
     equal_state(&expected);
 #endif
     now_ticks = 133010;
@@ -576,8 +565,8 @@ static void test_interleaved_pipe(void)
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     equal_state(&expected);
 #endif
-    assert(shadow_count == 1 && pipe_mismatch_count[id] == 1);
-    assert(last_ping_counter[id] == 2);
+    assert(shadow_count == 1 && tracker_slots[id].pipe_mismatch_count == 1);
+    assert(tracker_slots[id].last_ping_counter == 2);
 }
 static void test_ota(uint8_t type)
 {
@@ -598,7 +587,7 @@ static void test_valid_after_invalid(void)
     const uint8_t id = 2;
     seed();
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-    g_ping_dirty_streak[id] = 3;
+    tracker_diags[id].g_ping_dirty_streak = 3;
     struct clock_state expected = snapshot();
 #endif
     struct esb_payload p = packet(0x40, id, 3, 1, 0, ESB_PONG_FLAG_NORMAL);
@@ -643,18 +632,18 @@ static void test_valid_after_invalid(void)
     expected.dirty[id] = 0;
     equal_state(&expected);
 #endif
-    assert(shadow_count == 1 && last_ping_counter[id] == 2);
+    assert(shadow_count == 1 && tracker_slots[id].last_ping_counter == 2);
 }
 static void test_early_sequence_exit(bool duplicate)
 {
     const uint8_t id = 2;
     seed();
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-    g_ping_dirty_streak[id] = 3;
+    tracker_diags[id].g_ping_dirty_streak = 3;
 #endif
-    ping_counter_initialized[id] = true;
-    last_ping_counter[id] = 5;
-    last_pong_queued_counter[id] = 5;
+    tracker_slots[id].ping_counter_initialized = true;
+    tracker_slots[id].last_ping_counter = 5;
+    tracker_slots[id].last_pong_queued_counter = 5;
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     struct clock_state expected = snapshot();
 #endif
@@ -678,15 +667,15 @@ static void test_early_sequence_exit(bool duplicate)
     expected.dirty[id] = 0;
     equal_state(&expected);
 #endif
-    assert(shadow_count == 1 && last_ping_counter[id] == 5);
-    assert(last_pong_queued_counter[id] == 5);
+    assert(shadow_count == 1 && tracker_slots[id].last_ping_counter == 5);
+    assert(tracker_slots[id].last_pong_queued_counter == 5);
 }
 static void test_detailed_warning(void)
 {
     detailed_enabled = true;
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     /* Exercise the extracted clock helper, including nonzero variance/sqrt. */
-    struct tdma_stats *stats = &g_tdma_stats[2];
+    struct tdma_stats *stats = &tracker_diags[2].stats;
     stats->count = 2;
     stats->violations = 13;
     stats->sum_offset = -4;
@@ -695,7 +684,7 @@ static void test_detailed_warning(void)
     stats->phase_ema_q8 = -3 * 256;
     stats->min_offset = -6;
     stats->max_offset = 2;
-    g_ping_isr_rx_ticks_valid[2] = false;
+    tracker_diags[2].g_ping_isr_rx_ticks_valid = false;
     account_ping_clock(2, 1000, 990);
     assert(detailed_warnings == 1);
     assert(warning_mean == -2 && warning_stddev == 4);
@@ -731,9 +720,9 @@ static void test_drain(void)
     struct esb_payload p = {0};
     esb_pairing = true;
     raw_target = true;
-    tracker_stats[2].status_received = 7;
-    tracker_stats[2].status_lost = 3;
-    tracker_remote_command[2] = ESB_PONG_FLAG_CALIBRATE;
+    tracker_slots[2].stats.status_received = 7;
+    tracker_slots[2].stats.status_lost = 3;
+    tracker_slots[2].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
     remote_confirm_cb = confirm;
 
     fifo_push(p, 1000);
@@ -812,13 +801,13 @@ static void test_drain(void)
     assert(queued_observation.frame[0] == 'S' && queued_observation.frame[4] == 9);
     const uint8_t discovery[8] = {0xfe, 0, 1, 2, 3, 4, 5, 4};
     assert(memcmp(esb_pairing_msgq.item.packet, discovery, sizeof(discovery)) == 0);
-    assert(crc_error_count[2] == 1 && last_ping_counter[2] == 6);
+    assert(tracker_slots[2].crc_error_count == 1 && tracker_slots[2].last_ping_counter == 6);
     assert(confirmations == 1 && confirmed_id == 2 && confirmed_flag == ESB_PONG_FLAG_CALIBRATE);
-    assert(tracker_remote_command[2] == ESB_PONG_FLAG_NORMAL);
-    assert(last_ping_counter[3] == 1);
+    assert(tracker_slots[2].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
+    assert(tracker_slots[3].last_ping_counter == 1);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-    assert(g_last_ping_isr_rx_ticks_raw[3] == 3200);
-    assert(g_last_ping_rx_time_diff_ticks[3] == 5);
+    assert(tracker_diags[3].g_last_ping_isr_rx_ticks_raw == 3200);
+    assert(tracker_diags[3].g_last_ping_rx_time_diff_ticks == 5);
 #endif
     assert(shadow_ping_count == 5 && shadow_data_count == 3);
     assert(ota_count == 2 && ota_lengths[0] == 13 && ota_packets[0][2] == 0x41);
@@ -829,8 +818,8 @@ static void test_drain(void)
     assert(sequence_calls == 3 && sequence_last[2] == 22);
     printf("PROTOCOL fifo=%u private=%u pairing=%u crc=%u ping2=%u ping3=%u "
            "shadow=%u/%u confirm=%u ota=%u raw=%u events=%u sequence=%u last=%u errors=%u\n",
-           fifo_next, private_count, esb_pairing_msgq.count, crc_error_count[2],
-           last_ping_counter[2], last_ping_counter[3],
+           fifo_next, private_count, esb_pairing_msgq.count, tracker_slots[2].crc_error_count,
+           tracker_slots[2].last_ping_counter, tracker_slots[3].last_ping_counter,
            shadow_ping_count, shadow_data_count, confirmations,
            ota_count, raw_count, event_count, sequence_calls, sequence_last[2], error_count);
     for (unsigned i = 0; i < pose_count; ++i) {
@@ -847,7 +836,7 @@ static void test_drain(void)
     assert(poses[0][2] == 0x11 && poses[0][3] == 0x22 && poses[0][4] == 7 && poses[0][5] == 3);
     assert(poses[1][0] == 1 && poses[1][2] == 0x33);
     assert(poses[2][0] == 5 && poses[2][2] == 0x44);
-    assert(tracker_stats[2].status_received == 0 && tracker_stats[2].status_lost == 0);
+    assert(tracker_slots[2].stats.status_received == 0 && tracker_slots[2].stats.status_lost == 0);
     assert(error_count == 2);
 }
 
@@ -863,16 +852,16 @@ static void assert_tick_reads(void)
 #endif
     printf("PROTOCOL shadow=%u/%u seq=%u ping2=%u command=%u confirm=%u/%u/%u "
            "mismatch=%u crc=%u ota=%u\n",
-           shadow_ping_count, shadow_data_count, sequence_calls, last_ping_counter[2],
-           tracker_remote_command[2], confirmations, confirmed_id, confirmed_flag,
-           pipe_mismatch_count[2], crc_error_count[2], ota_count);
+           shadow_ping_count, shadow_data_count, sequence_calls, tracker_slots[2].last_ping_counter,
+           tracker_slots[2].tracker_remote_command, confirmations, confirmed_id, confirmed_flag,
+           tracker_slots[2].pipe_mismatch_count, tracker_slots[2].crc_error_count, ota_count);
 }
 
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     tick_context = TICK_EVENT;
-    tdma_config_packed[2] = 2u | (3u << 8) | (48u << 16) | (7u << 24);
+    tracker_slots[2].tdma_config_packed = 2u | (3u << 8) | (48u << 16) | (7u << 24);
     if (strcmp(argv[1], "detailed-warning") == 0) {
         test_detailed_warning();
         printf("PASS %s\n", argv[1]);
@@ -892,6 +881,7 @@ int main(int argc, char **argv)
     else if (strcmp(argv[1], "ota-status") == 0) test_ota(ESB_OTA_STATUS_TYPE);
     else if (strcmp(argv[1], "ota-info") == 0) test_ota(ESB_OTA_FW_INFO_TYPE);
     else if (strcmp(argv[1], "valid-after-invalid") == 0) test_valid_after_invalid();
+    else if (strcmp(argv[1], "late-metadata") == 0) test_late_metadata();
     else if (strcmp(argv[1], "duplicate") == 0) test_early_sequence_exit(true);
     else if (strcmp(argv[1], "out-of-order") == 0) test_early_sequence_exit(false);
     else test_invalid(argv[1]);

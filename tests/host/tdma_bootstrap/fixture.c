@@ -101,7 +101,6 @@ static void test_all_update_effective(uint8_t slots, int64_t at, bool layout_cha
     last_effective_slots = slots;
 }
 static struct esb_payload { uint8_t data[13], length, pipe; } rx_payload;
-static uint32_t pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
 static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t length)
 {
     for (size_t i = 0; i < length; ++i) {
@@ -112,15 +111,8 @@ static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t length)
     return crc;
 }
 /* DIAGNOSTIC DECLARATIONS */
-static uint8_t last_ping_counter[MAX_TRACKERS], last_pong_queued_counter[MAX_TRACKERS];
-static bool ping_counter_initialized[MAX_TRACKERS], sequence_initialized[MAX_TRACKERS];
-static uint64_t last_ping_time[MAX_TRACKERS];
 static uint32_t decision_ready_mask, decision_fence_mask;
-static struct { uint32_t restart_events; } tracker_stats[MAX_TRACKERS];
 static atomic_t test_all_state_valid, test_all_confirmed_mask;
-static uint8_t tracker_remote_command[MAX_TRACKERS], pending_cmd_arg[MAX_TRACKERS];
-static uint16_t tracker_test_on_tps[MAX_TRACKERS], metadata_active_token[MAX_TRACKERS];
-static uint8_t metadata_active_mask[MAX_TRACKERS], metadata_active_chunk[MAX_TRACKERS];
 static void (*remote_confirm_cb)(uint8_t, uint8_t);
 static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return ticks; }
 /* SDK conversion and console policy leaves; admission cases keep detail off. */
@@ -145,7 +137,7 @@ static void reset_fixture(uint8_t count, uint64_t time)
     for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
         saved_addr[i] = i < count ? 1000 + i : 0;
         stored_tracker_addr[i] = 0;
-        tdma_config_packed[i] = 0;
+        tracker_slots[i].tdma_config_packed = 0;
         tdma_shadow_forget_tracker(i);
     }
     irq_unlock(key);
@@ -160,20 +152,20 @@ static void reset_fixture(uint8_t count, uint64_t time)
     sync_hook = NULL; mutex_hook = NULL;
     loss_invalidations = membership_notifications = effective_updates = 0;
     last_notified_mask = 0; last_effective_slots = 0;
-    memset(pipe_mismatch_count, 0, sizeof(pipe_mismatch_count));
-    memset(ping_counter_initialized, 0, sizeof(ping_counter_initialized));
-    memset(last_ping_counter, 0, sizeof(last_ping_counter));
-    memset(last_ping_time, 0, sizeof(last_ping_time));
-    memset(last_pong_queued_counter, 0, sizeof(last_pong_queued_counter));
-#if defined(CONFIG_TDMA_DIAGNOSTICS)
-    memset(g_last_ping_rx_time_diff_valid, 0, sizeof(g_last_ping_rx_time_diff_valid));
     for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
-        g_ping_isr_rx_ticks_valid[i] = false;
-    }
-    memset(g_bias_ppb_valid, 0, sizeof(g_bias_ppb_valid));
-    memset(g_ping_dirty_streak, 0, sizeof(g_ping_dirty_streak));
+        tracker_slots[i].pipe_mismatch_count = 0;
+        tracker_slots[i].ping_counter_initialized = false;
+        tracker_slots[i].last_ping_counter = 0;
+        tracker_slots[i].last_ping_time = 0;
+        tracker_slots[i].last_pong_queued_counter = 0;
+        tracker_slots[i].crc_error_count = 0;
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+        tracker_diags[i].g_last_ping_rx_time_diff_valid = false;
+        tracker_diags[i].g_ping_isr_rx_ticks_valid = false;
+        tracker_diags[i].g_bias_ppb_valid = 0;
+        tracker_diags[i].g_ping_dirty_streak = 0;
 #endif
-    memset(crc_error_count, 0, sizeof(crc_error_count));
+    }
 }
 
 static uint8_t slot(uint32_t cfg) { return (uint8_t)(cfg >> 24); }
@@ -240,7 +232,7 @@ static void all_rosters(uint64_t base)
         assert(last_notified_mask == BIT(n) - 1U && last_effective_slots == n);
         assert(tdma_dynamic_slot_ticks == widths[n]);
         for (uint8_t id = 0; id < n; ++id) {
-            uint32_t cfg = tdma_config_packed[id];
+            uint32_t cfg = tracker_slots[id].tdma_config_packed;
             assert(slot(cfg) == id && total(cfg) == n && width(cfg) == widths[n]);
             assert(epoch_of(cfg) == tdma_config_epoch);
         }
@@ -287,7 +279,7 @@ static void invalid_and_stale_evidence(void)
     assert(!tdma_active_mask && tdma_membership_wait_ms(500) == 1);
     now_ms++;
     service();
-    assert(tdma_active_mask == BIT(1) && slot(tdma_config_packed[1]) == 0);
+    assert(tdma_active_mask == BIT(1) && slot(tracker_slots[1].tdma_config_packed) == 0);
     uint32_t last_seen = (uint32_t)atomic_get(&tdma_shadow_last_seen_ms[1]);
     now_ms++;
     rx_payload.pipe = 1; /* ID 1 belongs on pipe 2. */
@@ -323,7 +315,7 @@ static void fresh_joins_and_spacing(void)
     service();
     assert(!atomic_get(&tdma_shadow_pending_join_mask));
     assert((uint32_t)atomic_get(&tdma_shadow_desired_mask) == 3 && tdma_active_mask == 1);
-    assert(slot(tdma_config_packed[1]) == 0xff);
+    assert(slot(tracker_slots[1].tdma_config_packed) == 0xff);
     uint32_t first_deadline = tdma_membership_deadline_ms;
     now_ms = 1750; assert(ping(2, true));
     service();
@@ -334,7 +326,7 @@ static void fresh_joins_and_spacing(void)
     now_ms = 2701;
     service();
     assert(tdma_active_mask == 7 && tdma_last_reconfig_time == 2701);
-    assert(slot(tdma_config_packed[1]) == 1 && slot(tdma_config_packed[2]) == 2);
+    assert(slot(tracker_slots[1].tdma_config_packed) == 1 && slot(tracker_slots[2].tdma_config_packed) == 2);
     uint8_t epoch = tdma_config_epoch;
 
     /* Evidence after the snapshot starts a new batch even in the same tick. */
@@ -401,7 +393,7 @@ static void snapshot_and_reuse(void)
     reset_fixture(3, 10); assert(tracker_store_restore() == 0);
     assert(ping(0, true)); service();
     now_ms = 111; sync_hook = inject_before_snapshot; service();
-    assert(tdma_active_mask == 3 && slot(tdma_config_packed[1]) == 1);
+    assert(tdma_active_mask == 3 && slot(tracker_slots[1].tdma_config_packed) == 1);
     assert(ping(2, true)); service();
     assert(tdma_active_mask == 3 && (uint32_t)atomic_get(&tdma_shadow_desired_mask) == 7);
     now_ms = 1111; service();
@@ -424,7 +416,7 @@ static void snapshot_and_reuse(void)
     now_ms = 120;
     stored_trackers = 2; host_forget_id(2); force_layout();
     assert(tdma_active_mask == 3 && tdma_last_reconfig_time == 120);
-    assert(slot(tdma_config_packed[2]) == 0xff && total(tdma_config_packed[2]) == 2);
+    assert(slot(tracker_slots[2].tdma_config_packed) == 0xff && total(tracker_slots[2].tdma_config_packed) == 2);
     stored_trackers = 3; now_ms = 130;
     assert(ping(2, true));
     stored_trackers = 2; host_forget_id(2);
@@ -435,7 +427,7 @@ static void snapshot_and_reuse(void)
     now_ms = 1119; service();
     assert(tdma_active_mask == 3 && tdma_membership_wait_ms(500) == 1);
     now_ms = 1120; service();
-    assert(tdma_active_mask == 7 && slot(tdma_config_packed[2]) == 2);
+    assert(tdma_active_mask == 7 && slot(tracker_slots[2].tdma_config_packed) == 2);
 }
 
 static void empty_and_returning(void)
@@ -450,7 +442,7 @@ static void empty_and_returning(void)
     assert(!tdma_active_mask && !tdma_dynamic_active_count);
     assert(tdma_config_epoch == epoch && tdma_last_reconfig_time == (int64_t)now_ms);
     for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
-        assert(slot(tdma_config_packed[i]) == 0xff && total(tdma_config_packed[i]) == 0);
+        assert(slot(tracker_slots[i].tdma_config_packed) == 0xff && total(tracker_slots[i].tdma_config_packed) == 0);
     }
     now_ms++; service();
     assert(tdma_last_reconfig_time == TDMA_SHADOW_LEAVE_GRACE_MS);

@@ -14,6 +14,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[3]
 HERE = Path(__file__).resolve().parent
 SOURCE = ROOT / "src/connection"
+sys.path.insert(0, str(HERE.parent / "harness"))
+from c_extract import extract_block
 
 
 def function(source, name, occurrence=0):
@@ -56,6 +58,12 @@ receive_on = function(auto, "auto_channel_receive")
 receive_off = function(auto, "auto_channel_receive", 1)
 restore = function(auto, "restore")
 fixture = (HERE / "radio_fixture.c").read_text()
+slot_declarations = "\n".join(
+    extract_block(esb, rf"^struct {name}\s*\{{", True)
+    for name in ("packet_stats", "tracker_slot")
+)
+slot_declarations += "\nstatic struct tracker_slot tracker_slots[MAX_TRACKERS];"
+fixture = fixture.replace("/* SLOT DECLARATIONS */", slot_declarations)
 diagnostic_start = esb.rfind("#if defined(CONFIG_TDMA_DIAGNOSTICS)", 0,
                            esb.index("#define RX_PHASE_MIN_TICKS"))
 diagnostic_end = esb.index("static void tdma_sync_stats_reset(void)\n{", diagnostic_start)

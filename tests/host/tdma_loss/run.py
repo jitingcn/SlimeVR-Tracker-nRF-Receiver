@@ -114,7 +114,7 @@ def production_bodies(source, header=''):
         source, re.MULTILINE))
     declarations = '\n'.join(re.findall(
         r'^static (?:uint8_t|uint32_t) '
-        r'tdma_(?:cap_level|published_cap_level|loss_(?!last_permille\b)\w+|prev_\w+)[^;]*;',
+        r'tdma_(?:cap_level|published_cap_level|loss_(?!last_permille\b)\w+)[^;]*;',
         source,
         re.MULTILINE,
     ))
@@ -126,10 +126,12 @@ def production_bodies(source, header=''):
     declarations += '\n' + diagnostic_loss_declarations(source, (
         'tdma_last_loss_step_ms', 'tdma_loss_last_permille',
     ))
-    structure_start = re.search(r'\bstruct\s+packet_stats\s*\{', source)
-    if structure_start is None:
-        raise ValueError('Missing production packet_stats structure')
-    structure = block(source, structure_start.start()) + ';\n'
+    structures = []
+    for name in ('packet_stats', 'tracker_slot'):
+        start = re.search(r'\bstruct\s+' + name + r'\s*\{', source)
+        if start is None:
+            raise ValueError(f'Missing production {name} structure')
+        structures.append(block(source, start.start()) + ';\n')
 
     ping_constants = '\n'.join(re.findall(
         r'^#define ESB_(?:PING|PONG)_\w+\b[^\n]*', header, re.MULTILINE))
@@ -164,10 +166,10 @@ static void restart_ping(uint8_t tracker_id) {
     payload.data[0] = ESB_PING_TYPE;
     payload.data[1] = tracker_id;
     payload.data[ESB_PING_LEN - 1] = crc8_ccitt(0x07, payload.data, ESB_PING_LEN - 1);
-    ping_counter_initialized[tracker_id] = true;
-    last_ping_counter[tracker_id] = 100;
-    last_ping_time[tracker_id] = (uint64_t)now;
-    last_pong_queued_counter[tracker_id] = 0xff;
+    tracker_slots[tracker_id].ping_counter_initialized = true;
+    tracker_slots[tracker_id].last_ping_counter = 100;
+    tracker_slots[tracker_id].last_ping_time = (uint64_t)now;
+    tracker_slots[tracker_id].last_pong_queued_counter = 0xff;
     esb_receive_ping(&payload, 0);
 }
 '''
@@ -176,9 +178,8 @@ static void restart_ping(uint8_t tracker_id) {
         ping_constants,
         membership_declarations(source),
         declarations,
-        structure,
-        'static struct packet_stats tracker_stats[MAX_TRACKERS];',
-        # The pre-recovery-fix baseline has no shared reset helper.
+        *structures,
+        declaration(source, 'tracker_slots'),
         function(source, 'tdma_loss_reset_windows', optional=True),
         snapshot,
         function(source, 'tdma_loss_controller_update'),

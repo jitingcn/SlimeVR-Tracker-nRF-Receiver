@@ -37,8 +37,6 @@ static int test_all_enabled;
 static bool collecting;
 static bool batching;
 static bool ota;
-static uint8_t last_packet_sequence[MAX_TRACKERS];
-static bool sequence_initialized[MAX_TRACKERS];
 static int tdma_rx_discontinuity_pending, channel_change_pending;
 static int atomic_set(int *value, int next) { int old = *value; *value = next; return old; }
 struct esb_payload { uint8_t data[64]; uint8_t length, pipe; int8_t rssi; };
@@ -47,8 +45,6 @@ static int atomic_and(int *value, int bits) { int old = *value; *value &= bits; 
 static unsigned sched_depth;
 static void k_sched_lock(void) { assert(sched_depth++ == 0); }
 static void k_sched_unlock(void) { assert(sched_depth-- == 1); }
-static uint8_t last_ping_counter[MAX_TRACKERS];
-static uint8_t last_pong_queued_counter[MAX_TRACKERS];
 
 static int64_t k_uptime_get(void)
 {
@@ -88,11 +84,10 @@ static void test_all_invalidate_tracker(uint8_t id, int64_t at)
 #define ESB_RF_CHANNEL_ZERO_ENC 128
 #define RADIO_RF_CHANNEL 22
 static bool self_ota, esb_pairing, esb_clearing, esb_radio_fault, busy;
-static bool abort_pending[MAX_TRACKERS], ping_counter_initialized[MAX_TRACKERS];
+static bool abort_pending[MAX_TRACKERS];
 static uint8_t receiver_rf_channel = ESB_RF_CHANNEL_DEFAULT;
 static uint32_t auto_loss_reset_epoch;
 static uint8_t tdma_config_epoch, tdma_dynamic_slot_ticks, tdma_dynamic_active_count;
-static uint32_t tdma_config_packed[MAX_TRACKERS];
 static uint8_t stored_trackers = 4;
 static void test_all_note_layout(uint32_t old, uint32_t next, int64_t at) {}
 static void test_all_update_effective(uint8_t count, int64_t at, bool reset) {}
@@ -106,12 +101,7 @@ static void k_sem_give(struct fixture_sem *sem) { assert(!irq_depth); sem->count
 static void hid_reset_rssi_smooth(uint8_t id) { assert(irq_depth == 0); }
 static void tdma_sync_stats_reset(void) {}
 /* DIAGNOSTIC DECLARATIONS */
-static uint32_t pipe_mismatch_count[MAX_TRACKERS], crc_error_count[MAX_TRACKERS];
-static uint64_t last_ping_time[MAX_TRACKERS];
 static atomic_t test_all_confirmed_mask, test_all_ready_after_ms[MAX_TRACKERS];
-static uint8_t tracker_remote_command[MAX_TRACKERS], pending_cmd_arg[MAX_TRACKERS];
-static uint16_t tracker_test_on_tps[MAX_TRACKERS], metadata_active_token[MAX_TRACKERS];
-static uint8_t metadata_active_mask[MAX_TRACKERS], metadata_active_chunk[MAX_TRACKERS];
 static void (*remote_confirm_cb)(uint8_t, uint8_t);
 static uint32_t sys_get_be32(const uint8_t *p)
 {
@@ -143,8 +133,8 @@ static void hid_write_packet_n(const uint8_t *packet, int8_t rssi) { ++fixture_p
 
 static void tick(uint32_t received, uint32_t gaps)
 {
-	decision_received[3] += received;
-	decision_gaps[3] += gaps;
+	tracker_slots[3].decision_received += received;
+	tracker_slots[3].decision_gaps += gaps;
 	decision_ready_mask = tdma_active_mask;
 	now += 1000;
 	tdma_loss_controller_tick(now);
@@ -256,7 +246,7 @@ static void threshold_boundaries(void)
 static void counter_reset(void)
 {
 	repeat(9, 200, 0);
-	decision_received[3] = 0;
+	tracker_slots[3].decision_received = 0;
 	tick(200, 0);
 	assert(tdma_cap_level == 3);
 	repeat(9, 200, 0);
@@ -267,8 +257,8 @@ static void counter_reset(void)
 
 static void counter_wrap(void)
 {
-	decision_received[3] = UINT32_MAX - 100;
-	tdma_prev_recv[3] = decision_received[3];
+	tracker_slots[3].decision_received = UINT32_MAX - 100;
+	tracker_slots[3].tdma_prev_recv = tracker_slots[3].decision_received;
 	tick(200, 0); /* Counter wrap is a discarded discontinuity, not huge loss. */
 	assert(tdma_cap_level == 3);
 	repeat(9, 200, 0);
@@ -280,7 +270,7 @@ static void counter_wrap(void)
 static void restart_breaks_evidence(void)
 {
 	repeat(9, 200, 0);
-	tracker_stats[3].restart_events++;
+	tracker_slots[3].stats.restart_events++;
 	tick(200, 0);
 	assert(tdma_cap_level == 3);
 	repeat(9, 200, 0);
@@ -294,8 +284,8 @@ static void ping_restart_sequence(void)
 	assert(check_packet_sequence(3, 230) == 0);
 	restart_ping(3);
 	assert(check_packet_sequence(3, 0) == 0);
-	assert(tracker_stats[3].total_gaps == 0);
-	assert(tracker_stats[3].total_received == 2);
+	assert(tracker_slots[3].stats.total_gaps == 0);
+	assert(tracker_slots[3].stats.total_received == 2);
 	assert(tdma_cap_level == 3); /* Reboot is not permission to raise rate. */
 }
 
@@ -307,8 +297,8 @@ static void sequence_wrap(void)
 	assert(check_packet_sequence(3, 0) == 4);
 	assert(check_packet_sequence(3, 255) == 2);
 	assert(check_packet_sequence(3, 2) == 1);
-	assert(tracker_stats[3].total_gaps == 1);
-	assert(tracker_stats[3].restart_events == 0);
+	assert(tracker_slots[3].stats.total_gaps == 1);
+	assert(tracker_slots[3].stats.restart_events == 0);
 }
 
 static void pending_publication(void)
@@ -416,9 +406,9 @@ static void sequence_lifetime(void)
 	assert(check_packet_sequence(0, 255) == 4);
 	assert(check_packet_sequence(0, 254) == 2);
 	assert(check_packet_sequence(0, 0) == 0);
-	assert(tracker_stats[0].total_received == 769);
-	assert(tracker_stats[0].total_gaps == 0);
-	assert(tracker_stats[0].restart_events == 0);
+	assert(tracker_slots[0].stats.total_received == 769);
+	assert(tracker_slots[0].stats.total_gaps == 0);
+	assert(tracker_slots[0].stats.restart_events == 0);
 }
 
 static void blackout_reanchor(void)
@@ -427,7 +417,7 @@ static void blackout_reanchor(void)
 	const unsigned offsets[] = {0, 1, 80, 81, 192, 193, 220, 255, 256, 257};
 	for (unsigned o = 0; o < ARRAY_SIZE(offsets); ++o) {
 		for (unsigned t = 0; t < MAX_TRACKERS; ++t) {
-			sequence_initialized[t] = false;
+			tracker_slots[t].sequence_initialized = false;
 			assert(check_packet_sequence(t, 100) == 0);
 		}
 		uint32_t epoch = auto_loss_reset_epoch;
@@ -440,16 +430,16 @@ static void blackout_reanchor(void)
 			p.data[3] = 0; p.data[17] = 0x99;
 			p.data[t & 1 ? 19 : 16] = seq;
 			bool (*admit)(uint8_t, struct esb_payload) = t & 1 ? composite_admit : normal_admit;
-			uint32_t gaps = tracker_stats[t].total_gaps;
-			uint32_t restarts = tracker_stats[t].restart_events;
+			uint32_t gaps = tracker_slots[t].stats.total_gaps;
+			uint32_t restarts = tracker_slots[t].stats.restart_events;
 			assert(admit(t, p));
 			assert(!admit(t, p));
 			p.data[t & 1 ? 19 : 16] = (uint8_t)(seq - 1);
 			assert(!admit(t, p));
 			p.data[t & 1 ? 19 : 16] = (uint8_t)(seq + 1);
 			assert(admit(t, p));
-			assert(tracker_stats[t].total_gaps == gaps);
-			assert(tracker_stats[t].restart_events == restarts);
+			assert(tracker_slots[t].stats.total_gaps == gaps);
+			assert(tracker_slots[t].stats.restart_events == restarts);
 		}
 	}
 	esb_rx_discontinuity();
@@ -527,7 +517,7 @@ static void decision_common_boundary(void)
 	assert(check_packet_sequence(0, 9) == 2);
 	assert(check_packet_sequence(0, 31) == 1);
 	esb_get_auto_loss_snapshot(&after);
-	assert(tracker_stats[0].total_gaps == 20);
+	assert(tracker_slots[0].stats.total_gaps == 20);
 	assert(after.tracker[0].gaps == before.tracker[0].gaps);
 	assert(after.tracker[0].received == before.tracker[0].received);
 	assert(check_packet_sequence(0, 52) == 1); /* Entirely after baseline. */
@@ -544,12 +534,12 @@ static void decision_short_boundary(void)
 	tdma_cap_level = tdma_published_cap_level = 0;
 	for (unsigned t = 0; t < 8; ++t) {
 		esb_auto_loss_fence();
-		uint8_t seq = last_packet_sequence[3];
+		uint8_t seq = tracker_slots[3].last_packet_sequence;
 		assert(check_packet_sequence(3, seq) == 4);
 		assert(check_packet_sequence(3, (uint8_t)(seq - 1)) == 2);
 		assert(check_packet_sequence(3, (uint8_t)(seq + 21)) == 1);
 		for (unsigned n = 0; n < 60; ++n)
-			assert(check_packet_sequence(3, (uint8_t)(last_packet_sequence[3] + 1)) == 0);
+			assert(check_packet_sequence(3, (uint8_t)(tracker_slots[3].last_packet_sequence + 1)) == 0);
 		now += 1000;
 		tdma_loss_controller_tick(now);
 	}
@@ -557,8 +547,8 @@ static void decision_short_boundary(void)
 	assert(after.reset_epoch == before.reset_epoch);
 	assert(after.ready_mask == BIT(3));
 	assert(after.tracker[3].gaps == 0);
-	assert(tracker_stats[3].total_gaps == 160);
-	assert(tracker_stats[3].restart_events == 0);
+	assert(tracker_slots[3].stats.total_gaps == 160);
+	assert(tracker_slots[3].stats.restart_events == 0);
 	assert(tdma_cap_level == 0);
 }
 
@@ -572,7 +562,7 @@ static void decision_layout_boundary(void)
 	tdma_dynamic_active_count = 4;
 	tdma_config_epoch = 1;
 	for (unsigned i = 0; i < 4; ++i)
-		tdma_config_packed[i] = tdma_pack_config(i, 4, tdma_dynamic_slot_ticks, tdma_config_epoch);
+		tracker_slots[i].tdma_config_packed = tdma_pack_config(i, 4, tdma_dynamic_slot_ticks, tdma_config_epoch);
 	tdma_last_reconfig_time = now;
 	tdma_last_reconfig_valid = true;
 	esb_get_auto_loss_snapshot(&before);
@@ -595,7 +585,7 @@ static void decision_layout_boundary(void)
 	assert(check_packet_sequence(0, 31) == 1);
 	esb_get_auto_loss_snapshot(&after);
 	assert(after.ready_mask == 1 && after.tracker[0].gaps == 0);
-	assert(tracker_stats[0].total_gaps == 20);
+	assert(tracker_slots[0].stats.total_gaps == 20);
 	/* Normal data proves an anchor, not delivery of the new NORMAL PONG. */
 	now += 1000; tdma_loss_controller_tick(now);
 	assert(tdma_loss_trigger_streak_ticks == 0);
@@ -633,12 +623,12 @@ static void decision_genuine_loss(void)
 	for (unsigned lost = 60; lost <= 61; ++lost) {
 		struct esb_auto_loss_snapshot before, after;
 		esb_auto_loss_rebase(&before);
-		check_packet_sequence(3, (uint8_t)(last_packet_sequence[3] + 1));
+		check_packet_sequence(3, (uint8_t)(tracker_slots[3].last_packet_sequence + 1));
 		esb_get_auto_loss_snapshot(&before);
 		for (unsigned second = 0; second < 10; ++second) {
-			assert(check_packet_sequence(3, (uint8_t)(last_packet_sequence[3] + lost + 1)) == 1);
+			assert(check_packet_sequence(3, (uint8_t)(tracker_slots[3].last_packet_sequence + lost + 1)) == 1);
 			for (unsigned n = 1; n < 1000 - lost; ++n)
-				assert(check_packet_sequence(3, (uint8_t)(last_packet_sequence[3] + 1)) == 0);
+				assert(check_packet_sequence(3, (uint8_t)(tracker_slots[3].last_packet_sequence + 1)) == 0);
 			now += 1000;
 		}
 		esb_get_auto_loss_snapshot(&after);

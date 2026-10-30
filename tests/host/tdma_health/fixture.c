@@ -31,13 +31,11 @@ static void capture(const char *format, ...)
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 /* PRODUCTION TYPES */
 
-static struct packet_stats tracker_stats[MAX_TRACKERS];
 static uint8_t stored_trackers = 4;
 static uint8_t tdma_dynamic_active_count = 2;
 static uint8_t tdma_dynamic_slot_ticks = 48;
 static uint8_t tdma_config_epoch = 7;
 static uint32_t tdma_active_mask = 5;
-static uint32_t tdma_config_packed[MAX_TRACKERS];
 static uint8_t tdma_cap_level = 1;
 static uint8_t tdma_loss_trigger_streak_ticks = 2;
 static uint8_t tdma_loss_recover_streak_ticks = 3;
@@ -133,52 +131,52 @@ static void test_percentiles(void)
 
 static void test_health(void)
 {
-	tracker_stats[0] = (struct packet_stats){
+	tracker_slots[0].stats = (struct packet_stats){
 		.total_received = 12, .total_gaps = 3, .restart_events = 2,
 		.last_packet_time = 9000, .current_tps = 7,
 	};
-	tracker_stats[1] = (struct packet_stats){
+	tracker_slots[1].stats = (struct packet_stats){
 		.duplicate_packets = 1, .last_packet_time = 4000, .current_tps = 2,
 	};
-	tdma_config_packed[0] = 1U << 24;
-	tdma_config_packed[2] = 0;
+	tracker_slots[0].tdma_config_packed = 1U << 24;
+	tracker_slots[2].tdma_config_packed = 0;
 	tdma_loss_last_permille = 217;
 	tdma_last_loss_step_ms = 7654;
-	g_tdma_stats[0] = (struct tdma_stats){
+	tracker_diags[0].stats = (struct tdma_stats){
 		.count = 4, .min_offset = -2, .max_offset = 3,
 		.raw_min_offset = -4, .raw_max_offset = 6, .violations = 2,
 		.rssi_count = 4,
 	};
-	g_tdma_stats[0].phase_hist[62] = 1;
-	g_tdma_stats[0].phase_hist[64] = 2;
-	g_tdma_stats[0].phase_hist[67] = 1;
-	g_tdma_stats[0].raw_phase_hist[60] = 2;
-	g_tdma_stats[0].raw_phase_hist[70] = 2;
-	g_tdma_stats[0].rssi_hist[40] = 1;
-	g_tdma_stats[0].rssi_hist[70] = 3;
-	g_last_ping_rx_time_diff_ticks[0] = 5;
-	g_last_ping_rx_time_diff_valid[0] = true;
-	g_bias_ppb_valid[0] = 1;
-	g_bias_ppb[0] = -120;
-	g_last_ping_isr_rx_ticks_raw[0] = 294912;
-	g_ping_reject_count[0] = 6;
-	g_extrap_skip_count[0] = 7;
-	struct packet_stats packets_before[MAX_TRACKERS];
-	struct tdma_stats phases_before[MAX_TRACKERS];
-	memcpy(packets_before, tracker_stats, sizeof(packets_before));
-	memcpy(phases_before, g_tdma_stats, sizeof(phases_before));
+	tracker_diags[0].stats.phase_hist[62] = 1;
+	tracker_diags[0].stats.phase_hist[64] = 2;
+	tracker_diags[0].stats.phase_hist[67] = 1;
+	tracker_diags[0].stats.raw_phase_hist[60] = 2;
+	tracker_diags[0].stats.raw_phase_hist[70] = 2;
+	tracker_diags[0].stats.rssi_hist[40] = 1;
+	tracker_diags[0].stats.rssi_hist[70] = 3;
+	tracker_diags[0].g_last_ping_rx_time_diff_ticks = 5;
+	tracker_diags[0].g_last_ping_rx_time_diff_valid = true;
+	tracker_diags[0].g_bias_ppb_valid = 1;
+	tracker_diags[0].g_bias_ppb = -120;
+	tracker_diags[0].g_last_ping_isr_rx_ticks_raw = 294912;
+	tracker_diags[0].g_ping_reject_count = 6;
+	tracker_diags[0].g_extrap_skip_count = 7;
+	struct tracker_slot slots_before[MAX_TRACKERS];
+	struct tracker_diag diags_before[MAX_TRACKERS];
+	memcpy(slots_before, tracker_slots, sizeof(slots_before));
+	memcpy(diags_before, tracker_diags, sizeof(diags_before));
 	health_command();
 	expect_snapshot("HEALTH RADIO crc=1 fifo_full=2 invalid_len=3 dup=4\n",
 		"HEALTH SYNC trk=0 bias=5 skew_ppb=-120 bias_valid=1 skew_valid=1 ping_age_ms=1000 ping_rej=6 extrap_skip=7\n");
-	assert(memcmp(packets_before, tracker_stats, sizeof(packets_before)) == 0);
-	assert(memcmp(phases_before, g_tdma_stats, sizeof(phases_before)) == 0);
+	assert(memcmp(slots_before, tracker_slots, sizeof(slots_before)) == 0);
+	assert(memcmp(diags_before, tracker_diags, sizeof(diags_before)) == 0);
 
 	output_length = 0;
 	output[0] = '\0';
 	radio_error = -5;
-	g_last_ping_isr_rx_ticks_raw[0] = 0;
-	g_last_ping_rx_time_diff_valid[0] = false;
-	g_bias_ppb_valid[0] = 0;
+	tracker_diags[0].g_last_ping_isr_rx_ticks_raw = 0;
+	tracker_diags[0].g_last_ping_rx_time_diff_valid = false;
+	tracker_diags[0].g_bias_ppb_valid = 0;
 	health_command();
 	expect_snapshot("HEALTH RADIO unavailable err=-5\n",
 		"HEALTH SYNC trk=0 bias=5 skew_ppb=0 bias_valid=0 skew_valid=0 ping_age_ms=-1 ping_rej=6 extrap_skip=7\n");

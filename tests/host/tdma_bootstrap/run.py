@@ -53,7 +53,7 @@ constants = '\n'.join(re.findall(
     r'RECONFIG_MIN_MS|LOSS_RECONFIG_MIN_MS|CAP_LEVEL_MAX))\b[^\n]*', source, re.MULTILINE))
 constants += '\n' + '\n'.join(re.findall(
     r'^#define ESB_(?:PING|PONG)_\w+\b[^\n]*', header, re.MULTILINE))
-variables = '''tdma_cap_ladder tdma_config_packed tdma_config_epoch
+variables = '''tdma_cap_ladder tdma_config_epoch
     tdma_dynamic_active_count tdma_dynamic_slot_ticks tdma_active_mask
     tdma_last_reconfig_time tdma_last_reconfig_valid tdma_cap_level tdma_published_cap_level
     tdma_loss_trigger_streak_ticks tdma_loss_recover_streak_ticks
@@ -63,7 +63,13 @@ variables = '''tdma_cap_ladder tdma_config_packed tdma_config_epoch
     tdma_shadow_live_evidence_mask tdma_shadow_desired_mask
     tdma_shadow_pending_join_mask tdma_shadow_pending_leave_mask tdma_shadow_desired_changed_at_ms
     tdma_membership_deadline_ms tdma_membership_deadline_armed'''.split()
-declarations = [constants, extract_block(source, r'^enum tdma_shadow_evidence\s*\{', True)]
+declarations = [
+    constants,
+    extract_block(source, r'^struct packet_stats\s*\{', True),
+    extract_block(source, r'^struct tracker_slot\s*\{', True),
+    'static struct tracker_slot tracker_slots[MAX_TRACKERS];',
+    extract_block(source, r'^enum tdma_shadow_evidence\s*\{', True),
+]
 declarations.extend(declaration(name) for name in variables)
 declarations.append(extract.diagnostic_loss_declarations(source))
 functions = [function(name) for name in (
@@ -80,9 +86,9 @@ functions.append(function('esb_receive_ping'))
 functions.append('static bool host_validated_ping(void) {\n'
                  'if (rx_payload.length != ESB_PING_LEN || rx_payload.data[0] != ESB_PING_TYPE) return false;\n'
                  'uint8_t id = rx_payload.data[1];\n'
-                 'uint32_t errors = id < MAX_TRACKERS ? crc_error_count[id] : 0;\n'
+                 'uint32_t errors = id < MAX_TRACKERS ? tracker_slots[id].crc_error_count : 0;\n'
                  'esb_receive_ping(&rx_payload, 0);\n'
-                 'return id < MAX_TRACKERS && crc_error_count[id] == errors;\n}')
+                 'return id < MAX_TRACKERS && tracker_slots[id].crc_error_count == errors;\n}')
 owner = function('esb_stats_thread')
 early_wake = extract_block(owner, r'^[ \t]*if \(\(int64_t\)now < next_monitor_time\)\s*\{')
 functions.append('static void host_early_owner_wake(uint64_t now, int64_t next_monitor_time) {\n'

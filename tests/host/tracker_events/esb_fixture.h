@@ -64,7 +64,6 @@ static struct esb_payload { uint8_t data[72], length, rssi, pipe; } rx_payload;
 static unsigned current_rx_ticks, sequence_calls, slot_calls, evidence_calls, pose_count;
 static int sequence_result;
 static uint8_t last_sequence, poses[8][16];
-static struct packet_stats { uint8_t status_received, status_lost; } tracker_stats[16];
 static int check_packet_sequence(uint8_t tracker, uint8_t sequence) {
     assert(tracker==2); sequence_calls++; last_sequence=sequence; return sequence_result;
 }

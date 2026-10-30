@@ -22,7 +22,7 @@ from c_extract import extract_block
 CASES = ('wrong-type', 'bad-crc', 'wrong-pipe', 'out-of-range', 'interleaved-pipe',
          'ota-status', 'ota-info', 'valid', 'valid-dirty', 'reacquire',
          'event-fallback', 'valid-after-invalid', 'duplicate', 'out-of-order', 'drain',
-         'detailed-warning')
+         'detailed-warning', 'late-metadata')
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source', type=Path, default=ROOT / 'src/connection/esb.c')
 parser.add_argument('--case', action='append', choices=CASES)
@@ -38,6 +38,20 @@ def function(name):
 
 constants = '\n'.join(re.findall(
     r'^#define ESB_(?:PING|PONG|CHANNEL|COMPOSITE|OTA|RAW)_\w+\s+[^\n]+', header, re.M))
+shape_constants = '\n'.join(re.findall(
+    r'^#define (?:RX_PHASE_BUCKETS|RX_RSSI_BUCKETS)\b[^\n]*',
+    source, re.M))
+shape = '\n'.join((
+    shape_constants,
+    extract_block(source, r'^struct packet_stats\s*\{', semicolon=True),
+    extract_block(source, r'^struct tracker_slot\s*\{', semicolon=True),
+    'static struct tracker_slot tracker_slots[MAX_TRACKERS];',
+    '#if defined(CONFIG_TDMA_DIAGNOSTICS)',
+    extract_block(source, r'^struct tdma_stats\s*\{', semicolon=True),
+    extract_block(source, r'^struct tracker_diag\s*\{', semicolon=True),
+    'static struct tracker_diag tracker_diags[MAX_TRACKERS];',
+    '#endif',
+))
 ack = function('esb_ack_handler_cb').split('\t/* Other packet types:', 1)[0] + '\n}\n'
 event = function('event_handler')
 clock = function('account_ping_clock') if re.search(r'^static void account_ping_clock\s*\(', source, re.M) else ''
@@ -52,6 +66,7 @@ auto_channel += '\n' + extract_block(
     auto_enabled_source, r'^bool auto_channel_receive\s*\([^;{}]*\)\s*\{')
 fixture = fixture.replace('/* ACTUAL AUTO CHANNEL */', auto_channel)
 fixture = fixture.replace('/* PROTOCOL CONSTANTS */', constants)
+fixture = fixture.replace('/* PRODUCTION STATE */', shape)
 fixture = fixture.replace('/* ACTUAL PRODUCTION FUNCTIONS */',
                           '\n\n'.join((lengths, clock, ack, packet_helpers, event)))
 

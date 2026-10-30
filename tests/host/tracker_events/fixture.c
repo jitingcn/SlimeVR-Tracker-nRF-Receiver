@@ -246,7 +246,7 @@ static void pairing(void)
     tdma_dynamic_active_count=1;
     tdma_dynamic_slot_ticks=TDMA_SLOT_TICKS_MAX_LEVEL0;
     tdma_config_epoch=1;
-    tdma_config_packed[2]=tdma_pack_config(0, 1, tdma_dynamic_slot_ticks, tdma_config_epoch);
+    tracker_slots[2].tdma_config_packed=tdma_pack_config(0, 1, tdma_dynamic_slot_ticks, tdma_config_epoch);
     atomic_set(&tdma_shadow_desired_mask, BIT(2));
     tdma_last_reconfig_time=host_now;
     tdma_last_reconfig_valid=true;
