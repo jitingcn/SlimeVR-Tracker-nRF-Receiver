@@ -22,6 +22,7 @@
 */
 #include "usb.h"
 #include "console.h"
+#include "data_collect.h"
 
 #include <hal/nrf_power.h>
 #include <zephyr/kernel.h>
@@ -293,7 +294,16 @@ static void status_cb(struct usbd_context *const ctx, const struct usbd_msg *con
 
 static void usb_init_thread(void)
 {
-	int ret = usbd_setup(status_cb);
+	int ret;
+
+#if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)
+	ret = data_collect_init();
+	if (ret != 0) {
+		return;
+	}
+#endif
+
+	ret = usbd_setup(status_cb);
 	if (ret != 0) {
 		return;
 	}

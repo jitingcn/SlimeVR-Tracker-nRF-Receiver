@@ -845,14 +845,6 @@ void console_serial_start(void)
 		return;
 	}
 
-#if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)
-	static bool data_collect_initialized;
-	if (!data_collect_initialized) {
-		data_collect_init();
-		data_collect_initialized = true;
-	}
-#endif
-
 	k_spinlock_key_t key = k_spin_lock(&console_input.lock);
 	if (console_input.active) {
 		k_spin_unlock(&console_input.lock, key);
