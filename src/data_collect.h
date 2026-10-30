@@ -28,6 +28,9 @@
 
 #ifdef CONFIG_DATA_COLLECT
 
+/* Clears single and batch session state.
+ * CDC initializes once in usb_init_thread before USB setup. HID uses SYS_INIT.
+ * Opening the console does not reinitialize either backend. */
 int data_collect_init(void);
 
 /* Write a raw data packet.
