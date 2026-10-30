@@ -29,8 +29,9 @@
 bool receiver_ota_is_active(void);
 
 /**
- * Process a HID OUT report for receiver self-OTA.
- * Called from HID read work handler (thread context) when tracker_id == 0xFE.
+ * Process a HID OUT report for receiver self-OTA in thread context.
+ * Calls must be serialized by the caller. DATA intake can wait up to five
+ * seconds for a flash writer slot or a queue submission.
  *
  * DATA carries fixed 60-byte image chunks after its 4-byte header. The final
  * chunk may contain exactly the remaining image bytes or use a padded 64-byte

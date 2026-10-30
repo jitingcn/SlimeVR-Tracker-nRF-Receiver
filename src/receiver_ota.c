@@ -74,10 +74,9 @@ LOG_MODULE_REGISTER(receiver_ota, LOG_LEVEL_INF);
 /* ── Flash writer thread ─────────────────────────────────────────── */
 
 /*
- * Flash erase takes ~85ms per page, blocking the caller. We use a
- * dedicated thread + double-buffering so that the HID work-queue
- * callback only performs fast memcpy into the page buffer and is never
- * blocked by flash operations.  This keeps the USB stack responsive.
+ * Flash erase takes ~85ms per page, blocking the caller. A dedicated writer
+ * and two page slots let HID intake proceed while flash operations run.
+ * Intake waits up to 5 seconds when its next slot is still in use.
  */
 
 #define RCV_OTA_WRITER_STACK_SIZE  4096
@@ -159,11 +158,10 @@ static struct {
 	uint32_t staging_base;
 	uint32_t target_flash_base;     /* Destination base address for the new firmware */
 
-	/* Double-buffered page accumulation */
-	uint8_t  page_buf[RCV_OTA_FLASH_PAGE_SIZE];
+	/* At handler boundaries a positive offset means the producer owns the slot. */
 	uint16_t page_buf_offset;
 	uint32_t page_buf_flash_addr;
-	uint8_t  next_write_slot;  /* 0 or 1 — which page_write_reqs slot to use */
+	uint8_t  next_write_slot;
 
 	/* Status throttle */
 	int64_t  last_status_time;
@@ -552,7 +550,6 @@ static void rcv_ota_handle_begin(const uint8_t *data, size_t len)
 	rcv_ota.target_flash_base = RCV_OTA_USE_MCUBOOT ? 0 :
 		((flash_base != 0) ? flash_base : RCV_OTA_FLASH_BASE);
 	rcv_ota.state = RCV_OTA_READY;
-	memset(rcv_ota.page_buf, 0xFF, sizeof(rcv_ota.page_buf));
 
 #if !RCV_OTA_USE_MCUBOOT
 	if (rcv_ota.target_flash_base != RCV_OTA_FLASH_BASE) {
@@ -658,8 +655,18 @@ static void rcv_ota_handle_data(const uint8_t *data, size_t len)
 	while (copied < payload_len) {
 		size_t space = RCV_OTA_FLASH_PAGE_SIZE - rcv_ota.page_buf_offset;
 		size_t chunk = MIN(space, payload_len - copied);
+		uint8_t slot = rcv_ota.next_write_slot;
 
-		memcpy(&rcv_ota.page_buf[rcv_ota.page_buf_offset], &payload[copied], chunk);
+		if (rcv_ota.page_buf_offset == 0 &&
+		    k_sem_take(slot_sems[slot], K_MSEC(5000)) != 0) {
+			LOG_ERR("RCV OTA: slot %u busy (timeout)", slot);
+			rcv_ota.state = RCV_OTA_ERROR;
+			rcv_ota.error_code = OTA_STATUS_FLASH_ERROR;
+			rcv_ota_send_status();
+			return;
+		}
+
+		memcpy(&page_write_reqs[slot].data[rcv_ota.page_buf_offset], &payload[copied], chunk);
 		rcv_ota.page_buf_offset += chunk;
 		copied += chunk;
 
@@ -821,10 +828,10 @@ static void rcv_ota_writer_fn(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		/* Release slot so it can be reused */
-		k_sem_give(slot_sems[cmd]);
-
 		LOG_DBG("RCV OTA: wrote %u bytes to flash 0x%05X", req->len, addr);
+
+		/* Release slot only after the final access to its request. */
+		k_sem_give(slot_sems[cmd]);
 	}
 }
 
@@ -864,6 +871,12 @@ static int rcv_ota_stop_writer(void)
 	if (err) {
 		LOG_ERR("RCV OTA: writer stop failed (%d); session retained", err);
 		return err;
+	}
+
+	/* An unsubmitted page remains producer-owned until the writer is joined. */
+	if (rcv_ota.page_buf_offset > 0) {
+		k_sem_give(slot_sems[rcv_ota.next_write_slot]);
+		rcv_ota.page_buf_offset = 0;
 	}
 
 	writer_created = false;
@@ -1003,18 +1016,10 @@ static int rcv_ota_flush_page_buf(void)
 		return -EIO;
 	}
 
-	/* Copy page buffer into next write slot */
+	/* The producer already owns this slot while the page is nonempty. */
 	uint8_t slot = rcv_ota.next_write_slot;
 	struct page_write_req *req = &page_write_reqs[slot];
 
-	/* Wait until the writer thread finishes with this slot */
-	int sem_ret = k_sem_take(slot_sems[slot], K_MSEC(5000));
-	if (sem_ret != 0) {
-		LOG_ERR("RCV OTA: slot %u busy (timeout)", slot);
-		return -EBUSY;
-	}
-
-	memcpy(req->data, rcv_ota.page_buf, rcv_ota.page_buf_offset);
 	/* Fill remainder with 0xFF */
 	if (rcv_ota.page_buf_offset < RCV_OTA_FLASH_PAGE_SIZE) {
 		memset(&req->data[rcv_ota.page_buf_offset], 0xFF,
@@ -1023,20 +1028,17 @@ static int rcv_ota_flush_page_buf(void)
 	req->addr = rcv_ota.page_buf_flash_addr;
 	req->len = rcv_ota.page_buf_offset;
 
-	/* Submit to writer thread (blocks if both slots are busy) */
+	/* Successful submission transfers ownership to the writer. */
 	int ret = k_msgq_put(&page_write_msgq, &slot, K_MSEC(5000));
 	if (ret != 0) {
 		LOG_ERR("RCV OTA: page write queue full (timeout)");
-		k_sem_give(slot_sems[slot]);
+		/* The producer retains the unsubmitted page until retirement. */
 		return -ENOSPC;
 	}
 
-	rcv_ota.next_write_slot = 1 - slot; /* alternate 0/1 */
-
-	/* Advance to next page */
+	rcv_ota.next_write_slot = 1 - slot;
 	rcv_ota.page_buf_flash_addr += RCV_OTA_FLASH_PAGE_SIZE;
 	rcv_ota.page_buf_offset = 0;
-	memset(rcv_ota.page_buf, 0xFF, sizeof(rcv_ota.page_buf));
 
 	return 0;
 }
