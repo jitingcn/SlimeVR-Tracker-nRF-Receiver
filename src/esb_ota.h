@@ -81,7 +81,7 @@
 
 /**
  * Check if an OTA session is active for any tracker.
- * ISR-safe (reads volatile).
+ * ISR-safe. Uses a short spinlock and does not sleep.
  */
 bool esb_ota_relay_is_active(void);
 

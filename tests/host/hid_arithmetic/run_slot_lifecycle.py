@@ -43,10 +43,25 @@ ota_decls = ota[ota.index('struct ota_tx_entry {'):ota.index('static void fw_inf
 ota_fixture = common + r'''
 #define OTA_MAX_PARALLEL 4
 #define OTA_TX_RING_SIZE 128
+struct k_spinlock { unsigned int unused; };
+typedef unsigned int k_spinlock_key_t;
+static bool relay_locked;
+static k_spinlock_key_t k_spin_lock(struct k_spinlock *lock) {
+    (void)lock;
+    assert(!relay_locked);
+    relay_locked=true;
+    return irq_lock();
+}
+static void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key) {
+    (void)lock;
+    assert(relay_locked);
+    relay_locked=false;
+    irq_unlock(key);
+}
 static unsigned int releases;
-static void unsuppress_all_trackers(void) { assert(depth==0); releases++; }
+static void unsuppress_all_trackers(void) { assert(depth==0 && !relay_locked); releases++; }
 ''' + ota_decls + '\n'.join(function(ota, name) for name in (
-    'remove_target_locked', 'remove_target', 'esb_ota_forget_tracker')) + r'''
+    'remove_target_locked', 'esb_ota_forget_tracker')) + r'''
 int main(void) {
     ota_relay.active=true;
     ota_relay.num_targets=2;
