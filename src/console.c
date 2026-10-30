@@ -1073,7 +1073,7 @@ static void console_thread(void)
 				print_channelauto_status();
 			}
 		} else if (strcmp(argv[0], command_rssi_scan) == 0) {
-			/* Same busy gate as HID; avoids concurrent esb_deinitialize. */
+			/* Use the same radio-operation busy gate as HID. */
 			uint8_t st = rcv_cmd_rssi_scan();
 			if (st == RCV_HID_ST_EBUSY) {
 				printk("RSSI scan already in progress\n");

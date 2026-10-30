@@ -3066,22 +3066,6 @@ int esb_radio_operation_stop(void)
 	return esb_radio_quiesce();
 }
 
-void esb_deinitialize(void)
-{
-	LOG_INF("ESB deinitialize requested");
-	if (esb_initialized) {
-		esb_initialized = false;
-		LOG_INF("Deinitializing ESB");
-		k_msleep(10); // wait for pending transmissions
-		if (esb_initialized) {
-			LOG_INF("ESB denitialize cancelled");
-			return;
-		}
-		esb_disable();
-	}
-	esb_initialized = false;
-}
-
 // Unified mode: pipe 0 uses discovery address (pairing), pipes 1-7 use paired address (data)
 void esb_set_addr_unified(void)
 {

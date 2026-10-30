@@ -152,7 +152,6 @@ int clocks_start(void);
 int esb_initialize(bool);
 /* Internal background transactions suppress only routine initialization INFO. */
 int esb_initialize_quiet(bool tx);
-void esb_deinitialize(void);
 
 void esb_set_addr_unified(void);
 

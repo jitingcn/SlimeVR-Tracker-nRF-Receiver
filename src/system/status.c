@@ -102,9 +102,3 @@ static void status_thread(void) {
 		}
 	}
 }
-
-bool status_ready(void)  // true if no important statuses are active
-{
-	return (status_state & ~SYS_STATUS_CONNECTION_ERROR)
-		== 0;  // connection error is temporary, not critical
-}
