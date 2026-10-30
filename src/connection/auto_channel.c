@@ -3,6 +3,7 @@
 #include "connection/esb.h"
 #include "connection/rssi_scan.h"
 #include "connection/rssi_scan_fem.h"
+#include "thread_priority.h"
 #include <esb.h>
 #include <hal/nrf_radio.h>
 #include <zephyr/kernel.h>
@@ -658,7 +659,8 @@ static void auto_thread(void *a, void *b, void *c)
 		if (delay > 0) k_msleep(delay);
 	}
 }
-K_THREAD_DEFINE(auto_channel_worker, 2048, auto_thread, NULL, NULL, NULL, 8, 0, 0);
+K_THREAD_DEFINE(auto_channel_worker, 2048, auto_thread, NULL, NULL, NULL,
+		AUTO_CHANNEL_THREAD_PRIORITY, 0, 0);
 
 void auto_channel_init(const uint8_t identity[6])
 {
