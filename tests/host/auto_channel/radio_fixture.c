@@ -83,6 +83,23 @@ static const struct esb_payload *dma_payload;
 static unsigned status_errors;
 static unsigned irq_lock(void) { return 0; }
 static void irq_unlock(unsigned key) { (void)key; }
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+struct k_spinlock { bool held; };
+typedef unsigned int k_spinlock_key_t;
+static k_spinlock_key_t k_spin_lock(struct k_spinlock *lock)
+{
+    k_spinlock_key_t key = irq_lock();
+    assert(!lock->held);
+    lock->held = true;
+    return key;
+}
+static void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key)
+{
+    assert(lock->held);
+    lock->held = false;
+    irq_unlock(key);
+}
+#endif
 static int64_t k_uptime_get(void) { return 1234; }
 static uint32_t k_uptime_get_32(void) { return 1234; }
 static int k_msgq_put(void *queue, const void *item, int timeout);

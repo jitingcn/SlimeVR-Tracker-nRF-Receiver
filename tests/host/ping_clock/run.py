@@ -50,6 +50,7 @@ shape = '\n'.join((
     extract_block(source, r'^struct tdma_stats\s*\{', semicolon=True),
     extract_block(source, r'^struct tracker_diag\s*\{', semicolon=True),
     'static struct tracker_diag tracker_diags[MAX_TRACKERS];',
+    '\n'.join(re.findall(r'^static struct k_spinlock tdma_timestamp_lock;', source, re.M)),
     '#endif',
 ))
 ack = function('esb_ack_handler_cb').split('\t/* Other packet types:', 1)[0] + '\n}\n'

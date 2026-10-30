@@ -97,6 +97,26 @@ static bool esb_ota_relay_abort_pending(uint8_t id) { return abort_pending[id]; 
 static unsigned irq_depth;
 static unsigned irq_lock(void) { return irq_depth++; }
 static void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth = key; }
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+struct k_spinlock { bool held; };
+typedef struct {
+	struct k_spinlock *lock;
+	unsigned int irq_key;
+} k_spinlock_key_t;
+static k_spinlock_key_t k_spin_lock(struct k_spinlock *lock)
+{
+	unsigned int key = irq_lock();
+	assert(!lock->held);
+	lock->held = true;
+	return (k_spinlock_key_t){.lock = lock, .irq_key = key};
+}
+static void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key)
+{
+	assert(lock == key.lock && lock->held);
+	lock->held = false;
+	irq_unlock(key.irq_key);
+}
+#endif
 static void k_sem_give(struct fixture_sem *sem) { assert(!irq_depth); sem->count = 1; }
 static void hid_reset_rssi_smooth(uint8_t id) { assert(irq_depth == 0); }
 static void tdma_sync_stats_reset(void) {}
@@ -287,6 +307,37 @@ static void ping_restart_sequence(void)
 	assert(tracker_slots[3].stats.total_gaps == 0);
 	assert(tracker_slots[3].stats.total_received == 2);
 	assert(tdma_cap_level == 3); /* Reboot is not permission to raise rate. */
+}
+
+static void diagnostic_ping_clock(void)
+{
+	struct esb_payload ping = {.length = ESB_PING_LEN, .pipe = 4};
+	ping.data[0] = ESB_PING_TYPE;
+	ping.data[1] = 3;
+	ping.data[6] = 100;
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+	tracker_diags[3].g_ping_isr_rx_ticks = 110;
+	tracker_diags[3].g_ping_isr_rx_ticks_valid = true;
+#endif
+	ping.data[ESB_PING_LEN - 1] = crc8_ccitt(0x07, ping.data, ESB_PING_LEN - 1);
+	esb_receive_ping(&ping, 120);
+	assert(tracker_slots[3].ping_counter_initialized);
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+	assert(tracker_diags[3].g_last_ping_rx_time_diff_valid);
+	assert(tracker_diags[3].g_last_ping_rx_time_diff_ticks == 5);
+#endif
+
+	ping.pipe = 3;
+	ping.data[1] = 2;
+	ping.data[ESB_PING_LEN - 1] = crc8_ccitt(0x07, ping.data, ESB_PING_LEN - 1);
+	esb_receive_ping(&ping, 127);
+	assert(tracker_slots[2].ping_counter_initialized);
+	assert((uint32_t)atomic_get(&tdma_shadow_live_evidence_mask) == (BIT(2) | BIT(3)));
+	assert(irq_depth == 0);
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+	assert(tracker_diags[2].g_last_ping_rx_time_diff_valid);
+	assert(tracker_diags[2].g_last_ping_rx_time_diff_ticks == 22);
+#endif
 }
 
 static void sequence_wrap(void)
@@ -653,6 +704,7 @@ static const struct {
 	{"counter-wrap", counter_wrap},
 	{"restart-breaks-evidence", restart_breaks_evidence},
 	{"ping-restart-sequence", ping_restart_sequence},
+	{"diagnostic-ping-clock", diagnostic_ping_clock},
 	{"sequence-wrap", sequence_wrap},
 	{"pending-publication", pending_publication},
 	{"excluded-modes", excluded_modes},

@@ -139,7 +139,7 @@ struct packet_stats {
 
 struct tracker_slot {
 	/* One aligned word: assigned slot, total slots, slot ticks, epoch. */
-	volatile uint32_t tdma_config_packed;
+	uint32_t tdma_config_packed;
 	uint32_t tdma_prev_recv;
 	uint32_t tdma_prev_gaps;
 	uint32_t tdma_prev_restarts;
@@ -154,19 +154,19 @@ struct tracker_slot {
 	uint16_t last_raw_seq;
 	bool last_raw_valid;
 	/* Shared ACK tuples are published under irq_lock with their command flag. */
-	volatile uint8_t tracker_remote_command;
-	volatile uint8_t pending_cmd_arg;
-	volatile uint16_t tracker_test_on_tps;
-	volatile int16_t pending_sens_data[3];
-	volatile uint8_t pending_sens_auto_axis;
-	volatile uint16_t pending_sens_auto_revolutions;
+	uint8_t tracker_remote_command;
+	uint8_t pending_cmd_arg;
+	uint16_t tracker_test_on_tps;
+	int16_t pending_sens_data[3];
+	uint8_t pending_sens_auto_axis;
+	uint16_t pending_sens_auto_revolutions;
 	/* Active and pending metadata requests have independent tokens. */
-	volatile uint8_t metadata_active_mask;
-	volatile uint8_t metadata_active_chunk;
-	volatile uint16_t metadata_active_token;
-	volatile uint8_t metadata_pending_mask;
-	volatile uint8_t metadata_pending_chunk;
-	volatile uint16_t metadata_pending_token;
+	uint8_t metadata_active_mask;
+	uint8_t metadata_active_chunk;
+	uint16_t metadata_active_token;
+	uint8_t metadata_pending_mask;
+	uint8_t metadata_pending_chunk;
+	uint16_t metadata_pending_token;
 	uint16_t wom_token;
 	uint16_t wom_minutes;
 	uint16_t wom_error;
@@ -247,8 +247,8 @@ static atomic_t test_all_state_valid;
 static atomic_t test_all_enabled;
 static atomic_t test_all_broadcasting;
 static atomic_t test_all_confirmed_mask;
-static volatile uint16_t test_all_requested_tps;
-static volatile uint16_t test_all_effective_tps;
+static uint16_t test_all_requested_tps;
+static uint16_t test_all_effective_tps;
 static atomic_t test_all_ready_after_ms[MAX_TRACKERS];
 static atomic_t test_all_generation; /* bumped by every test command; stale broadcasts abort */
 static K_MUTEX_DEFINE(test_all_mutex); /* serializes whole all-target helper bodies */
@@ -472,12 +472,16 @@ static void test_all_invalidate_tracker(uint8_t tracker_id, int64_t now_ms)
 
 static void test_all_update_effective(uint8_t active_count, int64_t now, bool layout_changed)
 {
+	unsigned int key = irq_lock();
 	if (!atomic_get(&test_all_state_valid) || !atomic_get(&test_all_enabled)) {
+		irq_unlock(key);
 		return;
 	}
 	uint16_t requested = test_all_requested_value();
-	uint16_t effective = MIN(requested, test_all_capacity_tps(active_count));
+	uint16_t capacity = test_all_capacity_tps(active_count);
+	uint16_t effective = MIN(requested, capacity);
 	if (effective == test_all_effective_tps) {
+		irq_unlock(key);
 		return;
 	}
 	test_all_effective_tps = effective;
@@ -493,22 +497,26 @@ static void test_all_update_effective(uint8_t active_count, int64_t now, bool la
 			(atomic_val_t)((uint32_t)now + (layout_changed ? TEST_ALL_JOIN_CONFIG_GRACE_MS : 0))
 		);
 	}
+	irq_unlock(key);
 	LOG_INF(
 		"Sticky TEST_MODE_ON reclamp: requested=%u effective=%u active=%u capacity=%u",
 		requested,
 		effective,
 		active_count,
-		test_all_capacity_tps(active_count)
+		capacity
 	);
 }
 
 static void test_all_note_layout(uint32_t old_mask, uint32_t new_mask, int64_t now)
 {
+	unsigned int key = irq_lock();
 	if (!atomic_get(&test_all_state_valid)) {
+		irq_unlock(key);
 		return;
 	}
 	uint32_t joined_mask = new_mask & ~old_mask;
 	if (joined_mask == 0) {
+		irq_unlock(key);
 		return;
 	}
 	atomic_and(&test_all_confirmed_mask, (atomic_val_t)~joined_mask);
@@ -524,6 +532,7 @@ static void test_all_note_layout(uint32_t old_mask, uint32_t new_mask, int64_t n
 			atomic_set(&test_all_ready_after_ms[i], (atomic_val_t)((uint32_t)now + TEST_ALL_JOIN_CONFIG_GRACE_MS));
 		}
 	}
+	irq_unlock(key);
 }
 
 static void test_all_reconcile(int64_t now)
@@ -809,7 +818,7 @@ static int64_t pairing_start_time = 0;
 static uint8_t pairing_target_count = 0;                  // 0 = no limit, >0 = exit after N new devices
 static uint8_t pairing_initial_count = 0;                 // Number of devices when pairing started
 static int64_t pairing_target_reached_time = 0;           // Time when target count was reached (for delayed exit)
-static volatile bool pairing_new_devices_blocked = false; // When true, only allow re-pairing of known devices
+static atomic_t pairing_new_devices_blocked; // When set, only allow re-pairing of known devices
 #define PAIRING_EXIT_DELAY_MS 15000                       // Delay before exiting after target count reached
 
 // Cached receiver device address (set once at init, used by ISR for pairing responses)
@@ -910,9 +919,9 @@ void esb_auto_loss_rebase(struct esb_auto_loss_snapshot *out)
 #define TPS_MONITOR_INTERVAL_MS 500
 
 // Statistics display control
-static volatile bool stats_detailed_enabled = false; // Whether detailed stats are enabled
-static volatile int64_t stats_detailed_end_time
-	= 0;                                // Timestamp when detailed stats should auto-disable (0 = no auto-disable)
+static struct k_spinlock stats_display_lock;
+static bool stats_detailed_enabled;
+static int64_t stats_detailed_end_time; // 0 = no auto-disable
 static int64_t last_tps_print_time = 0; // Last time total TPS was printed
 
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
@@ -946,10 +955,10 @@ struct tracker_diag {
 	int32_t g_last_ping_rx_time_diff_ticks;
 	bool g_last_ping_rx_time_diff_valid;
 	/* RADIO timestamps avoid EVENT IRQ scheduling delay. */
-	volatile uint32_t g_ping_isr_rx_ticks;
-	volatile bool g_ping_isr_rx_ticks_valid;
-	volatile uint32_t g_last_isr_rx_ticks;
-	volatile bool g_last_isr_rx_valid;
+	uint32_t g_ping_isr_rx_ticks;
+	bool g_ping_isr_rx_ticks_valid;
+	uint32_t g_last_isr_rx_ticks;
+	bool g_last_isr_rx_valid;
 	/* 0 = unavailable, 1 = initial estimate, 2 = mature estimate. */
 	uint8_t g_bias_ppb_valid;
 	int32_t g_bias_ppb;
@@ -962,6 +971,8 @@ struct tracker_diag {
 };
 
 static struct tracker_diag tracker_diags[MAX_TRACKERS];
+/* Full slot reset retains its outer IRQ exclusion on the single-core receiver. */
+static struct k_spinlock tdma_timestamp_lock;
 
 #endif
 
@@ -1153,8 +1164,12 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks, int8_t rssi)
 	 * (delayed 10-25+ ticks by kernel scheduling).  The ISR timestamp is
 	 * now available for ALL packets including NoACK data, thanks to the
 	 * ESB library patch that always calls on_radio_disabled_rx_dpl(). */
-	if (tracker_diags[tracker_id].g_last_isr_rx_valid) {
-		rx_ticks = tracker_diags[tracker_id].g_last_isr_rx_ticks;
+	k_spinlock_key_t timestamp_key = k_spin_lock(&tdma_timestamp_lock);
+	bool timestamp_valid = tracker_diags[tracker_id].g_last_isr_rx_valid;
+	uint32_t timestamp_ticks = tracker_diags[tracker_id].g_last_isr_rx_ticks;
+	k_spin_unlock(&tdma_timestamp_lock, timestamp_key);
+	if (timestamp_valid) {
+		rx_ticks = timestamp_ticks;
 	}
 
 	/* Read dynamic TDMA config (atomic 32-bit load) */
@@ -1591,12 +1606,16 @@ static void esb_stats_thread(void)
 		}
 
 		// Check if detailed stats should be auto-disabled
-		if (stats_detailed_enabled && stats_detailed_end_time > 0) {
-			if (now >= stats_detailed_end_time) {
-				stats_detailed_enabled = false;
-				stats_detailed_end_time = 0;
-				LOG_INF("Detailed stats auto-disabled");
-			}
+		bool display_expired = false;
+		k_spinlock_key_t display_key = k_spin_lock(&stats_display_lock);
+		if (stats_detailed_enabled && stats_detailed_end_time > 0 && now >= stats_detailed_end_time) {
+			stats_detailed_enabled = false;
+			stats_detailed_end_time = 0;
+			display_expired = true;
+		}
+		k_spin_unlock(&stats_display_lock, display_key);
+		if (display_expired) {
+			LOG_INF("Detailed stats auto-disabled");
 		}
 
 		// Print total TPS every second (always)
@@ -1623,7 +1642,7 @@ static void esb_stats_thread(void)
 		}
 
 		// Print detailed stats only when enabled
-		if (stats_detailed_enabled) {
+		if (esb_get_stats_detailed_enabled()) {
 			static int64_t last_detailed_log_time = 0;
 			if (last_detailed_log_time == 0) {
 				last_detailed_log_time = now;
@@ -1651,7 +1670,7 @@ static void esb_stats_thread(void)
 /* ---------------------------------------------------------------------------
  * Raw data ARQ — sequence tracking and retransmit requests via ACK payload.
  *
- * All state is volatile for ISR access.  Only the target tracker is tracked.
+ * Only the target tracker is tracked; resets exclude the RADIO IRQ.
  * Gap queue holds up to RAW_ARQ_MAX_GAPS missing sequence numbers.
  * Each ACK payload carries up to RAW_ARQ_MAX_GAPS retransmit requests.
  *
@@ -1669,13 +1688,12 @@ static void esb_stats_thread(void)
  * 32 packets of reserve for ACK processing and transport delay. */
 #define RAW_ARQ_STALE_DISTANCE 96
 
-static volatile uint16_t raw_arq_expected_seq;
-static volatile bool raw_arq_seq_initialized;
-static volatile uint16_t raw_arq_gap_queue[RAW_ARQ_MAX_GAPS];
-static volatile uint8_t raw_arq_gap_count;
-/* Counters for diagnostics (read by event_handler, not ISR-critical) */
-static volatile uint32_t raw_arq_gaps_detected;
-static volatile uint32_t raw_arq_retransmits_received;
+static uint16_t raw_arq_expected_seq;
+static bool raw_arq_seq_initialized;
+static uint16_t raw_arq_gap_queue[RAW_ARQ_MAX_GAPS];
+static uint8_t raw_arq_gap_count;
+static uint32_t raw_arq_gaps_detected;
+static uint32_t raw_arq_retransmits_received;
 
 /* Called from esb_ack_handler_cb (ISR context) when raw data packet arrives.
  * Updates gap queue and builds ACK payload with retransmit requests. */
@@ -1770,8 +1788,7 @@ static void raw_arq_reset(void)
  * Builds the ACK payload for the *current* packet so the response is
  * returned in the same transaction rather than the next one.
  *
- * Only reads pre-computed volatile state written by event_handler / threads.
- * No blocking, no logging, no locks.
+ * Samples state published by event_handler and threads without blocking or logging.
  * -------------------------------------------------------------------------*/
 static void esb_ack_handler_cb(
 	const uint8_t *pdu_data,
@@ -1818,7 +1835,7 @@ static void esb_ack_handler_cb(
 			return;
 		}
 
-		if (pairing_new_devices_blocked && known_id < 0) {
+		if (atomic_get(&pairing_new_devices_blocked) && known_id < 0) {
 			*suppress_ack = true;
 			return;
 		}
@@ -1859,8 +1876,11 @@ static void esb_ack_handler_cb(
 	if (data_length > 1 && pipe_id > 0) {
 		uint8_t tid = pdu_data[1];
 		if (tid < MAX_TRACKERS) {
-			tracker_diags[tid].g_last_isr_rx_ticks = k_uptime_ticks();
+			uint32_t timestamp_ticks = k_uptime_ticks();
+			k_spinlock_key_t timestamp_key = k_spin_lock(&tdma_timestamp_lock);
+			tracker_diags[tid].g_last_isr_rx_ticks = timestamp_ticks;
 			tracker_diags[tid].g_last_isr_rx_valid = true;
+			k_spin_unlock(&tdma_timestamp_lock, timestamp_key);
 		}
 	}
 #endif
@@ -1923,8 +1943,10 @@ static void esb_ack_handler_cb(
 		}
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 		if (pipe_id == 1U + (tracker_id % 7)) {
+			k_spinlock_key_t timestamp_key = k_spin_lock(&tdma_timestamp_lock);
 			tracker_diags[tracker_id].g_ping_isr_rx_ticks = rx_ticks;
 			tracker_diags[tracker_id].g_ping_isr_rx_ticks_valid = true;
+			k_spin_unlock(&tdma_timestamp_lock, timestamp_key);
 		}
 #endif
 
@@ -1951,8 +1973,9 @@ static void esb_ack_handler_cb(
 			ack_payload->data[10] = 0;
 			ack_payload->data[11] = 0;
 		} else if (cmd == ESB_PONG_FLAG_SENS_AUTO) {
+			uint8_t axis = tracker_slots[tracker_id].pending_sens_auto_axis;
 			uint16_t rev = tracker_slots[tracker_id].pending_sens_auto_revolutions;
-			ack_payload->data[3] = tracker_slots[tracker_id].pending_sens_auto_axis;
+			ack_payload->data[3] = axis;
 			ack_payload->data[4] = (rev >> 8) & 0xFF;
 			ack_payload->data[5] = (rev) & 0xFF;
 			ack_payload->data[6] = 0;
@@ -1974,18 +1997,23 @@ static void esb_ack_handler_cb(
 				ack_payload->data[10] = (ch >> 8) & 0xFF;
 				ack_payload->data[11] = (ch) & 0xFF;
 			} else if (cmd == ESB_PONG_FLAG_WOM_CONTROL) {
-				ack_payload->data[8] = tracker_slots[tracker_id].wom_minutes >> 8;
-				ack_payload->data[9] = tracker_slots[tracker_id].wom_minutes & 0xff;
-				ack_payload->data[10] = tracker_slots[tracker_id].wom_token >> 8;
-				ack_payload->data[11] = tracker_slots[tracker_id].wom_token & 0xff;
+				uint16_t minutes = tracker_slots[tracker_id].wom_minutes;
+				uint16_t token = tracker_slots[tracker_id].wom_token;
+				ack_payload->data[8] = minutes >> 8;
+				ack_payload->data[9] = minutes & 0xff;
+				ack_payload->data[10] = token >> 8;
+				ack_payload->data[11] = token & 0xff;
 			} else if (cmd == ESB_PONG_FLAG_TEST_MODE_ON) {
-				ack_payload->data[8] = (tracker_slots[tracker_id].tracker_test_on_tps >> 8) & 0xFF;
-				ack_payload->data[9] = tracker_slots[tracker_id].tracker_test_on_tps & 0xFF;
+				uint16_t tps = tracker_slots[tracker_id].tracker_test_on_tps;
+				ack_payload->data[8] = (tps >> 8) & 0xFF;
+				ack_payload->data[9] = tps & 0xFF;
 				ack_payload->data[10] = 0;
 			} else if (cmd == ESB_PONG_FLAG_METADATA_REQUEST) {
-				ack_payload->data[8] = tracker_slots[tracker_id].metadata_active_mask;
-				ack_payload->data[9] = tracker_slots[tracker_id].metadata_active_chunk;
+				uint8_t mask = tracker_slots[tracker_id].metadata_active_mask;
+				uint8_t chunk = tracker_slots[tracker_id].metadata_active_chunk;
 				uint16_t token = tracker_slots[tracker_id].metadata_active_token;
+				ack_payload->data[8] = mask;
+				ack_payload->data[9] = chunk;
 				ack_payload->data[10] = (token >> 8) & 0xFF;
 				ack_payload->data[11] = token & 0xFF;
 			} else if (cmd == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
@@ -2089,8 +2117,11 @@ static void account_ping_clock(uint8_t tracker_id, uint32_t expected_rx_ticks, u
 	struct tdma_stats *stats = &tracker_diags[tracker_id].stats;
 
 	/* Use RADIO ISR timestamp to avoid EVENT_IRQ scheduling jitter. */
-	uint32_t isr_rx_ticks
-		= tracker_diags[tracker_id].g_ping_isr_rx_ticks_valid ? tracker_diags[tracker_id].g_ping_isr_rx_ticks : current_rx_ticks;
+	k_spinlock_key_t timestamp_key = k_spin_lock(&tdma_timestamp_lock);
+	bool timestamp_valid = tracker_diags[tracker_id].g_ping_isr_rx_ticks_valid;
+	uint32_t timestamp_ticks = tracker_diags[tracker_id].g_ping_isr_rx_ticks;
+	k_spin_unlock(&tdma_timestamp_lock, timestamp_key);
+	uint32_t isr_rx_ticks = timestamp_valid ? timestamp_ticks : current_rx_ticks;
 	int32_t rx_time_diff_ticks = (int32_t)(isr_rx_ticks - expected_rx_ticks);
 
 	/* The tracker estimates TX start, but the ISR samples after the complete
@@ -2686,7 +2717,7 @@ void event_handler(struct esb_evt const *event)
 					}
 
 					// Check if new devices are blocked (target count reached, waiting for exit delay)
-					if (pairing_new_devices_blocked && known_id < 0) {
+					if (atomic_get(&pairing_new_devices_blocked) && known_id < 0) {
 						LOG_INF("Pairing request from unknown %012llX rejected (target count reached)", found_addr);
 						break;
 					}
@@ -3079,62 +3110,12 @@ void esb_set_addr_unified(void)
 /* Caller holds tracker_store_lock and irq_lock. A slot is a new session. */
 static void tracker_slot_reset(uint8_t id)
 {
-	tracker_slots[id].last_packet_sequence = 0;
-	tracker_slots[id].sequence_initialized = false;
-	tracker_slots[id].last_ping_counter = 0;
-	tracker_slots[id].ping_counter_initialized = false;
-	tracker_slots[id].last_ping_time = 0;
-	tracker_slots[id].last_pong_queued_counter = 0;
-	tracker_slots[id].pipe_mismatch_count = 0;
-	tracker_slots[id].crc_error_count = 0;
-	tracker_slots[id].last_raw_seq = 0;
-	tracker_slots[id].last_raw_valid = false;
-	tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
-	tracker_slots[id].wom_token = 0;
-	tracker_slots[id].wom_minutes = 0;
-	tracker_slots[id].wom_error = 0;
-	tracker_slots[id].wom_complete = false;
-	tracker_slots[id].wom_advertised = false;
-	tracker_slots[id].wom_first_ping_counter = 0;
-	tracker_slots[id].pending_cmd_arg = 0;
-	tracker_slots[id].tracker_test_on_tps = 0;
-	for (unsigned int axis = 0; axis < 3; axis++) {
-		tracker_slots[id].pending_sens_data[axis] = 0;
-	}
-	tracker_slots[id].pending_sens_auto_axis = 0;
-	tracker_slots[id].pending_sens_auto_revolutions = 0;
-	tracker_slots[id].metadata_active_mask = 0;
-	tracker_slots[id].metadata_active_chunk = 0;
-	tracker_slots[id].metadata_active_token = 0;
-	tracker_slots[id].metadata_pending_mask = 0;
-	tracker_slots[id].metadata_pending_chunk = 0;
-	tracker_slots[id].metadata_pending_token = 0;
+	memset(&tracker_slots[id], 0, sizeof(tracker_slots[id]));
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+	memset(&tracker_diags[id], 0, sizeof(tracker_diags[id]));
+#endif
 	atomic_and(&test_all_confirmed_mask, (atomic_val_t)~BIT(id));
 	atomic_set(&test_all_ready_after_ms[id], 0);
-	tracker_slots[id].tdma_config_packed = 0;
-	tracker_slots[id].tdma_prev_recv = 0;
-	tracker_slots[id].tdma_prev_gaps = 0;
-	tracker_slots[id].tdma_prev_restarts = 0;
-	memset(&tracker_slots[id].stats, 0, sizeof(tracker_slots[id].stats));
-	tracker_slots[id].decision_received = 0;
-	tracker_slots[id].decision_gaps = 0;
-#if defined(CONFIG_TDMA_DIAGNOSTICS)
-	memset(&tracker_diags[id].stats, 0, sizeof(tracker_diags[id].stats));
-	tracker_diags[id].g_last_ping_rx_time_diff_ticks = 0;
-	tracker_diags[id].g_last_ping_rx_time_diff_valid = false;
-	tracker_diags[id].g_ping_isr_rx_ticks = 0;
-	tracker_diags[id].g_ping_isr_rx_ticks_valid = false;
-	tracker_diags[id].g_last_isr_rx_ticks = 0;
-	tracker_diags[id].g_last_isr_rx_valid = false;
-	tracker_diags[id].g_bias_ppb_valid = 0;
-	tracker_diags[id].g_bias_ppb = 0;
-	tracker_diags[id].g_bias_ref_offset = 0;
-	tracker_diags[id].g_bias_ref_ticks = 0;
-	tracker_diags[id].g_last_ping_isr_rx_ticks_raw = 0;
-	tracker_diags[id].g_ping_dirty_streak = 0;
-	tracker_diags[id].g_ping_reject_count = 0;
-	tracker_diags[id].g_extrap_skip_count = 0;
-#endif
 	channel_target_mask &= ~BIT(id);
 	tdma_shadow_forget_tracker(id);
 	esb_auto_loss_invalidate();
@@ -3356,7 +3337,7 @@ void esb_finish_pair(void)
 	pairing_target_count = 0;
 	pairing_initial_count = 0;
 	pairing_target_reached_time = 0;
-	pairing_new_devices_blocked = false;
+	atomic_set(&pairing_new_devices_blocked, 0);
 	k_msgq_purge(&esb_pairing_msgq);
 	set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_CONNECTION);
 	LOG_INF("Pairing mode disabled");
@@ -3549,7 +3530,7 @@ uint32_t esb_send_remote_command_sens_auto_all(uint8_t axis, uint16_t revolution
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	unsigned int key = irq_lock();
 	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
-		if (stored_tracker_addr[i] != 0 && tracker_slots[i].stats.last_packet_time >= scan_start_time) {
+		if (stored_tracker_addr[i] != 0 && tracker_slots[i].stats.last_packet_time >= (uint64_t)scan_start_time) {
 			tracker_slots[i].pending_sens_auto_axis = axis;
 			tracker_slots[i].pending_sens_auto_revolutions = revolutions;
 			tracker_slots[i].tracker_remote_command = ESB_PONG_FLAG_SENS_AUTO;
@@ -3678,7 +3659,9 @@ uint32_t esb_send_remote_command_test_on_all(uint16_t tps)
 	atomic_set(&test_all_confirmed_mask, 0);
 	test_all_requested_tps = tps;
 	requested = test_all_requested_value();
-	test_all_effective_tps = MIN(requested, test_all_capacity_tps(tdma_dynamic_active_count));
+	uint8_t active_count = tdma_dynamic_active_count;
+	uint16_t effective = MIN(requested, test_all_capacity_tps(active_count));
+	test_all_effective_tps = effective;
 	uint16_t wire_tps = test_all_wire_tps();
 	uint32_t now_u32 = (uint32_t)k_uptime_get();
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
@@ -3697,8 +3680,8 @@ uint32_t esb_send_remote_command_test_on_all(uint16_t tps)
 	LOG_INF(
 		"Sticky TEST_MODE_ON enabled: requested=%u effective=%u active=%u targeted=0x%04x",
 		requested,
-		test_all_effective_tps,
-		tdma_dynamic_active_count,
+		effective,
+		active_count,
 		(unsigned int)mask
 	);
 	k_mutex_unlock(&test_all_mutex);
@@ -4186,14 +4169,20 @@ void esb_reset_all_stats(void)
 // Toggle detailed statistics display on/off
 bool esb_toggle_stats_detailed(void)
 {
+	k_spinlock_key_t key = k_spin_lock(&stats_display_lock);
 	stats_detailed_enabled = !stats_detailed_enabled;
-	stats_detailed_end_time = 0; // No auto-disable when toggling manually
-	return stats_detailed_enabled;
+	stats_detailed_end_time = 0;
+	bool enabled = stats_detailed_enabled;
+	k_spin_unlock(&stats_display_lock, key);
+	return enabled;
 }
 
 // Enable detailed statistics display for a specified duration (0 = toggle on/off permanently)
 void esb_set_stats_detailed(uint32_t duration_seconds)
 {
+	int64_t end_time = duration_seconds
+		? k_uptime_get() + (int64_t)duration_seconds * 1000 : 0;
+	k_spinlock_key_t key = k_spin_lock(&stats_display_lock);
 	if (duration_seconds == 0) {
 		// Toggle mode
 		stats_detailed_enabled = !stats_detailed_enabled;
@@ -4201,14 +4190,18 @@ void esb_set_stats_detailed(uint32_t duration_seconds)
 	} else {
 		// Timed mode
 		stats_detailed_enabled = true;
-		stats_detailed_end_time = k_uptime_get() + (int64_t)duration_seconds * 1000;
+		stats_detailed_end_time = end_time;
 	}
+	k_spin_unlock(&stats_display_lock, key);
 }
 
 // Get current detailed stats status
 bool esb_get_stats_detailed_enabled(void)
 {
-	return stats_detailed_enabled;
+	k_spinlock_key_t key = k_spin_lock(&stats_display_lock);
+	bool enabled = stats_detailed_enabled;
+	k_spin_unlock(&stats_display_lock, key);
+	return enabled;
 }
 
 void esb_set_channel_change_done_cb(esb_channel_change_done_cb_t cb)
@@ -4508,7 +4501,7 @@ static void esb_thread(void)
 					// Mark when target was reached (only once)
 					if (pairing_target_reached_time == 0) {
 						pairing_target_reached_time = k_uptime_get();
-						pairing_new_devices_blocked = true; // Block new devices, allow re-pairing only
+						atomic_set(&pairing_new_devices_blocked, 1); // Allow re-pairing only
 						LOG_INF(
 							"Pairing target count reached (%u new devices), exiting in %d seconds...",
 							new_devices,

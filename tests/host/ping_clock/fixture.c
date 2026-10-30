@@ -31,6 +31,24 @@ static int atomic_get(const atomic_t *p) { return *p; }
 static void atomic_set(atomic_t *p, int v) { *p = v; }
 static void atomic_or(atomic_t *p, int v) { *p |= v; }
 static void atomic_and(atomic_t *p, int v) { *p &= v; }
+
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+struct k_spinlock { bool held; };
+typedef unsigned int k_spinlock_key_t;
+#if !defined(TEST_TIMESTAMP_SNAPSHOT)
+static k_spinlock_key_t k_spin_lock(struct k_spinlock *lock)
+{
+    assert(!lock->held);
+    lock->held = true;
+    return 0;
+}
+static void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key)
+{
+    assert(lock->held && key == 0);
+    lock->held = false;
+}
+#endif
+#endif
 static void log_message(const char *fmt, ...) { (void)fmt; }
 #define LOG_DBG(...) log_message(__VA_ARGS__)
 static unsigned detailed_warnings;

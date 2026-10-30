@@ -29,6 +29,23 @@ static uint64_t now_ms;
 static unsigned irq_depth, mutex_depth;
 static unsigned irq_lock(void) { return irq_depth++; }
 static void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth = key; }
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+struct k_spinlock { bool held; };
+typedef unsigned int k_spinlock_key_t;
+static k_spinlock_key_t k_spin_lock(struct k_spinlock *lock)
+{
+    k_spinlock_key_t key = irq_lock();
+    assert(!lock->held);
+    lock->held = true;
+    return key;
+}
+static void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key)
+{
+    assert(lock->held);
+    lock->held = false;
+    irq_unlock(key);
+}
+#endif
 struct fixture_sem { unsigned count; };
 static struct fixture_sem tdma_membership_wake;
 static unsigned wake_signals;

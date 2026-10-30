@@ -21,6 +21,7 @@ CASES = (
     'counter-wrap',
     'restart-breaks-evidence',
     'ping-restart-sequence',
+    'diagnostic-ping-clock',
     'sequence-wrap',
     'pending-publication',
     'excluded-modes',
