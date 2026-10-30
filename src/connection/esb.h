@@ -147,7 +147,6 @@ static inline uint8_t esb_rf_channel_decode(uint8_t stored)
 #define ESB_OTA_VERIFY_TYPE 0x24   // Request CRC verification (receiver → tracker)
 #define ESB_OTA_ACTIVATE_TYPE 0x25 // Activate new firmware (receiver → tracker)
 
-void event_handler(struct esb_evt const *event);
 int clocks_start(void);
 int esb_initialize(bool);
 /* Internal background transactions suppress only routine initialization INFO. */
@@ -198,7 +197,6 @@ void esb_auto_loss_fence(void);
  * whose last packet predates this baseline. Snapshot and fence are atomic. */
 void esb_auto_loss_rebase(struct esb_auto_loss_snapshot *out);
 void esb_write_sync(uint16_t led_clock);
-void esb_receive(void);
 
 // Statistics display control
 bool esb_toggle_stats_detailed(void);                   // Toggle detailed stats on/off

@@ -232,7 +232,11 @@ struct pairing_event {
 };
 
 // Queue pairing packets from the ISR context to the pairing worker thread.
-K_MSGQ_DEFINE(esb_pairing_msgq, sizeof(struct pairing_event), 8, 4);
+static char __noinit __aligned(4)
+	_k_fifo_buf_esb_pairing_msgq[8 * sizeof(struct pairing_event)];
+static STRUCT_SECTION_ITERABLE(k_msgq, esb_pairing_msgq) =
+	Z_MSGQ_INITIALIZER(esb_pairing_msgq, _k_fifo_buf_esb_pairing_msgq,
+			   sizeof(struct pairing_event), 8);
 
 static K_MUTEX_DEFINE(tracker_store_lock);
 static bool tracker_store_ready;
@@ -2416,7 +2420,8 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 			);
 			// Don't update last_ping_counter, don't queue PONG
 			return;
-		} else if (is_large_gap) {
+		}
+		if (is_large_gap) {
 			// Large gap detected - possible packet loss
 			int counter_diff = (int)counter - (int)tracker_slots[tracker_id].last_ping_counter;
 			if (counter_diff < 0) {
@@ -2627,7 +2632,7 @@ static void esb_receive_composite(const struct esb_payload *payload, uint32_t ev
 	}
 }
 
-void event_handler(struct esb_evt const *event)
+static void event_handler(struct esb_evt const *event)
 {
 	switch (event->evt_id) {
 	case ESB_EVENT_TX_SUCCESS:
@@ -3267,16 +3272,16 @@ static bool esb_parse_pair(const uint8_t packet[8])
 
 	if (is_new_device) {
 		int assigned_id = esb_add_pair(found_addr, false);
-		if (assigned_id >= 0) {
-			send_tracker_id = (uint16_t)assigned_id;
-			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
-		} else if (assigned_id == -ENOSPC) {
+		if (assigned_id == -ENOSPC) {
 			LOG_WRN("Maximum tracker slots reached, cannot pair %012llX", found_addr);
 			return false;
-		} else {
+		}
+		if (assigned_id < 0) {
 			LOG_ERR("Failed to store tracker address %012llX: %d", found_addr, assigned_id);
 			return false;
 		}
+		send_tracker_id = (uint16_t)assigned_id;
+		set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
 	}
 
 	ack_valid = checksum_valid && send_tracker_id < MAX_TRACKERS;
@@ -4395,12 +4400,6 @@ uint8_t esb_get_receiver_channel(void)
 	return esb_rf_channel_decode(receiver_rf_channel);
 }
 
-// Set up unified addresses: pipe 0 for discovery (pairing), pipes 1-7 for paired data
-void esb_receive(void)
-{
-	esb_set_addr_unified();
-}
-
 
 /* Thread context only; failed reads never replace the published roster. */
 static int tracker_store_restore(void)
@@ -4452,7 +4451,7 @@ static void esb_thread(void)
 	LOG_INF("Receiver address: %012llX", *dev_addr & 0xFFFFFFFFFFFF);
 
 	// Always start in unified mode: pipe 0 for pairing, pipes 1-7 for data
-	esb_receive();
+	esb_set_addr_unified();
 	esb_initialize(false);
 	esb_start_rx();
 
