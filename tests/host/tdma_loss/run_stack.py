@@ -197,6 +197,15 @@ def load_image(path):
             raise ValueError('ELF must retain its symbol table')
         symbols = {symbol.name: (int(symbol['st_value']), int(symbol['st_size']))
                    for symbol in symtab.iter_symbols()}
+        aliases = {}
+        for name, value in symbols.items():
+            if '.lto_priv.' in name:
+                aliases.setdefault(name.split('.lto_priv.', 1)[0], set()).add(value)
+        for name, candidates in aliases.items():
+            if name in symbols:
+                candidates.add(symbols[name])
+            if len(candidates) == 1:
+                symbols[name] = candidates.pop()
         functions = {int(symbol['st_value']) & ~1: symbol.name
                      for symbol in symtab.iter_symbols()
                      if symbol['st_info']['type'] == 'STT_FUNC'
