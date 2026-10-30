@@ -38,7 +38,11 @@
 #define K_MSEC(x) (x)
 #define K_THREAD_STACK_DEFINE(n,s) char n[s]
 #define K_SEM_DEFINE(n,c,m) struct k_sem n = {PTHREAD_MUTEX_INITIALIZER,PTHREAD_COND_INITIALIZER,c}
-#define K_MSGQ_DEFINE(n,s,c,a) struct k_msgq n = {PTHREAD_MUTEX_INITIALIZER,PTHREAD_COND_INITIALIZER,PTHREAD_COND_INITIALIZER,{0},0,0,false}
+#define __noinit
+#define __aligned(n)
+#define STRUCT_SECTION_ITERABLE(type, name) struct type name
+#define Z_MSGQ_INITIALIZER(name, buf, size, count) \
+    {PTHREAD_MUTEX_INITIALIZER,PTHREAD_COND_INITIALIZER,PTHREAD_COND_INITIALIZER,(uint8_t *)(buf),0,0,false}
 typedef atomic_int atomic_t;
 #define atomic_get(a) atomic_load(a)
 #define atomic_set(a,v) atomic_store(a,v)
@@ -87,7 +91,7 @@ static void wait_sem_available(struct k_sem *s) {
     while(!s->count) pthread_cond_wait(&s->available,&s->lock);
     pthread_mutex_unlock(&s->lock);
 }
-struct k_msgq { pthread_mutex_t lock; pthread_cond_t wake,idle; uint8_t data[4]; unsigned count,first; bool waiting; };
+struct k_msgq { pthread_mutex_t lock; pthread_cond_t wake,idle; uint8_t *data; unsigned count,first; bool waiting; };
 static unsigned purges;
 static int fail_command=-1;
 static unsigned command_puts[256];

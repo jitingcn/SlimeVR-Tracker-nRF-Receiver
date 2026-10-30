@@ -91,8 +91,11 @@ static struct console_input_state console_input;
 static struct k_thread console_thread_id;
 static K_THREAD_STACK_DEFINE(console_thread_stack, 2048);
 static bool console_thread_started;
-K_MSGQ_DEFINE(console_line_msgq, sizeof(struct console_line_message),
-	      CONSOLE_LINE_QUEUE_DEPTH, 4);
+static char __noinit __aligned(4)
+	_k_fifo_buf_console_line_msgq[CONSOLE_LINE_QUEUE_DEPTH * sizeof(struct console_line_message)];
+static STRUCT_SECTION_ITERABLE(k_msgq, console_line_msgq) =
+	Z_MSGQ_INITIALIZER(console_line_msgq, _k_fifo_buf_console_line_msgq,
+			   sizeof(struct console_line_message), CONSOLE_LINE_QUEUE_DEPTH);
 
 static void console_thread(void);
 static void console_uart_irq(const struct device *dev, void *user_data);

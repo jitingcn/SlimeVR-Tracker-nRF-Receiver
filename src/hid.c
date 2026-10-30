@@ -520,7 +520,9 @@ struct hid_cmd_msg {
 	uint32_t usb_generation;
 };
 
-K_MSGQ_DEFINE(hid_cmd_msgq, sizeof(struct hid_cmd_msg), 4, 4);
+static char __noinit __aligned(4) _k_fifo_buf_hid_cmd_msgq[4 * sizeof(struct hid_cmd_msg)];
+static STRUCT_SECTION_ITERABLE(k_msgq, hid_cmd_msgq) =
+	Z_MSGQ_INITIALIZER(hid_cmd_msgq, _k_fifo_buf_hid_cmd_msgq, sizeof(struct hid_cmd_msg), 4);
 
 static void hid_cmd_work_handler(struct k_work *work)
 {

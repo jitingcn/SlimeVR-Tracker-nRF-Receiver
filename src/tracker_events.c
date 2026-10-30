@@ -45,7 +45,9 @@ struct delivery {
 static struct tracker_cache trackers[TRACKER_EVENT_MAX_TRACKERS];
 static uint32_t pairing_generations[TRACKER_EVENT_MAX_TRACKERS];
 static struct k_spinlock event_lock;
-K_MSGQ_DEFINE(event_rx_queue, sizeof(struct rx_event), RX_COUNT, 4);
+static char __noinit __aligned(4) _k_fifo_buf_event_rx_queue[RX_COUNT * sizeof(struct rx_event)];
+static STRUCT_SECTION_ITERABLE(k_msgq, event_rx_queue) =
+	Z_MSGQ_INITIALIZER(event_rx_queue, _k_fifo_buf_event_rx_queue, sizeof(struct rx_event), RX_COUNT);
 static uint32_t usb_generation = 1, subscription_generation = 1;
 static uint32_t lease_started, dropped;
 static uint8_t subscription_filter = 255, subscription_mask;

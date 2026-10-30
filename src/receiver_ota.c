@@ -107,7 +107,9 @@ static struct k_sem *slot_sems[2] = { &slot_sem_0, &slot_sem_1 };
 #define WRITER_CMD_ACTIVATE 0xFE
 #define WRITER_CMD_SHUTDOWN 0xFF
 
-K_MSGQ_DEFINE(page_write_msgq, sizeof(uint8_t), 4, 1);
+static char __noinit __aligned(1) _k_fifo_buf_page_write_msgq[4 * sizeof(uint8_t)];
+static STRUCT_SECTION_ITERABLE(k_msgq, page_write_msgq) =
+	Z_MSGQ_INITIALIZER(page_write_msgq, _k_fifo_buf_page_write_msgq, sizeof(uint8_t), 4);
 
 static atomic_t writer_error;
 static atomic_t writer_stop_requested;

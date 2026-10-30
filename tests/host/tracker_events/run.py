@@ -58,9 +58,11 @@ static inline void k_spin_unlock(struct k_spinlock *s, k_spinlock_key_t key) { (
 #define ARG_UNUSED(a) ((void)(a))
 #define BUILD_ASSERT(c,...) _Static_assert(c, #c)
 struct k_msgq { unsigned char *buffer; size_t item_size, capacity, read, count; };
-#define K_MSGQ_DEFINE(name,size,num,align) \
-    static unsigned char name##_buffer[(size)*(num)]; \
-    struct k_msgq name = { .buffer=name##_buffer,.item_size=(size),.capacity=(num) }
+#define __noinit
+#define __aligned(n)
+#define STRUCT_SECTION_ITERABLE(type, name) struct type name
+#define Z_MSGQ_INITIALIZER(name, buf, size, num) \
+    { .buffer=(unsigned char *)(buf), .item_size=(size), .capacity=(num) }
 static inline int k_msgq_put(struct k_msgq *q,const void *item,int timeout) {
     (void)timeout;
     if(q->count==q->capacity) return -ENOMSG;

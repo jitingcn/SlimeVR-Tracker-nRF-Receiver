@@ -54,9 +54,10 @@ struct k_msgq {
     unsigned char *data;
     size_t size, capacity, head, count;
 };
-#define K_MSGQ_DEFINE(name, size, depth, alignment) \
-    static unsigned char name##_storage[(size) * (depth)]; \
-    static struct k_msgq name = {name##_storage, size, depth, 0, 0}
+#define __noinit
+#define __aligned(n)
+#define STRUCT_SECTION_ITERABLE(type, name) struct type name
+#define Z_MSGQ_INITIALIZER(name, buf, size, depth) {(unsigned char *)(buf), size, depth, 0, 0}
 static int k_msgq_put(struct k_msgq *queue, const void *message, int timeout)
 {
     assert(timeout == K_NO_WAIT);
