@@ -1005,9 +1005,8 @@ static void console_thread(void)
 				rcv_cmd_pair(0);
 				printk("Pairing mode enabled (auto-exit after %d seconds)\n", CONFIG_PAIRING_TIMEOUT);
 			} else {
-				char *endptr;
-				long count = strtol(arg, &endptr, 10);
-				if (*endptr != '\0' || count < 0 || count > 255) {
+				long count;
+				if (!parse_long_bounded(arg, 0, 255, &count)) {
 					printk("Invalid count. Usage: pair [count]\n");
 					printk("  pair       - Pair indefinitely (timeout after %d seconds)\n", CONFIG_PAIRING_TIMEOUT);
 					printk("  pair 4     - Exit after pairing 4 new devices\n");
@@ -1042,9 +1041,8 @@ static void console_thread(void)
 					printk("Detailed stats disabled\n");
 				}
 			} else {
-				char *endptr;
-				long duration = strtol(arg, &endptr, 10);
-				if (*endptr != '\0' || duration < 0 || duration > 86400) {
+				long duration;
+				if (!parse_long_bounded(arg, 0, 86400, &duration)) {
 					printk("Invalid duration. Usage: stats [seconds]\n");
 					printk("  stats       - Toggle detailed stats on/off\n");
 					printk("  stats 30    - Show detailed stats for 30 seconds\n");
@@ -1085,10 +1083,8 @@ static void console_thread(void)
 				printk("Usage: channel <0-100>\n");
 				printk("Example: channel 25 - Set receiver RF channel to 25 (local only)\n");
 			} else {
-				char *endptr;
-				long channel = strtol(arg, &endptr, 10);
-
-				if (*endptr != '\0' || channel < 0 || channel > 100) {
+				long channel;
+				if (!parse_long_bounded(arg, 0, 100, &channel)) {
 					printk("Invalid channel. Must be a number between 0 and 100.\n");
 				} else if (rcv_cmd_channel_set((uint8_t)channel) == RCV_HID_ST_OK) {
 					printk("Receiver RF channel set to %d (local only)\n", (int)channel);
@@ -1170,10 +1166,9 @@ static void console_thread(void)
 					printk("Data collection is not active\n");
 				}
 			} else if (arg) {
-				char *endptr = NULL;
-				unsigned long id = strtoul(arg, &endptr, 10);
-				if (endptr != arg && *endptr == '\0' && id < 255) {
-					if (rcv_cmd_collect_start((uint8_t)id) == RCV_HID_ST_OK) {
+				uint8_t id;
+				if (parse_u8_arg(arg, &id) && id < 255) {
+					if (rcv_cmd_collect_start(id) == RCV_HID_ST_OK) {
 						printk("Data collection started for tracker %u\n", (unsigned)id);
 						printk("Test mode enabled on tracker (prevents sleep)\n");
 						printk("Non-target trackers will receive SHUTDOWN\n");

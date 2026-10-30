@@ -21,6 +21,7 @@
 	THE SOFTWARE.
 */
 #include "console_send.h"
+#include "parse_args.h"
 
 #include "rcv_cmd.h"
 
@@ -69,10 +70,8 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 	uint8_t tracker_id = 0;
 
 	if (!target_all) {
-		char *endptr;
-		long id = strtol(arg, &endptr, 10);
-
-		if (*endptr != '\0' || id < 0 || id > 255) {
+		long id;
+		if (!parse_long_bounded(arg, 0, 255, &id)) {
 			printk("Invalid tracker ID. Use a number (0-255) or 'all'\n");
 			return;
 		}
@@ -88,21 +87,13 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 		}
 		uint32_t minutes = enter ? ESB_WOM_ENTER : 0;
 		if (arg4) {
-			if (!*arg4) {
+			long value;
+			if (*arg4 < '0' || *arg4 > '9' ||
+			    !parse_long_bounded(arg4, 0, 35791, &value)) {
 				printk("Minutes must be an integer from 0 to 35791 (0 restores firmware default)\n");
 				return;
 			}
-			for (const char *p = arg4; *p; p++) {
-				if (*p < '0' || *p > '9' || minutes > 35791) {
-					printk("Minutes must be an integer from 0 to 35791 (0 restores firmware default)\n");
-					return;
-				}
-				minutes = minutes * 10 + (uint32_t)(*p - '0');
-			}
-			if (minutes > 35791) {
-				printk("Minutes must be an integer from 0 to 35791 (0 restores firmware default)\n");
-				return;
-			}
+			minutes = (uint32_t)value;
 			if (minutes == 0) {
 				minutes = ESB_WOM_TIMEOUT_CLEAR;
 			}
@@ -220,10 +211,8 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 			return;
 		}
 
-		char *endptr;
-		long channel = strtol(arg3, &endptr, 10);
-
-		if (*endptr != '\0' || channel < 0 || channel > 100) {
+		long channel;
+		if (!parse_long_bounded(arg3, 0, 100, &channel)) {
 			printk("Invalid channel. Must be a number between 0 and 100.\n");
 			return;
 		}
@@ -287,9 +276,8 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 
 			uint16_t revolutions = 0;
 			if (arg5 && *arg5) {
-				char *endptr;
-				long value = strtol(arg5, &endptr, 10);
-				if (*endptr != '\0' || value < 1 || value > SENS_AUTO_MAX_REVOLUTIONS) {
+				long value;
+				if (!parse_long_bounded(arg5, 1, SENS_AUTO_MAX_REVOLUTIONS, &value)) {
 					printk("Invalid revolutions '%s'. Use 1 to %u.\n", arg5, SENS_AUTO_MAX_REVOLUTIONS);
 					return;
 				}
@@ -518,9 +506,8 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 			 * before the tracker sees the flag. */
 			uint16_t tps = 0;
 			if (arg4 && *arg4) {
-				char *endptr;
-				long v = strtol(arg4, &endptr, 10);
-				if (*endptr != '\0' || v < 0 || v > 1000) {
+				long v;
+				if (!parse_long_bounded(arg4, 0, 1000, &v)) {
 					printk("Invalid TPS. Must be 0-1000 (0 = default).\n");
 					return;
 				}

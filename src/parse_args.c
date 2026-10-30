@@ -23,6 +23,7 @@
 #include "parse_args.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zephyr/sys/printk.h>
@@ -75,4 +76,19 @@ size_t parse_args(char *str, char *argv[], size_t size)
 uint64_t parse_u64(const char *str, uint8_t base)
 {
 	return strtoull(str, NULL, base);
+}
+
+bool parse_long_bounded(const char *str, long minimum, long maximum, long *value)
+{
+	if (str == NULL || *str == '\0' || isspace((unsigned char)*str)) {
+		return false;
+	}
+	char *end;
+	errno = 0;
+	long parsed = strtol(str, &end, 10);
+	if (end == str || *end != '\0' || errno == ERANGE || parsed < minimum || parsed > maximum) {
+		return false;
+	}
+	*value = parsed;
+	return true;
 }

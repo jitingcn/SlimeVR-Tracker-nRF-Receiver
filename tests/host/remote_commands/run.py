@@ -140,18 +140,21 @@ if __name__ == "__main__":
         (temporary / "zephyr/sys").mkdir(parents=True)
         (temporary / "esb.h").write_text("struct esb_evt;\n")
         (temporary / "zephyr/sys/printk.h").write_text("#define printk(...) ((void)0)\n")
+        extract_spec = importlib.util.spec_from_file_location("extract", HERE.parent / "tdma_loss/run.py")
+        extract = importlib.util.module_from_spec(extract_spec)
+        extract_spec.loader.exec_module(extract)
+        (temporary / "console_u8.inc").write_text(
+            extract.function((ROOT / "src/console.c").read_text(), "parse_u8_arg"))
         binary = temporary / "console-send"
         subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
             "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
             "-fno-pie", "-no-pie", "-I", str(temporary), "-I", str(ROOT / "src"),
-            str(ROOT / "src/console_send.c"), str(HERE / "test_console_send.c"),
+            str(ROOT / "src/console_send.c"), str(ROOT / "src/parse_args.c"),
+            str(HERE / "test_console_send.c"),
             "-o", str(binary),
         ], check=True)
         subprocess.run([str(binary)], check=True)
-        extract_spec = importlib.util.spec_from_file_location("extract", HERE.parent / "tdma_loss/run.py")
-        extract = importlib.util.module_from_spec(extract_spec)
-        extract_spec.loader.exec_module(extract)
         source = (ROOT / "src/rcv_cmd.c").read_text()
         production = "\n".join(extract.function(source, name) for name in (
             "fill_ack", "remote_hid_abort", "remote_hid_begin", "remote_wom_result",
