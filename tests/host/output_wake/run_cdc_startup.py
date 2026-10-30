@@ -32,6 +32,14 @@ def function(source, name):
         source, r'^[\w \t*]+\b' + re.escape(name) + r'\s*\([^;{}]*\)\s*\{') + '\n'
 
 
+def declaration(source, name):
+    pattern = rf'^static[ \t]+(?:volatile[ \t]+)?(?:struct[ \t]+\w+|\w+)[ \t]+{re.escape(name)}\b[^;]*;'
+    found = list(re.finditer(pattern, source, re.M))
+    if len(found) != 1:
+        raise ValueError(f'Expected one production declaration: {name}')
+    return found[0].group()
+
+
 usb = (src / 'usb.c').read_text()
 console = (src / 'console.c').read_text()
 collect = (src / 'data_collect.c').read_text()
@@ -48,6 +56,16 @@ console_functions = console[console.index('static bool console_echo_has_data_loc
 raw_start = esb.index('/* Raw data collection packets (types 0x10-0x13)')
 raw_end = esb.index('LOG_ERR("Wrong packet length:', raw_start)
 raw_dispatch = esb[raw_start:raw_end]
+if re.search(r'\btracker_slots\s*\[', extract._code_mask(raw_dispatch)):
+    raw_state = '\n'.join(
+        extract.extract_block(esb, rf'^struct {name}\s*\{{', semicolon=True)
+        for name in ('packet_stats', 'tracker_slot')
+    )
+    raw_state += '\n' + declaration(esb, 'tracker_slots')
+    raw_state += '\n#define FIXTURE_TRACKER_SLOTS\n'
+else:
+    raw_state = '\n'.join(declaration(esb, name) for name in
+                          ('last_raw_seq', 'last_raw_valid', 'tracker_remote_command'))
 
 production = '#if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)\n'
 production += collect[collect.index('LOG_MODULE_REGISTER'):]
@@ -83,6 +101,7 @@ cases = {
 with tempfile.TemporaryDirectory(prefix='receiver-cdc-startup-') as directory:
     temp = Path(directory)
     (temp / 'protocol.inc').write_text(protocol)
+    (temp / 'raw_state.inc').write_text(raw_state)
     (temp / 'production.inc').write_text(production)
     for variant, variant_cases in cases.items():
         selected = [case for case in variant_cases if args.case is None or args.case == case]

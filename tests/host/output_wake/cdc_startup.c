@@ -198,11 +198,9 @@ static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t len)
 #include "protocol.inc"
 #if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)
 #include "data_collect.h"
+#include "raw_state.inc"
 static uint8_t stored_trackers = 4;
 static uint64_t stored_tracker_addr[MAX_TRACKERS] = {[2] = 0x22, [3] = 0x33};
-static uint8_t tracker_remote_command[MAX_TRACKERS];
-static uint16_t last_raw_seq[MAX_TRACKERS];
-static bool last_raw_valid[MAX_TRACKERS];
 struct command_record { uint8_t tracker, flag, arg; };
 static struct command_record radio_commands[32];
 static size_t radio_count;
@@ -210,7 +208,11 @@ static void esb_send_remote_command_arg(uint8_t tracker, uint8_t flag, uint8_t a
 {
     assert(tracker < MAX_TRACKERS && radio_count < 32);
     radio_commands[radio_count++] = (struct command_record){tracker, flag, arg};
+#ifdef FIXTURE_TRACKER_SLOTS
+    tracker_slots[tracker].tracker_remote_command = flag;
+#else
     tracker_remote_command[tracker] = flag;
+#endif
 }
 static void esb_send_remote_command(uint8_t tracker, uint8_t flag)
 {
