@@ -9,15 +9,13 @@
 #include "status.h"
 
 #define STORED_TRACKERS 1
-#define RBT_CNT_ID 2
+#define RBT_CNT_ID 2 // Reserved legacy NVS key; do not reuse.
 #define STORED_ADDR_0 3
 // 0-15 -> id 3-18
 // 0-255 -> id 3-258
 
 #define RF_CHANNEL 259  // NVS key for receiver RF channel
 #define TRACKER_ROSTER 260 // Versioned, atomic tracker roster
-
-uint8_t reboot_counter_read(void);
 
 int sys_write_checked(uint16_t id, const void *data, size_t len);
 void sys_read(uint16_t id, void* data, size_t len);

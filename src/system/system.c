@@ -195,15 +195,6 @@ static int sys_nvs_init(void) {
 
 SYS_INIT(sys_nvs_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
-// TODO: switch back to retained?
-uint8_t reboot_counter_read(void) {
-	uint8_t reboot_counter = 0;
-	if (nvs_read(&fs, RBT_CNT_ID, &reboot_counter, sizeof(reboot_counter)) < 0) {
-		return 0;
-	}
-	return reboot_counter;
-}
-
 #if BUTTON_EXISTS
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {

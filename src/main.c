@@ -64,9 +64,6 @@ int main(void)
 	// Boot sequence with button detection
 	set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_BOOT);
 
-	uint8_t reboot_counter = reboot_counter_read();
-	bool booting_from_shutdown = !reboot_counter;
-
 	// Check if button is pressed during boot
 	if (button_read())
 	{
@@ -91,10 +88,6 @@ int main(void)
 			set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_HIGHEST);
 		else if (k_uptime_get() - boot_start > 50) // Short press during boot
 			set_led(SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PRIORITY_HIGHEST);
-	}
-	else if (booting_from_shutdown)
-	{
-		set_led(SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PRIORITY_BOOT);
 	}
 
 	// Clear boot LED priority

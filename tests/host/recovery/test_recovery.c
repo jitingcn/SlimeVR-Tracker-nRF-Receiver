@@ -89,7 +89,6 @@ enum {
 static void set_led(int pattern, int priority) {
     (void)pattern; (void)priority; led_calls++;
 }
-static uint8_t reboot_counter_read(void) { return 0; }
 static bool button_read(void) { return false; }
 static int esb_clear(void) { return 0; }
 
