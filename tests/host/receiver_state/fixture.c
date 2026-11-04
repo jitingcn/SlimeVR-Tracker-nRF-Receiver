@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -15,9 +16,24 @@ typedef int32_t atomic_val_t;
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
 #define K_FOREVER 0
+#define K_NO_WAIT 0
 static void log_message(const char *format, ...) { (void)format; }
 #define LOG_INF(...) log_message(__VA_ARGS__)
-#define LOG_WRN(...) log_message(__VA_ARGS__)
+#define LOG_DBG(...) log_message(__VA_ARGS__)
+static unsigned warning_count;
+static void log_warning(const char *format, ...)
+{
+	warning_count++;
+	if (getenv("PAIRING_WARNING_TRACE")) {
+		va_list args;
+		va_start(args, format);
+		fputs("WARN: ", stdout);
+		vprintf(format, args);
+		putchar('\n');
+		va_end(args);
+	}
+}
+#define LOG_WRN(...) log_warning(__VA_ARGS__)
 #define LOG_ERR(...) log_message(__VA_ARGS__)
 static atomic_val_t atomic_get(const atomic_t *v) { return *v; }
 static void atomic_set(atomic_t *v, atomic_val_t x) { *v = x; }
@@ -42,7 +58,16 @@ static void k_msgq_purge(int *q) { (void)q; assert(!irq_depth); }
 static uint64_t mock_device_addr;
 struct mock_ficr { uint64_t DEVICEADDR[1]; };
 #define NRF_FICR ((struct mock_ficr *)&mock_device_addr)
-static uint8_t crc8_ccitt(uint8_t seed, const uint8_t *p, size_t n) { (void)p; (void)n; return seed; }
+static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t len)
+{
+	while (len--) {
+		crc ^= *data++;
+		for (unsigned bit = 0; bit < 8; ++bit) {
+			crc = (uint8_t)((crc << 1) ^ ((crc & 0x80) ? 0x07 : 0));
+		}
+	}
+	return crc;
+}
 static const char *esb_pong_flag_name(uint8_t flag) { (void)flag; return "fixture"; }
 uint8_t stored_trackers;
 uint64_t stored_tracker_addr[MAX_TRACKERS];
@@ -50,6 +75,12 @@ static unsigned rssi[MAX_TRACKERS], ota[MAX_TRACKERS], collection[MAX_TRACKERS];
 static unsigned raw_arq, pairing_invalidations, pairing_invalidated_bits;
 static unsigned cleanup_calls, recalc_calls;
 static int collection_target = -1;
+static unsigned led_calls;
+void set_led(enum sys_led_pattern pattern, int priority)
+{
+	assert(pattern == SYS_LED_PATTERN_ONESHOT_PROGRESS && priority == SYS_LED_PRIORITY_HIGHEST);
+	led_calls++;
+}
 static void hid_reset_rssi_smooth(uint8_t id) { assert(irq_depth); rssi[id] = 0; }
 static void esb_ota_forget_tracker(uint8_t id) { assert(!irq_depth && mutex_depth); ota[id] = 0; }
 static void data_collect_forget_tracker(uint8_t id) { assert(!irq_depth && mutex_depth); collection[id] = 0; }
@@ -66,6 +97,26 @@ static void tdma_recalculate(bool forced) { assert(forced && !irq_depth && mutex
 static void test_all_invalidate(void);
 
 /* PRODUCTION_DECLARATIONS */
+
+#ifdef TEST_PAIRING
+/* Model the queue boundary while executing the actual worker and parser. */
+static struct pairing_event queued_pair;
+static bool queued_pair_valid;
+static int k_msgq_get(int *q, struct pairing_event *event, int timeout)
+{
+	assert(q == &esb_pairing_msgq && timeout == K_NO_WAIT);
+	if (!queued_pair_valid) return -ENOMSG;
+	*event = queued_pair;
+	queued_pair_valid = false;
+	return 0;
+}
+static void enqueue_pair(const uint8_t packet[8])
+{
+	assert(!queued_pair_valid);
+	memcpy(queued_pair.packet, packet, sizeof(queued_pair.packet));
+	queued_pair_valid = true;
+}
+#endif
 
 static void test_all_invalidate(void) { atomic_set(&test_all_state_valid, 0); }
 struct tuple { int16_t sens[3]; uint8_t axis, command, arg; uint16_t turns; };
@@ -347,6 +398,102 @@ static void test_slots(void)
 }
 #endif
 
+#ifdef TEST_PAIRING
+static void pairing_packet(uint8_t packet[8], uint64_t addr)
+{
+	memset(packet, 0, 8);
+	for (unsigned i = 0; i < 6; i++) {
+		packet[2 + i] = (uint8_t)(addr >> (8 * i));
+	}
+	packet[0] = crc8_ccitt(0x07, packet + 2, 6);
+	if (!packet[0]) packet[0] = 8;
+}
+
+static void test_pairing(void)
+{
+	const uint64_t first_unknown = UINT64_C(0xabcdef123456);
+	const uint64_t second_unknown = UINT64_C(0xabcdef123457);
+	uint8_t packet[8];
+	uint64_t original[MAX_TRACKERS];
+
+	tracker_store_ready = true;
+	stored_trackers = MAX_TRACKERS;
+	for (unsigned i = 0; i < MAX_TRACKERS; i++) {
+		stored_tracker_addr[i] = UINT64_C(0x102030400000) + i + 1;
+	}
+	memcpy(original, stored_tracker_addr, sizeof(original));
+
+	/* Invalid requests and a known tracker must not produce a capacity warning. */
+	now_ms = 0;
+	pairing_packet(packet, first_unknown);
+	packet[0] ^= 0x80;
+	assert(!esb_parse_pair(packet));
+	pairing_packet(packet, 0);
+	assert(!esb_parse_pair(packet));
+	pairing_packet(packet, UINT64_C(0xffffffffffff));
+	assert(!esb_parse_pair(packet));
+	pairing_packet(packet, original[MAX_TRACKERS - 1]);
+	assert(esb_parse_pair(packet));
+	assert(warning_count == 0 && save_calls == 0 && led_calls == 0);
+	pairing_packet(packet, first_unknown);
+	packet[1] = 1;
+	enqueue_pair(packet);
+	process_pairing_queue();
+	assert(!queued_pair_valid && warning_count == 0);
+
+	/* The first full rejection is immediate, even at zero uptime. */
+	pairing_packet(packet, first_unknown);
+	enqueue_pair(packet);
+	process_pairing_queue();
+	assert(!queued_pair_valid);
+	assert(warning_count == 1);
+	now_ms = 1;
+	assert(!esb_parse_pair(packet));
+	pairing_packet(packet, second_unknown);
+	now_ms = 4999;
+	assert(!esb_parse_pair(packet));
+	assert(warning_count == 1);
+	now_ms = 5000;
+	assert(!esb_parse_pair(packet));
+	assert(warning_count == 2);
+	now_ms = 9999;
+	assert(!esb_parse_pair(packet));
+	assert(warning_count == 2);
+	now_ms = 10000;
+	assert(!esb_parse_pair(packet));
+	assert(warning_count == 3);
+	now_ms = 14999;
+	pairing_packet(packet, original[MAX_TRACKERS - 1]);
+	assert(esb_parse_pair(packet));
+	pairing_packet(packet, first_unknown);
+	now_ms = 15000;
+	assert(!esb_parse_pair(packet));
+	assert(warning_count == 4);
+	assert(stored_trackers == MAX_TRACKERS);
+	assert(memcmp(stored_tracker_addr, original, sizeof(original)) == 0);
+	assert(save_calls == 0 && !have_record && led_calls == 0);
+	assert(pairing_invalidations == 0 && cleanup_calls == 0);
+
+	/* A real add at 15 slots still persists and assigns the sixteenth slot. */
+	stored_trackers = MAX_TRACKERS - 1;
+	stored_tracker_addr[MAX_TRACKERS - 1] = 0;
+	pairing_packet(packet, first_unknown);
+	enqueue_pair(packet);
+	process_pairing_queue();
+	assert(!queued_pair_valid);
+	assert(stored_trackers == MAX_TRACKERS);
+	assert(stored_tracker_addr[MAX_TRACKERS - 1] == first_unknown);
+	assert(memcmp(stored_tracker_addr, original, sizeof(original) - sizeof(original[0])) == 0);
+	assert(save_calls == 1 && warning_count == 4);
+	uint8_t recovered_count;
+	uint64_t recovered[MAX_TRACKERS];
+	assert(tracker_roster_load(&recovered_count, recovered) == 0);
+	assert(recovered_count == MAX_TRACKERS);
+	assert(memcmp(recovered, stored_tracker_addr, sizeof(recovered)) == 0);
+	assert(!irq_depth && !mutex_depth);
+}
+#endif
+
 int main(int argc, char **argv)
 {
 	assert(argc == 2);
@@ -354,6 +501,9 @@ int main(int argc, char **argv)
 	else if (!strcmp(argv[1], "tuples")) test_tuples();
 #ifndef STATE_ONLY_LEGACY
 	else if (!strcmp(argv[1], "slots")) test_slots();
+#endif
+#ifdef TEST_PAIRING
+	else if (!strcmp(argv[1], "pairing")) test_pairing();
 #endif
 	else assert(!"unknown case");
 	puts("receiver state case passed");

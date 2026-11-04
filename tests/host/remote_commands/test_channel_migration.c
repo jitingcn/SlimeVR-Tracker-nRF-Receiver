@@ -542,6 +542,41 @@ static void test_channel_pongs(void) {
     atomic_set(&pairing_new_devices_blocked, 0);
     esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
     assert(!has && !suppress);
+
+    /* Full roster: known ID 15 still gets the same ACK, unknowns do not. */
+    reset(MAX_TRACKERS);
+    esb_pairing = true;
+    pair[1] = 1;
+    pair[2] = 100 + MAX_TRACKERS - 1;
+    pair[0] = crc8_ccitt(0x07, pair + 2, 6);
+    if (!pair[0]) pair[0] = 8;
+    ack = (struct esb_payload){.noack = true};
+    esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
+    assert(has && !suppress && ack.length == 8 && ack.pipe == 0 && !ack.noack);
+    assert(ack.data[1] == MAX_TRACKERS - 1);
+    atomic_set(&pairing_new_devices_blocked, 1);
+    esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
+    assert(has && !suppress && ack.length == 8 && ack.data[1] == MAX_TRACKERS - 1);
+    pair[2] = 100 + MAX_TRACKERS;
+    pair[0] = crc8_ccitt(0x07, pair + 2, 6);
+    if (!pair[0]) pair[0] = 8;
+    esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
+    assert(!has && suppress);
+    pair[1] = 0;
+    esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
+    assert(!has && suppress);
+    atomic_set(&pairing_new_devices_blocked, 0);
+    esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
+    assert(!has && !suppress);
+    pair[1] = 1;
+    esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
+    assert(!has && suppress);
+    pair[2] = 100 + MAX_TRACKERS - 1;
+    pair[0] = crc8_ccitt(0x07, pair + 2, 6);
+    if (!pair[0]) pair[0] = 8;
+    esb_pairing = false;
+    esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
+    assert(!has && suppress);
 }
 static void test_wom_timeouts(void) {
     reset(3);

@@ -3,7 +3,7 @@
 
 Store and peripheral leaves are modeled; tuple tests inject a possible interrupt
 after each production shared-field store, without changing the store or order.
---source-root selects function bodies while declarations use the live contract.
+--source-root or --esb-source selects function bodies; declarations use the live contract.
 """
 import argparse
 import os
@@ -21,10 +21,11 @@ from c_extract import extract_block
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--source-root', type=Path, default=ROOT)
-parser.add_argument('--case', action='append', choices=['slots', 'shadow', 'tuples'])
+parser.add_argument('--esb-source', type=Path)
+parser.add_argument('--case', action='append', choices=['slots', 'shadow', 'tuples', 'pairing'])
 args = parser.parse_args()
-cases = args.case or ['slots', 'shadow', 'tuples']
-source = (args.source_root / 'src/connection/esb.c').read_text()
+cases = args.case or ['slots', 'shadow', 'tuples', 'pairing']
+source = (args.esb_source or args.source_root / 'src/connection/esb.c').read_text()
 live = (ROOT / 'src/connection/esb.c').read_text()
 
 # Explicit inventory is independent of the reset implementation: removing a
@@ -86,16 +87,25 @@ declarations += '\n' + extract_block(live, r'^struct tracker_diag\s*\{', semicol
 declarations += '\n' + '\n'.join(declaration(name) for name in
     ['tracker_diags', 'tdma_last_loss_step_ms', 'tdma_loss_last_permille'])
 declarations += '\n#endif\n'
+if 'pairing' in cases:
+    declarations += '\n' + extract_block(live, r'^struct pairing_event\s*\{', semicolon=True)
 
 names = ['esb_auto_loss_invalidate',
          'tdma_shadow_observe', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
          'esb_send_remote_command_sens', 'esb_send_remote_command_sens_auto',
          'esb_send_remote_command_sens_auto_all', 'esb_send_remote_command_arg']
+if 'slots' in cases or 'pairing' in cases:
+    names += ['tracker_slot_reset', 'esb_add_pair']
 if 'slots' in cases:
-    names += ['tracker_slot_reset', 'esb_add_pair', 'esb_pop_pair', 'esb_clear',
+    names += ['esb_pop_pair', 'esb_clear',
               'tdma_loss_reset_windows', 'tdma_sync_stats_reset', 'esb_rx_discontinuity',
               'esb_reset_all_stats', 'esb_send_remote_wom_command', 'remote_wom_receive',
               'esb_get_remote_wom_result', 'esb_request_metadata']
+if 'pairing' in cases:
+    # Older comparison sources may not have the warning helper.
+    if re.search(r'^static void warn_pairing_storage_full\(', source, re.M):
+        names.append('warn_pairing_storage_full')
+    names += ['esb_parse_pair', 'process_pairing_queue']
 functions = []
 for name in names:
     body = function(name)
@@ -168,6 +178,8 @@ with tempfile.TemporaryDirectory(prefix='receiver-state-') as directory:
     probe.write_text(fixture)
     executable = temporary / 'probe'
     flags = [] if 'slots' in cases else ['-DSTATE_ONLY_LEGACY']
+    if 'pairing' in cases:
+        flags.append('-DTEST_PAIRING')
     for diagnostics in (False, True):
         diagnostic_flags = ['-DCONFIG_TDMA_DIAGNOSTICS=1'] if diagnostics else []
         subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [

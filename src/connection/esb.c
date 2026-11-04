@@ -2746,7 +2746,7 @@ static void event_handler(struct esb_evt const *event)
 						if (q_err) {
 							LOG_WRN("Pairing queue full, dropping request from %012llX", found_addr);
 						} else {
-							LOG_INF("New device %012llX pairing request queued", found_addr);
+							LOG_DBG("New device %012llX pairing request queued", found_addr);
 						}
 					}
 				} else if (step == 1) {
@@ -3241,6 +3241,24 @@ int esb_pop_pair(void)
 	return 0;
 }
 
+/* Pairing requests are processed by the ESB worker; keep retries visible
+ * without flooding the console when a tracker keeps searching. */
+static void warn_pairing_storage_full(uint64_t addr, uint8_t count)
+{
+	static bool warned;
+	static int64_t last_warning_ms;
+	int64_t now_ms = k_uptime_get();
+
+	if (!warned || now_ms - last_warning_ms >= 5000) {
+		warned = true;
+		last_warning_ms = now_ms;
+		LOG_WRN("PAIRING FAILED: tracker storage full (%u/%u), cannot pair %012llX. "
+			"Use 'list' to see paired trackers, 'remove' to remove the last, "
+			"or 'clear' to delete ALL.",
+			(unsigned int)count, (unsigned int)MAX_TRACKERS, (unsigned long long)addr);
+	}
+}
+
 static bool esb_parse_pair(const uint8_t packet[8])
 {
 	uint64_t raw_addr = 0;
@@ -3267,6 +3285,11 @@ static bool esb_parse_pair(const uint8_t packet[8])
 
 	bool checksum_valid = (checksum == packet[0]);
 	bool has_capacity = tracker_count_snapshot < MAX_TRACKERS;
+	if (checksum_valid && tracker_roster_address_valid(found_addr)
+	    && send_tracker_id == tracker_count_snapshot && !has_capacity) {
+		warn_pairing_storage_full(found_addr, tracker_count_snapshot);
+		return false;
+	}
 	bool is_new_device = checksum_valid && found_addr != 0 && send_tracker_id == tracker_count_snapshot && has_capacity;
 	bool ack_valid = false;
 

@@ -858,6 +858,38 @@ static void test_drain(void)
     assert(error_count == 2);
 }
 
+static void test_pairing_gate(void)
+{
+    const struct esb_evt rx = {.evt_id = ESB_EVENT_RX_RECEIVED};
+    incoming = (struct esb_payload){.length = 8, .pipe = 0,
+                                    .data = {0xfe, 0, 1, 2, 3, 4, 5, 4}};
+    assert(crc8_ccitt(0x07, &incoming.data[2], 6) == incoming.data[0]);
+    stored_trackers = MAX_TRACKERS;
+
+    esb_pairing = false;
+    incoming_ready = true;
+    event_handler(&rx);
+    assert(esb_pairing_msgq.count == 0);
+
+    esb_pairing = true;
+    atomic_set(&pairing_new_devices_blocked, 1);
+    incoming_ready = true;
+    event_handler(&rx);
+    assert(esb_pairing_msgq.count == 0);
+
+    atomic_set(&pairing_new_devices_blocked, 0);
+    incoming.data[0] ^= 0x80;
+    incoming_ready = true;
+    event_handler(&rx);
+    assert(esb_pairing_msgq.count == 0);
+
+    incoming.data[0] ^= 0x80;
+    incoming_ready = true;
+    event_handler(&rx);
+    assert(esb_pairing_msgq.count == 1);
+    printf("PROTOCOL pairing-gate queued=%u\n", esb_pairing_msgq.count);
+}
+
 static void assert_tick_reads(void)
 {
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
@@ -888,6 +920,11 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "drain") == 0) {
         test_drain();
         assert_tick_reads();
+        printf("PASS %s\n", argv[1]);
+        return 0;
+    }
+    if (strcmp(argv[1], "pairing-gate") == 0) {
+        test_pairing_gate();
         printf("PASS %s\n", argv[1]);
         return 0;
     }
