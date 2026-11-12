@@ -33,6 +33,11 @@ prefix = r'''
 #include <stdio.h>
 #include <string.h>
 #include "relay_protocol.h"
+#ifdef CONFIG_RELAY_COORD_CAPACITY
+#define RELAY_COORD_CAPACITY CONFIG_RELAY_COORD_CAPACITY
+#else
+#define RELAY_COORD_CAPACITY RELAY_MAX_TRACKERS
+#endif
 #include "relay_demand.h"
 static unsigned mutex,depth,writes,recalculates,prints,wakes;
 static struct relay_control relay_grants;
@@ -105,3 +110,33 @@ with tempfile.TemporaryDirectory() as directory:
     for experimental in (0,1):
         subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-function','-fsanitize=address,undefined',f'-DCONFIG_RELAY_EXPERIMENTAL_SLOT_15={experimental}','-I'+str(HERE.parents[2]/'src/connection'),str(p/'settings.c'),'-o',str(p/'settings')],check=True)
         subprocess.run([str(p/'settings')],check=True)
+
+# The reduced receiver must accept old 16-member NVS records by clamping the
+# member ceiling, while keeping explicit repair/rate settings and wire layout.
+capacity_cases = cases[:cases.index('int main(void)')] + r'''
+int main(void) {
+ defaults(); relay_settings_load(); assert(relay_settings.max_trackers == 10);
+ for (unsigned version = 1; version <= 3; version++) {
+  defaults(); saved(version,16,4,100,4); relay_settings_load();
+  assert(relay_settings.max_trackers == 10 && relay_settings.max_repairs == 4);
+  assert(relay_settings.tps_min == 100);
+ }
+ defaults(); saved(2,11,5,100,5); relay_settings_load();
+ assert(relay_settings.max_trackers == 10 && relay_settings.tps_min == 120);
+ defaults(); assert(esb_relay_layout_set("max_trackers",11) == -EINVAL);
+ assert(!esb_relay_layout_set("max_trackers",10));
+ assert(relay_settings.max_trackers == 10 && !mutex && !depth);
+ puts("Ten-ID settings: saved ceilings clamped, migration and console bounds pass");
+}
+'''
+with tempfile.TemporaryDirectory() as directory:
+    p = Path(directory)
+    (p/'settings.c').write_text(prefix + state + function('esb_relay_layout_print')
+                               + function('esb_relay_layout_set') + capacity_cases)
+    subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
+        '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
+        '-fsanitize=address,undefined', '-DCONFIG_RELAY_COORD_CAPACITY=10',
+        '-DCONFIG_RELAY_EXPERIMENTAL_SLOT_15=0',
+        '-I'+str(HERE.parents[2]/'src/connection'), str(p/'settings.c'),
+        '-o', str(p/'settings')], check=True)
+    subprocess.run([str(p/'settings')], check=True)

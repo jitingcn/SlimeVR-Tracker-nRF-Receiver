@@ -171,21 +171,45 @@ config TDMA_DIAGNOSTICS
 
 endmenu
 
+# App defaults must precede the SDK defaults.
+choice SEGGER_RTT_SECTION
+    default SEGGER_RTT_SECTION_NONE if SOC_NRF52833
+endchoice
+
+config LOG_BUFFER_SIZE
+    default 4096 if SOC_NRF52833
+    default 16384
+
 source "Kconfig.zephyr"
 
 config RELAY
     bool "Receiver-coordinated peer relay (relay v3)"
-    default y if SOC_NRF52840
+    default y if SOC_NRF52840 || SOC_NRF52833
     depends on ESB_HAS_PRX_BROADCAST && ESB_HAS_RX_METADATA
     select ESB_PRX_BROADCAST
     select ESB_RX_METADATA
     help
         Enable peer relay when the SDK provides the optional ESB extensions.
         Stock sdk-nrf builds retain the ordinary direct tracker protocol.
-        On by default only on nRF52840: the coordinator's static RAM does
-        not fit the 128 KB of nRF52833 receivers.
+        nRF52833 has a 10-tracker capacity and runs relay code from flash.
+        It is not recommended as a relay receiver.
 
 if RELAY
+
+config RELAY_COORD_CAPACITY
+    int
+    default 10 if SOC_NRF52833
+    default 16
+    help
+        Coordinator capacity by tracker ID, independent of the 16-bit wire
+        masks. Only IDs below this capacity may join private relay v3.
+        On nRF52833, any active ID >= 10 keeps the entire fleet in mode 0
+        with ordinary direct service, including fleets over ten trackers.
+
+config RELAY_RAMFUNC
+    bool "Run relay freeze and repeat code from RAM"
+    default n if SOC_NRF52833
+    default y
 
 config RELAY_RESCUE_DIAGNOSTICS
     bool "Rescue candidate eligibility ledger"
@@ -213,8 +237,8 @@ config RELAY_RUNTIME_LAYOUT
 
 config RELAY_MAX_TRACKERS
     int "Maximum private relay members"
-    range 1 16
-    default 16
+    range 1 RELAY_COORD_CAPACITY
+    default RELAY_COORD_CAPACITY
 
 config RELAY_MAX_REPAIRS
     int "Maximum ordinary repair slots"

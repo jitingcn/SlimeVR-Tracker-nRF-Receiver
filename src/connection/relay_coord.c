@@ -148,6 +148,9 @@ void relay_coord_note_bundle(struct relay_coord *rc, uint8_t head, bool overflow
 
 void relay_coord_note_trailer_sent(struct relay_coord *rc, uint8_t head, uint16_t children, uint32_t now_ms)
 {
+	if (RC_ID_OUTSIDE(head)) {
+		return;
+	}
 	for (uint8_t c = 0; c < RC_MAX; c++) {
 		struct rc_tracker *t = &rc->t[c];
 		if ((children & RC_BIT(c)) && t->role == RC_ROLE_CHILD && t->head == head && !t->delivered) {
@@ -557,7 +560,7 @@ void relay_coord_pin(struct relay_coord *rc, uint8_t id, bool pinned)
 
 bool relay_coord_v3_ready(const struct relay_coord *rc, uint16_t members)
 {
-	if (!rc->enabled || !rc->v3_requested || !members) {
+	if (!rc->enabled || !rc->v3_requested || !members || (members & ~RC_MEMBER_MASK)) {
 		return false;
 	}
 	for (uint8_t id = 0; id < RC_MAX; id++) {
@@ -584,6 +587,9 @@ void relay_coord_fast_reset(struct relay_coord *rc)
 
 void relay_coord_receive(struct relay_coord *rc, uint8_t id, uint32_t frame)
 {
+	if (RC_ID_OUTSIDE(id)) {
+		return;
+	}
 #ifdef __ZEPHYR__
 	unsigned key = irq_lock();
 #endif
@@ -603,6 +609,9 @@ void relay_coord_receive(struct relay_coord *rc, uint8_t id, uint32_t frame)
  * frame overtaken by a newer publication. Early radio receipts are separate. */
 bool relay_coord_was_published(const struct relay_coord *rc, uint8_t id, uint32_t frame)
 {
+	if (RC_ID_OUTSIDE(id)) {
+		return false;
+	}
 	uint32_t age = rc->published[id] - frame;
 	return (rc->published_valid & (1U << id)) && age < 32 &&
 		(rc->published_history[id] & (1U << age));
@@ -622,6 +631,9 @@ uint8_t relay_coord_skipped(const struct relay_coord *rc, uint8_t id, uint32_t f
 
 bool relay_coord_publish(struct relay_coord *rc, uint8_t id, uint32_t frame)
 {
+	if (RC_ID_OUTSIDE(id)) {
+		return false;
+	}
 	relay_coord_receive(rc, id, frame);
 	if ((rc->published_valid & (1U << id)) && (int32_t)(frame - rc->published[id]) <= 0) {
 		return false;
@@ -654,11 +666,17 @@ static void rc_peer_expire(struct rc_peer *p, uint32_t now)
 void relay_coord_expire_peer(struct relay_coord *rc, unsigned helper,
 	unsigned child, uint32_t now)
 {
+	if (RC_ID_OUTSIDE(helper) || RC_ID_OUTSIDE(child)) {
+		return;
+	}
 	rc_peer_expire(&rc->peer[helper][child], now);
 }
 
 void relay_coord_capture(struct relay_coord *rc, uint8_t h, uint8_t child, uint8_t rssi, uint32_t now)
 {
+	if (RC_ID_OUTSIDE(h) || RC_ID_OUTSIDE(child)) {
+		return;
+	}
 	struct rc_peer *p = &rc->peer[h][child];
 	rc_peer_expire(p, now);
 	if (rssi) {
@@ -670,13 +688,14 @@ void relay_coord_capture(struct relay_coord *rc, uint8_t h, uint8_t child, uint8
 bool relay_coord_report(struct relay_coord *rc, const struct relay_control *c, unsigned slot,
 	const struct relay_peer_report *r, uint32_t now)
 {
-	if (r->session != c->session || r->epoch != c->epoch || slot >= c->repair_count ||
+	if (RC_ID_OUTSIDE(r->helper) || r->session != c->session || r->epoch != c->epoch || slot >= c->repair_count ||
 	    c->grants[slot].owner != r->helper || c->grants[slot].children ||
 	    !(c->members & RC_BIT(r->helper))) {
 		return false;
 	}
 	for (unsigned i = 0; i < r->count; i++) {
 		const struct relay_peer_observation *e = &r->entries[i];
+		if (RC_ID_OUTSIDE(e->child)) continue;
 		relay_coord_capture(rc, r->helper, e->child, e->heard ? e->rssi : 0, now);
 		struct rc_peer *p = &rc->peer[r->helper][e->child];
 		p->expected += e->expected;
@@ -691,6 +710,7 @@ bool relay_coord_report(struct relay_coord *rc, const struct relay_control *c, u
 
 static bool rc_listener(const struct relay_coord *rc, uint8_t child, uint8_t h)
 {
+	if (RC_ID_OUTSIDE(h) || RC_ID_OUTSIDE(child)) return false;
 	const struct rc_peer *p = &rc->peer[h][child];
 	/* Unknown peers may collect provisional evidence. A measured silent
 	 * link must yield its repair slots; surveys can establish recovery. */
@@ -919,7 +939,7 @@ static void rc_plan_rescue(const struct relay_coord *rc, const struct relay_cont
 		const struct rc_receipt *r = &rc->receipt[frame % (rc->cache_frames ? rc->cache_frames : 3U)];
 		if (w->frame != frame || w->session != c->session || w->epoch != c->epoch ||
 		    w->members != c->members) continue;
-		uint16_t missing = c->expected & ~(r->frame == frame ? r->received : 0);
+		uint16_t missing = c->expected & RC_MEMBER_MASK & ~(r->frame == frame ? r->received : 0);
 		unsigned first = 0;
 		uint16_t tail = missing;
 		if (rc_narrow_pool(c)) {
@@ -1026,7 +1046,7 @@ rc_rescue_diagnose(const struct relay_coord *rc, const struct relay_control *c, 
 		if (w->frame != frame || w->session != c->session || w->epoch != c->epoch || w->members != c->members) {
 			continue;
 		}
-		uint16_t missing = c->expected & ~(r->frame == frame ? r->received : 0);
+		uint16_t missing = c->expected & RC_MEMBER_MASK & ~(r->frame == frame ? r->received : 0);
 		for (unsigned child = 0; child < RC_MAX; child++) {
 			if (!(missing & RC_BIT(child)) || !ledger_child_enabled(child)) {
 				continue;
@@ -1179,7 +1199,7 @@ void relay_coord_plan_grants(struct relay_coord *rc, struct relay_control *c,
 
 			p->valid |= 1U << age;
 			for (unsigned copy = 0; copy < 2; copy++) {
-				uint16_t children = copy ? w->backup_valid : w->primary_valid;
+				uint16_t children = (copy ? w->backup_valid : w->primary_valid) & RC_MEMBER_MASK;
 				while (children) {
 					unsigned child = __builtin_ctz((unsigned)children);
 					children &= children - 1U;
@@ -1200,6 +1220,7 @@ void relay_coord_plan_grants(struct relay_coord *rc, struct relay_control *c,
 						&& !(w->rescue_tried[child] & RC_BIT(p->rescue_helper))) {
 						h = p->rescue_helper;
 					}
+					if (RC_ID_OUTSIDE(h)) continue;
 					if (c->on_demand) {
 						unsigned lane = 4U - age, bit = copy * 16U + child;
 						if (!age && rc_listener(rc, child, h)) {
@@ -1221,7 +1242,7 @@ void relay_coord_plan_grants(struct relay_coord *rc, struct relay_control *c,
 					if (rc_narrow_pool(c)) {
 						/* A narrow pool must try the backup of an expiring record
 						 * before spending its remaining capacity on younger work. */
-						position = ((2U - age) * 2U + copy) * RC_MAX + child;
+						position = ((2U - age) * 2U + copy) * RELAY_MAX_TRACKERS + child;
 					} else {
 						position = (copy * 3U + 2U - age) * 16U + child;
 					}
@@ -1300,7 +1321,7 @@ __attribute__((optimize("O3")))
 #endif
 /* Keep the full-pool load placement at its measured baseline. */
 #define RC_GRANT_LIMIT limit
-static __ramfunc void rc_finish_full(struct relay_control *c, const struct rc_grant_plan *p, uint8_t *wire)
+static RELAY_RAMFUNC void rc_finish_full(struct relay_control *c, const struct rc_grant_plan *p, uint8_t *wire)
 {
 
 	unsigned idle = 0;
@@ -1381,7 +1402,7 @@ static __ramfunc void rc_finish_full(struct relay_control *c, const struct rc_gr
 /* Match the measured frozen encoder's optimization on both runtime paths. */
 __attribute__((optimize("O3")))
 #endif
-static __ramfunc void rc_finish_narrow(struct relay_control *c, const struct rc_grant_plan *p, uint8_t *wire)
+static RELAY_RAMFUNC void rc_finish_narrow(struct relay_control *c, const struct rc_grant_plan *p, uint8_t *wire)
 {
 	unsigned limit = c->repair_count;
 	bool emergency = false;
@@ -1547,7 +1568,7 @@ static void rc_finish_demand(struct relay_control *c, const struct rc_grant_plan
 	c->survey = p->survey;
 }
 
-__ramfunc void relay_coord_finish_static_frozen(struct relay_control *c, const struct rc_grant_plan *p, uint8_t *wire)
+RELAY_RAMFUNC void relay_coord_finish_static_frozen(struct relay_control *c, const struct rc_grant_plan *p, uint8_t *wire)
 {
 
 	if (rc_narrow_pool(c)) {
@@ -1564,7 +1585,7 @@ __ramfunc void relay_coord_finish_static_frozen(struct relay_control *c, const s
 /* Match the measured O3 placement of the static full/narrow allocators. */
 __attribute__((optimize("O3")))
 #endif
-__ramfunc void relay_coord_finish_frozen(struct relay_control *c, const struct rc_grant_plan *p, uint8_t *wire)
+RELAY_RAMFUNC void relay_coord_finish_frozen(struct relay_control *c, const struct rc_grant_plan *p, uint8_t *wire)
 {
 	if (c->on_demand) {
 		uint16_t missing = c->missing[0] | c->missing[1] | c->missing[2] | c->missing_extra[0] | c->missing_extra[1];
@@ -1664,11 +1685,11 @@ void relay_coord_commit_grants(struct relay_coord *rc, const struct relay_contro
 	const struct rc_grant_plan *p)
 {
 	if (p->survey) rc->survey_next = p->survey_next;
-	if (c->flags & RELAY_CONTROL_MAINTENANCE) {
+	if ((c->flags & RELAY_CONTROL_MAINTENANCE) && !RC_ID_OUTSIDE(p->maintenance)) {
 		rc->maintenance_ms[p->maintenance] = p->now_ms;
 		rc->maintenance_next = (p->maintenance + 1U) % RC_MAX;
 	}
-	for (unsigned slot = 0; p->reporter >= 0 && slot < c->repair_count; slot++) {
+	for (unsigned slot = 0; p->reporter >= 0 && !RC_ID_OUTSIDE(p->reporter) && slot < c->repair_count; slot++) {
 		if (c->grants[slot].owner == p->reporter && !c->grants[slot].children) {
 			rc->report_ms[p->reporter] = p->now_ms;
 			rc->report_next = (p->reporter + 1U) % RC_MAX;
@@ -1690,7 +1711,7 @@ void relay_coord_commit_grants(struct relay_coord *rc, const struct relay_contro
 			if (g->owner >= RC_MAX) {
 				continue;
 			}
-			uint16_t children = g->children & relay_control_missing(c, age);
+			uint16_t children = g->children & RC_MEMBER_MASK & relay_control_missing(c, age);
 			while (children) {
 				unsigned child = __builtin_ctz((unsigned)children);
 				children &= children - 1U;

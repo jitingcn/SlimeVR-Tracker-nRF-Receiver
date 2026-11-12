@@ -745,11 +745,12 @@ static void relay_settings_load(void)
 	/* Migrate only the exact historical default tuple. Other choices survive. */
 	if ((length == 9 || length == 10) && record[0] <= 2U && value.max_trackers == 11 && value.max_repairs == 5
 		&& value.slot_ticks == 16 && value.tps_min == 100 && value.tps_max == 120 && value.repair_floor == 5) {
-		value.max_trackers = 16;
+		value.max_trackers = RELAY_COORD_CAPACITY;
 		value.tps_min = 120;
 	}
+	if (RELAY_COORD_CAPACITY < RELAY_MAX_TRACKERS && value.max_trackers > RELAY_COORD_CAPACITY) value.max_trackers = RELAY_COORD_CAPACITY;
 	if (!relay_runtime_validate(&value, IS_ENABLED(CONFIG_RELAY_EXPERIMENTAL_SLOT_15))) {
-		value = (struct relay_runtime_settings){16, 5, 16, 120, 120, 5, 0};
+		value = (struct relay_runtime_settings){RELAY_COORD_CAPACITY, 5, 16, 120, 120, 5, 0};
 		LOG_WRN("Invalid relay settings; using 120-mode defaults");
 	}
 	relay_settings = value;
@@ -838,6 +839,11 @@ static uint32_t tdma_admissible_mask(uint32_t desired)
 	if (!relay_coord.v3_requested) {
 		return candidates;
 	}
+	/* A high ID must retain direct service. v3_ready rejects this fleet. */
+#if RC_MAX < RELAY_MAX_TRACKERS
+	if (candidates & ~RC_MEMBER_MASK) return candidates;
+	candidates &= RC_MEMBER_MASK;
+#endif
 	uint32_t selected = 0;
 	for (unsigned n = 0; n < relay_settings.max_trackers && candidates; n++) {
 		uint32_t bit = candidates & (0U - candidates);
@@ -3897,7 +3903,7 @@ static void esb_receive_repair(const struct esb_payload *payload, uint32_t event
 	struct relay_repair repair;
 	relay_rx_stats.repair.seen++;
 	if (!relay_profile || !relay_repair_decode(payload->data, payload->length, &repair) ||
-	    repair.session != relay_session || repair.epoch != relay_grants.epoch ||
+	    RC_ID_OUTSIDE(repair.helper) || repair.session != relay_session || repair.epoch != relay_grants.epoch ||
 	    payload->pipe != 1U + repair.helper % 7U) {
 		relay_rx_stats.repair.invalid++;
 		return;
@@ -3928,7 +3934,7 @@ static void esb_receive_repair(const struct esb_payload *payload, uint32_t event
 				return;
 			}
 		}
-		if (child >= stored_trackers || age >= relay_control_cache_frames(&relay_grants)
+		if (RC_ID_OUTSIDE(child) || child >= stored_trackers || age >= relay_control_cache_frames(&relay_grants)
 			|| !(relay_grants.grants[slot].children & BIT(child))
 			|| !(relay_control_missing(&relay_grants, age) & BIT(child))) {
 			relay_rx_stats.repair.record++;
@@ -6090,6 +6096,11 @@ bool esb_relay_block_mask(uint16_t mask, uint8_t seconds)
 
 bool esb_relay_blocks_ota(uint8_t id)
 {
+	/* An ID beyond the coordinator capacity keeps the fleet in mode 0 and is
+	 * never relayed, so it gets the same OTA admission as a relay-off build. */
+	if (RC_ID_OUTSIDE(id)) {
+		return false;
+	}
 	unsigned int key = irq_lock();
 	bool relayed = relay_coord_is_relayed(&relay_coord, id)
 		|| !relay_coord_direct_ready(&relay_coord, id, k_uptime_get_32());
@@ -6175,7 +6186,7 @@ int esb_relay_layout_set(const char *name, uint16_t value)
 {
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	struct relay_runtime_settings candidate = relay_settings;
-	if (!strcmp(name, "max_trackers") && value <= 16U) {
+	if (!strcmp(name, "max_trackers") && value <= RELAY_COORD_CAPACITY) {
 		candidate.max_trackers = value;
 	} else if (!strcmp(name, "max_repairs") && value <= 5U) {
 		candidate.max_repairs = value;
@@ -6300,6 +6311,10 @@ void esb_relay_print_status(void)
 			for (unsigned k = 0; k < 2; k++) {
 				bool valid = (k ? control.backup_valid : control.primary_valid) & BIT(child);
 				uint8_t h = (control.helpers[child] >> (4U * k)) & 15U;
+				if (RC_ID_OUTSIDE(h)) {
+					printk(" %s=-1", k ? "backup" : "primary");
+					continue;
+				}
 				const struct rc_peer *p = &snapshot.peer[h][child];
 				uint16_t ratio = relay_coord_peer_ratio(p);
 				printk(" %s=%d ratio=%u rssi=-%u expected=%u state=%s", k ? "backup" : "primary",
@@ -6400,7 +6415,7 @@ struct relay_broadcast_work {
 };
 
 /* Keep the five-age work out of the static encoder's register lifetime. */
-__attribute__((noipa, optimize("O3"))) static __ramfunc void
+__attribute__((noipa, optimize("O3"))) static RELAY_RAMFUNC void
 relay_freeze_demand(struct relay_coord *rc, const struct relay_broadcast_work *w)
 {
 	struct relay_control *c = w->control;
@@ -6421,7 +6436,7 @@ relay_freeze_demand(struct relay_coord *rc, const struct relay_broadcast_work *w
 
 /* Attribute provenance: Round 11 linked model and DWT arm evidence retain the freeze boundary. Whole-thread O3 has only group-level evidence; keep pending isolated A/B. */
 __attribute__((noipa, optimize("O3")))
-static __ramfunc int relay_freeze_arm(struct relay_coord *rc, const struct relay_broadcast_work *w)
+static RELAY_RAMFUNC int relay_freeze_arm(struct relay_coord *rc, const struct relay_broadcast_work *w)
 {
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
 	uint32_t cycles = DWT->CYCCNT;
@@ -6463,7 +6478,7 @@ failed:
 }
 
 /* Construct the second immutable copy before its launch freeze. */
-__attribute__((noipa, optimize("O3"))) static __ramfunc void
+__attribute__((noipa, optimize("O3"))) static RELAY_RAMFUNC void
 relay_repeat_encode(uint8_t *out, const uint8_t *first, uint32_t preamble)
 {
 	static const uint8_t delta[4][256] = {
@@ -6526,7 +6541,7 @@ relay_repeat_encode(uint8_t *out, const uint8_t *first, uint32_t preamble)
 	out[71] = v;
 }
 
-__attribute__((noipa, optimize("O3"))) static __ramfunc int relay_repeat_arm(uint32_t event, uint32_t generation)
+__attribute__((noipa, optimize("O3"))) static RELAY_RAMFUNC int relay_repeat_arm(uint32_t event, uint32_t generation)
 {
 	if (generation != relay_layout_generation) {
 		return -ESTALE;

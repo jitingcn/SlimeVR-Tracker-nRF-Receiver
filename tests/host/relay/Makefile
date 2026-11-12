@@ -5,6 +5,9 @@ TMP := $(shell mktemp -d 2>/dev/null || echo /tmp/relay-host)
 
 .PHONY: check clean
 check:
+	$(CC) $(CFLAGS) -DCONFIG_RELAY_COORD_CAPACITY=10 test_capacity.c $(SRC)/relay_coord.c -o $(TMP)/capacity
+	$(TMP)/capacity
+	CC="$(CC)" python3 run_capacity.py
 	$(CC) $(CFLAGS) test_demand_coverage.c $(SRC)/relay_coord.c -o $(TMP)/coverage
 	$(TMP)/coverage
 	$(CC) $(CFLAGS) test_b2_deadline.c -o $(TMP)/b2_deadline

@@ -21,7 +21,23 @@
 
 #include "relay_protocol.h"
 
-#define RC_MAX RELAY_MAX_TRACKERS
+/* Local storage capacity by tracker ID; wire masks and IDs stay 16-wide. */
+#ifdef CONFIG_RELAY_COORD_CAPACITY
+#define RELAY_COORD_CAPACITY CONFIG_RELAY_COORD_CAPACITY
+#else
+#define RELAY_COORD_CAPACITY RELAY_MAX_TRACKERS
+#endif
+_Static_assert(RELAY_COORD_CAPACITY > 0 && RELAY_COORD_CAPACITY <= RELAY_MAX_TRACKERS,
+	"coordinator capacity must fit wire IDs");
+#define RC_MAX RELAY_COORD_CAPACITY
+#if defined(CONFIG_RELAY_RAMFUNC) || !defined(__ZEPHYR__)
+#define RELAY_RAMFUNC __ramfunc
+#else
+#define RELAY_RAMFUNC
+#endif
+/* New storage bounds compile away at the original 16-ID capacity. */
+#define RC_ID_OUTSIDE(id) (RC_MAX < RELAY_MAX_TRACKERS && (unsigned)(id) >= RC_MAX)
+#define RC_MEMBER_MASK ((uint16_t)((1U << RC_MAX) - 1U))
 #define RC_WINDOW_MS 500U
 
 /* Weak: direct delivery below this share of expected frames (>= RC_MIN_EXPECTED
@@ -179,7 +195,7 @@ struct rc_grant_plan {
 	uint16_t demand_eligible[5];
 	uint32_t fresh_candidates, fresh_coverage[RC_MAX];
 	uint32_t planned_fresh;
-	uint8_t fresh_helper[2 * RC_MAX];
+	uint8_t fresh_helper[2 * RELAY_MAX_TRACKERS];
 	uint32_t demand_candidates[5];
 	uint32_t demand_children[5][RC_MAX];
 	uint8_t demand_helper[5][32];
