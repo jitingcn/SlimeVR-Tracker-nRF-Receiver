@@ -608,6 +608,18 @@ bool relay_coord_was_published(const struct relay_coord *rc, uint8_t id, uint32_
 		(rc->published_history[id] & (1U << age));
 }
 
+/* Publication is in frame order, so a skipped frame can never be published
+ * later: it was lost on both paths. Jumps over 80 frames are a restart, as in
+ * check_packet_sequence(), and add no gaps. */
+uint8_t relay_coord_skipped(const struct relay_coord *rc, uint8_t id, uint32_t frame)
+{
+	if (id >= RC_MAX || !(rc->published_valid & (1U << id))) {
+		return 0;
+	}
+	int32_t advance = (int32_t)(frame - rc->published[id]);
+	return advance > 1 && advance <= 80 ? (uint8_t)(advance - 1) : 0;
+}
+
 bool relay_coord_publish(struct relay_coord *rc, uint8_t id, uint32_t frame)
 {
 	relay_coord_receive(rc, id, frame);

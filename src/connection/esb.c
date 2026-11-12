@@ -2583,7 +2583,8 @@ static int relay_sequence_check(uint8_t id, uint8_t seq, bool relayed, uint8_t r
 			return RC_SEQ_OLD;
 		}
 
-		relay_coord_note_frame(&relay_coord, id, RC_DIRECT, RC_SEQ_NORMAL, 0, rssi,
+		relay_coord_note_frame(&relay_coord, id, RC_DIRECT, RC_SEQ_NORMAL,
+				       relay_coord_skipped(&relay_coord, id, frame), rssi,
 				       k_uptime_get_32());
 		if (!relay_coord_publish(&relay_coord, id, frame)) {
 			return RC_SEQ_DUP;
@@ -3943,6 +3944,7 @@ static void esb_receive_repair(const struct esb_payload *payload, uint32_t event
 		uint32_t captured = frame - (uint16_t)(frame - r->capture_frame);
 		relay_rx_stats.repair.received[child]++;
 		relay_defer_capture(&relay_coord, repair.helper, child, r->source.rssi, k_uptime_get_32());
+		uint8_t skipped = relay_coord_skipped(&relay_coord, child, captured);
 		if (!relay_coord_publish(&relay_coord, child, captured)) {
 			relay_rx_stats.duplicate_pose++;
 			if (relay_coord_was_published(&relay_coord, child, captured)) {
@@ -3975,8 +3977,8 @@ static void esb_receive_repair(const struct esb_payload *payload, uint32_t event
 #endif
 		/* A fresh repaired pose also renews the child's membership. */
 		tdma_shadow_observe(child, TDMA_SHADOW_EVIDENCE_DATA);
-		relay_coord_note_frame(&relay_coord, child, RC_RELAYED, RC_SEQ_NORMAL, 0, payload->rssi,
-				       k_uptime_get_32());
+		relay_coord_note_frame(&relay_coord, child, RC_RELAYED, RC_SEQ_NORMAL, skipped,
+				       payload->rssi, k_uptime_get_32());
 	}
 }
 

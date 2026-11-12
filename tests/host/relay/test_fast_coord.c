@@ -118,8 +118,13 @@ int main(void)
 	assert(!relay_coord_publish(&rc, 0, 0));
 	assert(relay_coord_was_published(&rc, 0, 1));
 	assert(!relay_coord_was_published(&rc, 0, 0));
+	/* Frame 3 was never published, so publishing 4 reveals one lost frame. */
+	assert(relay_coord_skipped(&rc, 0, 4) == 1);
 	assert(relay_coord_publish(&rc, 0, 4));
 	assert(!relay_coord_publish(&rc, 0, 3));
+	assert(relay_coord_skipped(&rc, 0, 5) == 0 && relay_coord_skipped(&rc, 0, 3) == 0);
+	/* Jumps over 80 are a restart, as in check_packet_sequence(). */
+	assert(relay_coord_skipped(&rc, 0, 4 + 80) == 79 && relay_coord_skipped(&rc, 0, 4 + 81) == 0);
 	assert(!relay_coord_was_published(&rc, 0, 3));
 	assert(relay_coord_was_published(&rc, 0, 2));
 	relay_coord_fast_reset(&rc);

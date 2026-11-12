@@ -237,6 +237,8 @@ void relay_coord_fast_reset(struct relay_coord *rc);
 void relay_coord_receive(struct relay_coord *rc, uint8_t id, uint32_t frame);
 bool relay_coord_was_published(const struct relay_coord *rc, uint8_t id, uint32_t frame);
 bool relay_coord_publish(struct relay_coord *rc, uint8_t id, uint32_t frame);
+/* Frames skipped since the last publication; call before relay_coord_publish(). */
+uint8_t relay_coord_skipped(const struct relay_coord *rc, uint8_t id, uint32_t frame);
 void relay_coord_plan_watch(struct relay_coord *rc, struct relay_control *control);
 void relay_coord_plan_grants(struct relay_coord *rc, struct relay_control *c,
 	struct rc_grant_plan *plan, uint32_t now_ms);
