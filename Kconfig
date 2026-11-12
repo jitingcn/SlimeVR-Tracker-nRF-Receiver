@@ -184,7 +184,7 @@ source "Kconfig.zephyr"
 
 config RELAY
     bool "Receiver-coordinated peer relay (relay v3)"
-    default y if SOC_NRF52840 || SOC_NRF52833
+    default y if SOC_NRF52840 || (SOC_NRF52833 && !DATA_COLLECT)
     depends on ESB_HAS_PRX_BROADCAST && ESB_HAS_RX_METADATA
     select ESB_PRX_BROADCAST
     select ESB_RX_METADATA
@@ -192,7 +192,9 @@ config RELAY
         Enable peer relay when the SDK provides the optional ESB extensions.
         Stock sdk-nrf builds retain the ordinary direct tracker protocol.
         nRF52833 has a 10-tracker capacity and runs relay code from flash.
-        It is not recommended as a relay receiver.
+        It is not recommended as a relay receiver. On nRF52833, relay and
+        DATA_COLLECT do not fit together, so relay defaults off there when
+        raw data collection is enabled.
 
 if RELAY
 
