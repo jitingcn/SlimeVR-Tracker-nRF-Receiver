@@ -126,7 +126,8 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 	fatal_record.reason = reason;
 	fatal_record.pc = esf ? esf->basic.pc : 0;
 	fatal_record.lr = esf ? esf->basic.lr : 0;
-	fatal_record.thread = (uint32_t)(uintptr_t)k_current_get();
+	/* k_current_get() is not allowed before the kernel starts. */
+	fatal_record.thread = k_is_pre_kernel() ? 0 : (uint32_t)(uintptr_t)k_current_get();
 	fatal_record.reset_reason = boot_reset_reason;
 	fatal_record.check = fatal_check(&fatal_record);
 	__DMB();

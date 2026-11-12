@@ -18,6 +18,7 @@ prefix='''#include <stdint.h>
 #define FATAL_RECORD_MAGIC 0xFA7A1C0DU
 '''+struct+'\nstatic struct sys_fatal_record fatal_record;\n'+check+read+'''
 struct arch_esf { struct {uint32_t pc,lr;} basic; };
+static int k_is_pre_kernel(void){return 0;}
 static void *k_current_get(void){return (void*)42;}
 int main(void){unsigned reason=7;uint32_t boot_reset_reason=4;
 struct arch_esf e={{123,456}},*esf=&e;

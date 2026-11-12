@@ -57,6 +57,7 @@ static void barrier(void) {
 #define LOG_ERR(...) (++logs)
 #define LOG_INF(...) (++logs)
 struct arch_esf { struct { uint32_t pc, lr; } basic; };
+static int k_is_pre_kernel(void) { return 0; }
 static void *k_current_get(void) { return NULL; }
 static jmp_buf reboot_exit;
 static void sys_arch_reboot(int type) {
