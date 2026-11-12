@@ -1380,6 +1380,39 @@ static inline int esb_find_tracker(uint64_t addr)
 }
 
 
+/* Call with interrupts locked: RX and the monitor share this window. */
+static void packet_stats_refresh(struct packet_stats *stats, uint64_t now)
+{
+	if (!stats->last_tps_time) {
+		stats->last_tps_time = now;
+	} else if (now >= stats->last_tps_time &&
+		   now - stats->last_tps_time >= TPS_CALCULATION_INTERVAL_MS) {
+		stats->current_tps = stats->packets_in_last_second;
+		stats->packets_in_last_second = 0;
+		stats->last_tps_time = now;
+	}
+}
+
+/* Count direct packets and update liveness in the shared TPS window. */
+static void packet_stats_count(struct packet_stats *stats)
+{
+	unsigned key = irq_lock();
+	uint64_t now = k_uptime_get();
+	packet_stats_refresh(stats, now);
+	stats->packets_in_last_second++;
+	stats->last_packet_time = now;
+	irq_unlock(key);
+}
+
+static void packet_stats_monitor(struct packet_stats *stats)
+{
+	unsigned key = irq_lock();
+	/* Sample after taking ownership. A pre-learning timestamp can precede an
+	 * RX rollover and unsigned subtraction would turn it into a huge age. */
+	if (stats->last_tps_time) packet_stats_refresh(stats, k_uptime_get());
+	irq_unlock(key);
+}
+
 static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 {
 	if (tracker_id >= MAX_TRACKERS) {
@@ -1387,21 +1420,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 	}
 
 	struct packet_stats *stats = &tracker_slots[tracker_id].stats;
-	uint64_t current_time = k_uptime_get();
-	// Update TPS calculation
-	if (stats->last_tps_time == 0) {
-		stats->last_tps_time = current_time;
-		stats->packets_in_last_second = 0;
-	} else if (current_time - stats->last_tps_time >= TPS_CALCULATION_INTERVAL_MS) {
-		// Calculate TPS and reset counter
-		stats->current_tps = stats->packets_in_last_second;
-		stats->packets_in_last_second = 0;
-		stats->last_tps_time = current_time;
-	}
-
-	// Each packet counts towards TPS calculation
-	stats->packets_in_last_second++;
-	stats->last_packet_time = current_time;
+	packet_stats_count(stats);
 
 	// First packet, accept directly
 	if (!tracker_slots[tracker_id].sequence_initialized) {
@@ -1592,21 +1611,8 @@ static void esb_stats_thread(void)
 		}
 		next_monitor_time = (int64_t)now + TPS_MONITOR_INTERVAL_MS;
 
-		// Update TPS for each tracker
 		for (int i = 0; i < MAX_TRACKERS; i++) {
-			struct packet_stats *stats = &tracker_slots[i].stats;
-			if (stats->last_tps_time == 0) {
-				continue;
-			}
-			if (now - stats->last_tps_time >= TPS_CALCULATION_INTERVAL_MS) {
-				if (stats->packets_in_last_second > 0) {
-					stats->current_tps = stats->packets_in_last_second;
-				} else if (stats->last_packet_time && now - stats->last_packet_time >= TPS_CALCULATION_INTERVAL_MS) {
-					stats->current_tps = 0;
-				}
-				stats->packets_in_last_second = 0;
-				stats->last_tps_time = now;
-			}
+			packet_stats_monitor(&tracker_slots[i].stats);
 		}
 
 		// Check if detailed stats should be auto-disabled

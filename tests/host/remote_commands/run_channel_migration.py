@@ -43,7 +43,7 @@ def publication_function(name):
 
 
 functions = [
-    "decision_accept", "esb_auto_loss_invalidate", "esb_rx_discontinuity", "check_packet_sequence",
+    "decision_accept", "esb_auto_loss_invalidate", "esb_rx_discontinuity", "packet_stats_refresh", "packet_stats_count", "check_packet_sequence",
     "test_all_invalidate",
     "esb_channel_is_busy", "radio_operation_begin", "esb_radio_operation_begin",
     "esb_radio_collection_begin", "esb_radio_operation_end",
