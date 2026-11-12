@@ -1980,7 +1980,6 @@ static inline int esb_find_tracker(uint64_t addr)
 }
 
 
-#if defined(CONFIG_RELAY)
 /* Call with interrupts locked: RX and the monitor share this window. */
 static void packet_stats_refresh(struct packet_stats *stats, uint64_t now)
 {
@@ -2014,7 +2013,6 @@ static void packet_stats_monitor(struct packet_stats *stats)
 	irq_unlock(key);
 }
 
-#endif
 static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 {
 	if (tracker_id >= MAX_TRACKERS) {
@@ -2022,25 +2020,7 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 	}
 
 	struct packet_stats *stats = &tracker_slots[tracker_id].stats;
-#if defined(CONFIG_RELAY)
 	packet_stats_count(stats);
-#else
-	uint64_t current_time = k_uptime_get();
-	// Update TPS calculation
-	if (stats->last_tps_time == 0) {
-		stats->last_tps_time = current_time;
-		stats->packets_in_last_second = 0;
-	} else if (current_time - stats->last_tps_time >= TPS_CALCULATION_INTERVAL_MS) {
-		// Calculate TPS and reset counter
-		stats->current_tps = stats->packets_in_last_second;
-		stats->packets_in_last_second = 0;
-		stats->last_tps_time = current_time;
-	}
-
-	// Each packet counts towards TPS calculation
-	stats->packets_in_last_second++;
-	stats->last_packet_time = current_time;
-#endif
 
 	// First packet, accept directly
 	if (!tracker_slots[tracker_id].sequence_initialized) {
@@ -2295,27 +2275,9 @@ static void esb_stats_thread(void)
 		 * Refill choices now, not at the next one-second TPS report. */
 		relay_learn_update(k_uptime_get_32());
 
-#else
-		// Update TPS for each tracker
 #endif
 		for (int i = 0; i < MAX_TRACKERS; i++) {
-#if defined(CONFIG_RELAY)
 			packet_stats_monitor(&tracker_slots[i].stats);
-#else
-			struct packet_stats *stats = &tracker_slots[i].stats;
-			if (stats->last_tps_time == 0) {
-				continue;
-			}
-			if (now - stats->last_tps_time >= TPS_CALCULATION_INTERVAL_MS) {
-				if (stats->packets_in_last_second > 0) {
-					stats->current_tps = stats->packets_in_last_second;
-				} else if (stats->last_packet_time && now - stats->last_packet_time >= TPS_CALCULATION_INTERVAL_MS) {
-					stats->current_tps = 0;
-				}
-				stats->packets_in_last_second = 0;
-				stats->last_tps_time = now;
-			}
-#endif
 		}
 
 		// Check if detailed stats should be auto-disabled
