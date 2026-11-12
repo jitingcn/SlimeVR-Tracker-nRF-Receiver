@@ -785,15 +785,20 @@ static bool hid_type_has_rssi_slot(uint8_t type)
 	return hid_type_byte1_is_tracker_id(type);
 }
 
-static bool hid_enqueue_packet(const uint8_t data[16], uint32_t generation)
+static bool hid_push_packet(const uint8_t data[16], uint32_t generation)
 {
 	if (hid_fifo_try_push(data, hid_fifo_is_priority(data[0]), generation)) {
 		/* Schedule, not reschedule: continuous producers cannot postpone TX. */
 		k_work_schedule(&report_send, REPORT_PERIOD);
 		return true;
 	}
+	return false;
+}
 
-	/* Count only; producers may run in the radio IRQ. */
+/* Count only; producers may run in the radio IRQ. */
+void hid_note_dropped(const uint8_t *data)
+{
+	unsigned key = irq_lock();
 	total_dropped_reports++;
 	dropped_reports++;
 	if (dropped_reports > max_dropped_reports) {
@@ -806,6 +811,15 @@ static bool hid_enqueue_packet(const uint8_t data[16], uint32_t generation)
 			total_tracker_drops[tracker_id]++;
 		}
 	}
+	irq_unlock(key);
+}
+
+static bool hid_enqueue_packet(const uint8_t data[16], uint32_t generation)
+{
+	if (hid_push_packet(data, generation)) {
+		return true;
+	}
+	hid_note_dropped(data);
 	return false;
 }
 
@@ -854,7 +868,11 @@ void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
 		}
 	}
 
+#if defined(CONFIG_RELAY)
+	bool accepted = hid_push_packet(pkt, 0);
+#else
 	bool accepted = hid_enqueue_packet(pkt, 0);
+#endif
 	if (!accepted && id < MAX_TRACKERS) rssi_states[id] = previous;
 	irq_unlock(key);
 #if defined(CONFIG_RELAY)
@@ -865,6 +883,8 @@ void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
 
 void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
 {
-	(void)hid_try_write_packet_n(data, rssi);
+	if (!hid_try_write_packet_n(data, rssi)) {
+		hid_note_dropped(data);
+	}
 }
 #endif

@@ -3566,6 +3566,7 @@ static void relay_hid_packet(const uint8_t *data, uint8_t rssi)
 		 * work; RF acceptance and deadlines do not depend on USB progress. */
 		relay_hid_overflow++;
 		relay_hid_dropped_output++;
+		hid_note_dropped(data);
 	}
 }
 
