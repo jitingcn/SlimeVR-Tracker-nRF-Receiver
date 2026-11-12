@@ -252,6 +252,9 @@ static void reset_one_slot(unsigned id)
 
 static void test_isolated_reset(void)
 {
+	/* Member 1 is active, so it must be a stored (admissible) slot. */
+	uint8_t stored_before = stored_trackers;
+	stored_trackers = 2;
 	seed_slot(0);
 	seed_slot(1);
 	metadata_next_token = 0x4567;
@@ -282,6 +285,7 @@ static void test_isolated_reset(void)
 	check_slot(0);
 	assert(!tdma_membership_deadline_armed);
 	assert(auto_loss_reset_epoch == before + 2 && pairing_invalidations == pairing_before + 2);
+	stored_trackers = stored_before;
 }
 
 static void test_partial_resets(void)

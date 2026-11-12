@@ -52,6 +52,8 @@ static void k_mutex_lock(int *m, int timeout) { assert(!*m); *m = 1; }
 static void k_mutex_unlock(int *m) { assert(*m); *m = 0; }
 static int64_t now;
 static int64_t k_uptime_get(void) { return now; }
+static uint32_t k_uptime_get_32(void) { return (uint32_t)now; }
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 static void k_msleep(int32_t ms) { now += ms; }
 #define REMOTE_COMMAND_ACTIVE_SCAN_MS 1000
 static bool ota, self_ota, collecting, batch, abort_pending[MAX_TRACKERS];

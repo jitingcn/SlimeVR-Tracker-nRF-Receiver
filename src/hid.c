@@ -818,22 +818,32 @@ bool hid_write_tracker_event(const uint8_t record[16], uint32_t generation)
 	return hid_enqueue_packet(record, generation);
 }
 
+#if defined(CONFIG_RELAY)
+bool hid_try_write_packet_n(const uint8_t *data, uint8_t rssi)
+#else
 void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
+#endif
 {
 	uint8_t pkt[16];
+	/* A refused report must not move the RSSI shown on later reports. */
+	unsigned key = irq_lock();
+	uint8_t id = data[1];
+	struct rssi_ema_state previous = {0};
+	if (id < MAX_TRACKERS) previous = rssi_states[id];
 
 	// Drop packets with all-zero quaternion (type 1 and 4: quat in bytes 2-9).
 	if (data[0] == 1 || data[0] == 4) {
 		if ((data[2] | data[3] | data[4] | data[5] |
 		     data[6] | data[7] | data[8] | data[9]) == 0) {
+			irq_unlock(key);
+#if defined(CONFIG_RELAY)
+			return true;
+#else
 			return;
+#endif
 		}
 	}
 
-	unsigned key = irq_lock();
-	uint8_t id = data[1];
-	struct rssi_ema_state previous = {0};
-	if (id < MAX_TRACKERS) previous = rssi_states[id];
 	memcpy(pkt, data, sizeof(pkt));
 	if (hid_type_has_rssi_slot(data[0])) {
 		uint8_t tracker_id = data[1];
@@ -844,8 +854,17 @@ void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
 		}
 	}
 
-	if (!hid_enqueue_packet(pkt, 0) && id < MAX_TRACKERS) {
-		rssi_states[id] = previous;
-	}
+	bool accepted = hid_enqueue_packet(pkt, 0);
+	if (!accepted && id < MAX_TRACKERS) rssi_states[id] = previous;
 	irq_unlock(key);
+#if defined(CONFIG_RELAY)
+	return accepted;
+#endif
 }
+#if defined(CONFIG_RELAY)
+
+void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
+{
+	(void)hid_try_write_packet_n(data, rssi);
+}
+#endif

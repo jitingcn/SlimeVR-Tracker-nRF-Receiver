@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Force completion to race HID registration using production locking/callback code."""
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import importlib.util
 import os
 from pathlib import Path
@@ -12,7 +17,7 @@ ROOT = HERE.parents[2]
 spec = importlib.util.spec_from_file_location("extract", HERE.parent / "tdma_loss/run.py")
 extract = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(extract)
-source = (ROOT / "src/rcv_cmd.c").read_text()
+source = select_relay((ROOT / "src/rcv_cmd.c").read_text())
 production = "\n".join(extract.function(source, name) for name in (
     "fill_ack", "arm_ch_hid_completion", "on_tracker_channel_done"))
 start = source.index("case RCV_HID_OP_TRACKER_CH_ALL:")

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Compile production OTA/CDC/HID forget paths with deterministic host leaves."""
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse
 import os
 from pathlib import Path
@@ -38,7 +43,7 @@ static void irq_unlock(unsigned int key) { assert(depth == key+1); depth=key; }
 static int32_t atomic_get(const atomic_t *p) { return *p; }
 static int32_t atomic_set(atomic_t *p, int32_t v) { int32_t old=*p; *p=v; return old; }
 '''
-ota = (args.source_root / 'src/esb_ota.c').read_text()
+ota = select_relay((args.source_root / 'src/esb_ota.c').read_text())
 ota_decls = ota[ota.index('struct ota_tx_entry {'):ota.index('static void fw_info_send_work_handler')]
 ota_fixture = common + r'''
 #define OTA_MAX_PARALLEL 4

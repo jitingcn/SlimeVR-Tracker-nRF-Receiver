@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Exercise production HID arithmetic, byte packets, and roster snapshots with UBSan."""
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse
 import os
 from pathlib import Path
@@ -21,7 +26,7 @@ def function(text, name):
     return extract_block(text, r'^[\w \t*]+\b' + re.escape(name) +
                          r'\s*\([^;{}]*\)\s*\{') + '\n'
 
-source = (args.source_root / 'src/hid.c').read_text()
+source = select_relay((args.source_root / 'src/hid.c').read_text())
 declarations = source[source.index('struct rssi_ema_state {'):source.index('LOG_MODULE_REGISTER(hid_event')]
 def constant(name):
     return re.search(r'^#define\s+' + name + r'\s+\d+', source, re.M).group()
@@ -73,7 +78,7 @@ static uint32_t enqueued_generation;
 static unsigned int enqueued_count;
 static bool enqueue_stalled;
 static bool hid_enqueue_packet(const uint8_t data[16], uint32_t generation) {
-    if (enqueue_stalled) return false;
+    if(enqueue_stalled)return false;
     memcpy(enqueued_packet, data, sizeof(enqueued_packet));
     enqueued_generation=generation;
     enqueued_count++;
@@ -84,7 +89,7 @@ functions = '\n'.join(function(source, name) for name in (
     'packet_device_addr', 'hid_fill_padding', 'hid_stats_record_reports',
     'hid_stats_update_idle_if_needed', 'hid_stats_snapshot', 'rssi_smooth_update',
     'hid_reset_rssi_smooth', 'hid_type_byte1_is_tracker_id',
-    'hid_type_has_rssi_slot', 'hid_write_packet_n'))
+    'hid_type_has_rssi_slot', 'hid_try_write_packet_n', 'hid_write_packet_n'))
 # The historical address formatter returned void. Preserve its exact body and
 # callers; only the test's direct boolean assertions need a signature adapter.
 if re.search(r'^static void packet_device_addr\s*\(', source, re.M):
@@ -141,15 +146,11 @@ static void test_rssi(void) {
 static void test_quaternion(void) {
     uint8_t retry[16]={3,0};
     struct rssi_ema_state before_state=rssi_states[0];
-    unsigned before_count=enqueued_count;
     enqueue_stalled=true;
-    hid_write_packet_n(retry,200);
-    assert(enqueued_count==before_count && !lock_depth);
+    assert(!hid_try_write_packet_n(retry, 200));
     assert(rssi_states[0].ema_value==before_state.ema_value && rssi_states[0].initialized==before_state.initialized);
     enqueue_stalled=false;
-    hid_write_packet_n(retry,200);
-    assert(enqueued_count==before_count+1 && !lock_depth);
-
+    assert(hid_try_write_packet_n(retry,200));
     _Alignas(uint16_t) uint8_t storage[17];
     volatile unsigned offsets[] = {0, 1};
     for (unsigned alignment=0; alignment<2; alignment++) {

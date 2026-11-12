@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Exercise receiver diagnostic timestamp snapshots under modeled RADIO preemption."""
 
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import os
 from pathlib import Path
 import re
@@ -13,8 +18,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE.parent / 'harness'))
 from c_extract import extract_block
+from relay_support import relay_section, staging_helpers
 
-source = (ROOT / 'src/connection/esb.c').read_text()
+source = select_relay((ROOT / 'src/connection/esb.c').read_text())
 header = (ROOT / 'src/connection/esb.h').read_text()
 auto_source = (ROOT / 'src/connection/auto_channel.c').read_text()
 constants = '\n'.join(re.findall(
@@ -30,6 +36,7 @@ shape = '\n'.join((
     extract_block(source, r'^struct packet_stats\s*\{', semicolon=True),
     extract_block(source, r'^struct tracker_slot\s*\{', semicolon=True),
     'static struct tracker_slot tracker_slots[MAX_TRACKERS];',
+    '\n'.join(re.findall(r'^static uint32_t tdma_active_mask;', source, re.M)),
     '#if defined(CONFIG_TDMA_DIAGNOSTICS)',
     extract_block(source, r'^struct tdma_stats\s*\{', semicolon=True),
     extract_block(source, r'^struct tracker_diag\s*\{', semicolon=True),
@@ -58,6 +65,7 @@ slot = instrument('tdma_check_slot', (
     ('g_last_isr_rx_valid', 'checked_slot_valid'),
     ('g_last_isr_rx_ticks', 'checked_slot_ticks'),
 ))
+deferred = source[source.index('struct tdma_diag_sample {'):source.index('static void tdma_check_slot(')]
 ack = extract_block(source, r'^static void esb_ack_handler_cb\s*\([^;{}]*\)\s*\{')
 ack = ack.split('\t/* Other packet types:', 1)[0] + '\n}\n'
 for index, field, target, point in (
@@ -71,6 +79,9 @@ for index, field, target, point in (
     if count != 1:
         raise ValueError(f'esb_ack_handler_cb: expected one store of {field}, got {count}')
 ack = ack.replace('k_uptime_ticks()', 'snapshot_uptime_ticks()')
+early = '\n'.join(extract_block(source, rf'^static (?:int|bool) {name}\s*\([^;{{}}]*\)\s*\{{')
+                  for name in ('composite_body_length', 'relay_early_receipt_valid'))
+ack = early + '\n' + ack
 
 prelude = (HERE / 'fixture.c').read_text().split('/* ACTUAL AUTO CHANNEL */', 1)[0]
 stub = extract_block(prelude, r'^static void tdma_check_slot\s*\([^;{}]*\)\s*\{')
@@ -80,7 +91,7 @@ prelude = prelude.replace('/* PRODUCTION STATE */', shape)
 auto_channel = extract_block(auto_source, r'^bool auto_channel_is_beacon\s*\([^;{}]*\)\s*\{')
 fixture = prelude + '\n' + auto_channel + '\n' + (HERE / 'snapshot_fixture.c').read_text()
 fixture = fixture.replace('/* PRODUCTION FUNCTIONS */',
-                          '#if defined(CONFIG_TDMA_DIAGNOSTICS)\n' + clock + '\n' + slot + '\n#endif\n' + ack)
+                          relay_section(source) + staging_helpers(source) + '#if defined(CONFIG_TDMA_DIAGNOSTICS)\n' + clock + '\n' + deferred + '\n' + slot + '\n#endif\n' + ack)
 with tempfile.TemporaryDirectory(prefix='receiver-timestamp-snapshot-') as directory:
     directory = Path(directory)
     generated = directory / 'fixture.c'
@@ -93,6 +104,6 @@ with tempfile.TemporaryDirectory(prefix='receiver-timestamp-snapshot-') as direc
         subprocess.run(compiler + [
             '-std=c11', '-g', '-O1', '-Wall', '-Wextra',
             '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-            '-fno-pie', '-no-pie', '-I', str(ROOT / 'src'), *flags, str(generated), '-o', str(executable),
+            '-fno-pie', '-no-pie', '-I', str(ROOT / 'src'), '-I', str(ROOT / 'src/connection'), *flags, str(generated), '-o', str(executable),
         ], check=True)
         subprocess.run([str(executable)], check=True, timeout=20)

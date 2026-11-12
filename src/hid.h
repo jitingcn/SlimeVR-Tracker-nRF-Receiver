@@ -26,6 +26,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* False is a refused attempt; relay retains the record for retry. */
+bool hid_try_write_packet_n(const uint8_t *data, uint8_t rssi);
 void hid_write_packet_n(const uint8_t *data, uint8_t rssi);
 /* Nonzero subscription generation; false means the FIFO did not accept it. */
 bool hid_write_tracker_event(const uint8_t record[16], uint32_t generation);

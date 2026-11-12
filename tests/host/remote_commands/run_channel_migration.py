@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Execute receiver channel transactions and ACK payload branches from production."""
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import importlib.util
 import os
 from pathlib import Path
 import shlex
 import re
 import subprocess
+import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
@@ -13,7 +19,7 @@ ROOT = HERE.parents[2]
 spec = importlib.util.spec_from_file_location("extract", HERE.parent / "tdma_loss/run.py")
 extract = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(extract)
-source = (ROOT / "src/connection/esb.c").read_text()
+source = select_relay((ROOT / "src/connection/esb.c").read_text())
 header = (ROOT / "src/connection/esb.h").read_text()
 publication_stores = {
     "esb_send_remote_command_sens": {"pending_sens_data": 3, "tracker_remote_command": 1},
@@ -88,12 +94,21 @@ prelude = prelude.replace("/* DIAGNOSTIC DECLARATIONS */",
 # confirmation priority, command formats, OTA override and CRC generation.
 defines = []
 for line in header.splitlines():
-    match = re.match(r"#define (ESB_(?:(?:PING|PONG|RAW|OTA|CHANNEL_CONFIRM|WOM_TIMEOUT)_\w+|WOM_ENTER|METADATA_MASK_VALID))\s+", line)
+    match = re.match(r"#define (ESB_(?:(?:PING|PONG|RAW|OTA|COMPOSITE|CHANNEL_CONFIRM|WOM_TIMEOUT)_\w+|WOM_ENTER|METADATA_MASK_VALID))\s+", line)
     if match and not re.search(r"#define\s+" + match[1] + r"\b", prelude):
         defines.append(line)
 defines.extend(re.findall(r'^#define (?:PING_TIMEOUT_MS|PING_CLEAN_REACQUIRE_STREAK)\b[^\n]*',
                           source, re.MULTILINE))
 prelude = "\n".join(defines) + "\n" + prelude
+sys.path.insert(0, str(HERE.parent / "harness"))
+from relay_support import relay_section, staging_helpers  # noqa: E402
+if "tdma_active_mask" not in prelude + production:
+    production += "\n".join(re.findall(r"^static uint32_t tdma_active_mask;", source, re.MULTILINE)) + "\n"
+production += "\n" + relay_section(source, stats=False)
+production += "\n" + staging_helpers(source)
+production += '\n#include "tracker_event_protocol.h"\n'
+production += "\n".join(extract.function(source, name) for name in
+                         ("composite_body_length", "relay_early_receipt_valid"))
 production += "\n" + extract.function(source, "esb_ack_handler_cb")
 production += "\n" + extract.diagnostic_function(source, "account_ping_clock")
 production += "\n" + extract.function(source, "esb_receive_ping")
@@ -124,6 +139,6 @@ with tempfile.TemporaryDirectory(prefix="receiver-channel-migration-") as direct
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
             "-Wno-unused-function", "-Wno-unused-variable", "-g", "-O1",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
-            *flags, str(generated), "-o", str(binary),
+            "-I", str(ROOT / "src/connection"), *flags, str(generated), "-o", str(binary),
         ], check=True)
         subprocess.run([str(binary)], check=True)

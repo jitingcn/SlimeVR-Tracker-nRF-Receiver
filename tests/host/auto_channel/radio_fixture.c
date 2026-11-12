@@ -12,6 +12,7 @@
 #define ARG_UNUSED(x) ((void)(x))
 #define BIT(n) (1u << (n))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define TEST_ALL_JOIN_CONFIG_GRACE_MS 1500
 #define MAX_TRACKERS 8
 #define K_NO_WAIT 0
@@ -45,12 +46,13 @@ static bool atomic_cas(atomic_t *value, int old, int next)
     *value = next;
     return true;
 }
-struct esb_payload { uint8_t length, pipe; bool noack; int8_t rssi; uint8_t data[64]; };
+struct esb_payload { uint8_t length, pipe; bool noack; int8_t rssi; uint8_t data[64]; uint32_t rx_ticks, rx_context; bool rx_pose; };
 struct esb_evt { int evt_id; unsigned tx_attempts; };
 struct esb_config {
     int protocol, mode, tx_output_power, retransmit_delay, tx_mode;
     bool selective_auto_ack, use_fast_ramp_up;
     void (*event_handler)(const struct esb_evt *);
+    void (*rx_metadata_handler)(struct esb_payload *);
     void (*ack_handler)(const uint8_t *, uint8_t, uint32_t, struct esb_payload *, bool *, bool *);
 };
 static struct { unsigned STATE; } radio;
@@ -159,6 +161,7 @@ static int k_msgq_get(void *queue, void *item, int timeout)
 
 
 static void event_handler(const struct esb_evt *event);
+static void relay_rx_metadata(struct esb_payload *);
 static void esb_ack_handler_cb(const uint8_t *, uint8_t, uint32_t,
                                struct esb_payload *, bool *, bool *);
 static uint8_t esb_rf_channel_decode(uint8_t channel)

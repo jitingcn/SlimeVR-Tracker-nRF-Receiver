@@ -275,4 +275,18 @@ static inline void esb_request_all_shutdown(void)
 	esb_send_remote_command_all(ESB_PONG_FLAG_SHUTDOWN);
 }
 
+/* Peer relay coordinator (relay_coord.c). */
+void esb_relay_set_enabled(bool enabled);
+void esb_relay_set_v3_enabled(bool enabled);
+void esb_relay_pin(uint8_t id, bool pinned);
+/* Test hook: drop percent% of id's direct uplink (pose, bundles, PINGs). */
+void esb_relay_block(uint8_t id, uint8_t percent);
+bool esb_relay_block_mask(uint16_t mask, uint8_t seconds);
+/* OTA requires a direct link: true while id is delivered through a relay. */
+bool esb_relay_blocks_ota(uint8_t id);
+void esb_relay_layout_print(void);
+int esb_relay_layout_set(const char *name, uint16_t value);
+void esb_relay_print_status(void);
+void esb_relay_print_pool(void);
+
 #endif

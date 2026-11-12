@@ -4,6 +4,11 @@
 Time, IRQ locking, HID counters, SDK radio diagnostics and logging are modeled.
 """
 
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse
 import os
 from pathlib import Path
@@ -21,7 +26,7 @@ from c_extract import extract_block
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source', type=Path, default=ROOT / 'src/connection/esb.c')
 args = parser.parse_args()
-source = args.source.read_text()
+source = select_relay(args.source.read_text())
 console = (ROOT / 'src/console.c').read_text()
 header = (ROOT / 'src/connection/esb.h').read_text()
 
@@ -60,7 +65,9 @@ diag_declarations = '\n'.join(unique(
     for name in ('tdma_loss_last_permille', 'tdma_last_loss_step_ms'))
 fixture = (HERE / 'fixture.c').read_text()
 fixture = fixture.replace('/* PRODUCTION TYPES */', '\n'.join((
+    f'#include "{ROOT / "src/connection/relay_coord.h"}"',
     constants, ladder, packet_type, slot_type, slot_declaration,
+    unique(r'^static struct \{\n\tuint32_t bundles;[\s\S]*?^\} relay_rx_stats;'),
     '#if defined(CONFIG_TDMA_DIAGNOSTICS)', phase_type, diag_type,
     diag_declaration, diag_declarations, '#endif',
 )))
