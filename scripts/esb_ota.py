@@ -676,16 +676,24 @@ def do_query_info(client: OTAClient, tracker_id: int, quiet: bool = False):
         print(f"\nQuerying firmware info for tracker {tracker_id}...")
     client.query_info(tracker_id)
 
-    # Collect FW_INFO chunks (6 expected)
-    chunks = []
-    deadline = time.monotonic() + 5.0
+    # Collect FW_INFO chunks (6 expected). The tracker answers with one
+    # unacknowledged-by-host ESB frame; if it is lost (e.g. during a TDMA
+    # layout change) nothing retries it, so re-query while nothing arrived.
+    chunks = {}
+    start = time.monotonic()
+    deadline = start + 6.0
+    next_resend = start + 1.5
     while time.monotonic() < deadline and len(chunks) < 6:
-        reports = client._read_ota_reports(timeout_ms=500)
+        if not chunks and time.monotonic() >= next_resend:
+            client.query_info(tracker_id)
+            next_resend = time.monotonic() + 1.5
+        reports = client._read_ota_reports(timeout_ms=200)
         for r in reports:
-            if r[0] == HID_OTA_FW_INFO and r[1] == tracker_id:
-                chunks.append(r)
+            if r[0] == HID_OTA_FW_INFO and r[1] == tracker_id and r[2] not in chunks:
+                chunks[r[2]] = r
                 if not quiet:
                     print(f"  [chunk {r[2]}] data={r.hex()}")
+    chunks = [chunks[k] for k in sorted(chunks)]
 
     if not chunks:
         if not quiet:
