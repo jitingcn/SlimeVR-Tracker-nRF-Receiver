@@ -185,7 +185,7 @@ static void restart_ping(uint8_t tracker_id) {
         snapshot,
         function(source, 'tdma_loss_controller_update'),
         function(source, 'tdma_loss_controller_tick'),
-        function(source, 'check_packet_sequence'),
+        function(source, 'packet_stats_refresh'), function(source, 'packet_stats_count'), function(source, 'check_packet_sequence'),
         function(source, 'composite_body_length'),
         function(source, 'tdma_pack_config'),
         function(source, 'tdma_slot_ticks_for'),
