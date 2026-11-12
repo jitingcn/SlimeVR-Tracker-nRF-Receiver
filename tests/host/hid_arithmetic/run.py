@@ -77,12 +77,19 @@ static uint8_t enqueued_packet[16];
 static uint32_t enqueued_generation;
 static unsigned int enqueued_count;
 static bool enqueue_stalled;
-static bool hid_enqueue_packet(const uint8_t data[16], uint32_t generation) {
+static unsigned int dropped_count;
+static void hid_note_dropped(const uint8_t *data) { (void)data; dropped_count++; }
+static bool hid_push_packet(const uint8_t data[16], uint32_t generation) {
     if(enqueue_stalled)return false;
     memcpy(enqueued_packet, data, sizeof(enqueued_packet));
     enqueued_generation=generation;
     enqueued_count++;
     return true;
+}
+static bool hid_enqueue_packet(const uint8_t data[16], uint32_t generation) {
+    if(hid_push_packet(data, generation))return true;
+    hid_note_dropped(data);
+    return false;
 }
 '''
 functions = '\n'.join(function(source, name) for name in (
@@ -149,6 +156,10 @@ static void test_quaternion(void) {
     enqueue_stalled=true;
     assert(!hid_try_write_packet_n(retry, 200));
     assert(rssi_states[0].ema_value==before_state.ema_value && rssi_states[0].initialized==before_state.initialized);
+    /* A refusal the relay worker retries is not a drop; the plain writer's is. */
+    assert(dropped_count==0);
+    hid_write_packet_n(retry, 200);
+    assert(dropped_count==1);
     enqueue_stalled=false;
     assert(hid_try_write_packet_n(retry,200));
     _Alignas(uint16_t) uint8_t storage[17];
