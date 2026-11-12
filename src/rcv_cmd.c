@@ -195,6 +195,12 @@ uint8_t rcv_cmd_info(void)
 
 	printk("\nDevice address: %012llX\n", *(uint64_t *)NRF_FICR->DEVICEADDR & 0xFFFFFFFFFFFF);
 
+	const struct sys_fatal_record *fatal = sys_last_fatal();
+	if (fatal) {
+		printk("Last fatal: reason=%u pc=0x%08x lr=0x%08x thread=0x%08x\n",
+			fatal->reason, fatal->pc, fatal->lr, fatal->thread);
+	}
+
 	uint8_t current_channel = esb_get_receiver_channel();
 	if (current_channel != ESB_RF_CHANNEL_DEFAULT) {
 		printk("RF Channel: %u (custom)\n", current_channel);

@@ -30,6 +30,11 @@ void sys_request_system_reboot(void);
 void sys_enter_dfu(bool ota);
 /* Mark next reboot to skip DFU only when no bootloader request is pending. */
 void sys_skip_dfu_marker(void);
+struct sys_fatal_record {
+	uint32_t magic, reason, pc, lr, thread, reset_reason, check;
+};
+/* Last fatal error before a reboot, or NULL. */
+const struct sys_fatal_record *sys_last_fatal(void);
 /* Acknowledge healthy uptime only for a capability-advertising bootloader,
  * without replacing pending DFU/fatal requests or legacy marker values. */
 void sys_mark_boot_success(void);

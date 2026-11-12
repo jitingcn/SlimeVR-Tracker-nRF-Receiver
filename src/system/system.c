@@ -105,10 +105,32 @@ void sys_mark_boot_success(void)
 #endif
 }
 
+/* Survives the cold reboot below; read by `info`. */
+static __noinit struct sys_fatal_record fatal_record;
+#define FATAL_RECORD_MAGIC 0xFA7A1C0DU
+
+static uint32_t fatal_check(const struct sys_fatal_record *r)
+{
+	return FATAL_RECORD_MAGIC ^ r->reason ^ r->pc ^ r->lr ^ r->thread ^ r->reset_reason;
+}
+
+const struct sys_fatal_record *sys_last_fatal(void)
+{
+	return fatal_record.magic == FATAL_RECORD_MAGIC && fatal_record.check == fatal_check(&fatal_record) ? &fatal_record : NULL;
+}
+
 void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 {
-	ARG_UNUSED(reason);
-	ARG_UNUSED(esf);
+	fatal_record.magic = 0;
+	__DMB();
+	fatal_record.reason = reason;
+	fatal_record.pc = esf ? esf->basic.pc : 0;
+	fatal_record.lr = esf ? esf->basic.lr : 0;
+	fatal_record.thread = (uint32_t)(uintptr_t)k_current_get();
+	fatal_record.reset_reason = boot_reset_reason;
+	fatal_record.check = fatal_check(&fatal_record);
+	__DMB();
+	fatal_record.magic = FATAL_RECORD_MAGIC;
 #if ADAFRUIT_RECOVERY_ENABLED
 	NRF_POWER->GPREGRET = bootloader_supports_recovery ?
 		ADAFRUIT_RECOVERY_FATAL : ADAFRUIT_DFU_MAGIC_UF2_RESET;

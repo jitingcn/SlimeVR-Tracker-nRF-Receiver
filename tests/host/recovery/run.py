@@ -34,9 +34,13 @@ production = constants + '\nstatic uint32_t boot_reset_reason;\n'
 production += '#if ADAFRUIT_RECOVERY_ENABLED\n'
 production += re.search(r'^static bool bootloader_supports_recovery;', system, re.M).group(0)
 production += '\n#endif\n'
+header = (args.source_root / 'src/system/system.h').read_text()
+production += re.search(r'^struct sys_fatal_record \{.*?^\};', header, re.M | re.S).group(0) + '\n'
+production += '#define __noinit\n' + re.search(
+    r'^static __noinit struct sys_fatal_record fatal_record;\n#define FATAL_RECORD_MAGIC .*$', system, re.M).group(0) + '\n'
 production += '\n'.join(function(system, name) for name in (
     'sys_reset_reason_init', 'sys_mark_boot_success', 'sys_skip_dfu_marker',
-    'k_sys_fatal_error_handler', 'sys_button_init'))
+    'fatal_check', 'k_sys_fatal_error_handler', 'sys_button_init'))
 production += function(main, 'boot_confirm_after_healthy_uptime')
 production += '#define main receiver_main\n' + function(main, 'main') + '#undef main\n'
 with tempfile.TemporaryDirectory(prefix='receiver-recovery-') as directory:

@@ -52,10 +52,12 @@ static void barrier(void) {
     barriers++;
 }
 #define __DSB() barrier()
+#define __DMB() ((void)0)
 #define LOG_PANIC() (++panics)
 #define LOG_ERR(...) (++logs)
 #define LOG_INF(...) (++logs)
-struct arch_esf { int unused; };
+struct arch_esf { struct { uint32_t pc, lr; } basic; };
+static void *k_current_get(void) { return NULL; }
 static jmp_buf reboot_exit;
 static void sys_arch_reboot(int type) {
     assert(type == SYS_REBOOT_COLD);
