@@ -830,6 +830,10 @@ void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
 		}
 	}
 
+	unsigned key = irq_lock();
+	uint8_t id = data[1];
+	struct rssi_ema_state previous = {0};
+	if (id < MAX_TRACKERS) previous = rssi_states[id];
 	memcpy(pkt, data, sizeof(pkt));
 	if (hid_type_has_rssi_slot(data[0])) {
 		uint8_t tracker_id = data[1];
@@ -840,5 +844,8 @@ void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
 		}
 	}
 
-	(void)hid_enqueue_packet(pkt, 0);
+	if (!hid_enqueue_packet(pkt, 0) && id < MAX_TRACKERS) {
+		rssi_states[id] = previous;
+	}
+	irq_unlock(key);
 }
