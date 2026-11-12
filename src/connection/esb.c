@@ -1287,11 +1287,11 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks, int8_t rssi)
 	 * drift, collisions).
 	 */
 	if (!stats->phase_initialized) {
-		stats->phase_ema_q8 = ref_offset << 8;
+		stats->phase_ema_q8 = ref_offset * 256;
 		stats->phase_initialized = true;
 	} else {
 		/* EMA alpha=1/8: converges in ~8 packets (~50ms at 170 TPS) */
-		stats->phase_ema_q8 += (((ref_offset << 8) - stats->phase_ema_q8) + 4) >> 3;
+		stats->phase_ema_q8 += (((ref_offset * 256) - stats->phase_ema_q8) + 4) >> 3;
 	}
 
 	int32_t phase_mean = stats->phase_ema_q8 >> 8;
