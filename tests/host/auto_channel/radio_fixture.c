@@ -22,6 +22,7 @@
 #define SYS_STATUS_CONNECTION_ERROR 1
 #define RADIO_STATE_STATE_Disabled 0
 #define ESB_PROTOCOL_ESB_DPL 1
+#define ESB_BITRATE_2MBPS_BLE 4
 #define ESB_MODE_PTX 0
 #define ESB_MODE_PRX 1
 #define ESB_TXMODE_MANUAL 1
@@ -48,7 +49,7 @@ static bool atomic_cas(atomic_t *value, int old, int next)
 struct esb_payload { uint8_t length, pipe; bool noack; int8_t rssi; uint8_t data[64]; };
 struct esb_evt { int evt_id; unsigned tx_attempts; };
 struct esb_config {
-    int protocol, mode, tx_output_power, retransmit_delay, tx_mode;
+    int protocol, mode, bitrate, tx_output_power, retransmit_delay, tx_mode;
     bool selective_auto_ack, use_fast_ramp_up;
     void (*event_handler)(const struct esb_evt *);
     void (*ack_handler)(const uint8_t *, uint8_t, uint32_t, struct esb_payload *, bool *, bool *);

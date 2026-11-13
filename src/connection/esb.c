@@ -2972,6 +2972,7 @@ static int esb_initialize_internal(bool tx, bool quiet)
 	int err;
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
+	config.bitrate = ESB_BITRATE_2MBPS_BLE;
 
 	if (tx) {
 		config.protocol = ESB_PROTOCOL_ESB_DPL;
