@@ -57,8 +57,13 @@ static void barrier(void) {
 #define LOG_ERR(...) (++logs)
 #define LOG_INF(...) (++logs)
 struct arch_esf { struct { uint32_t pc, lr; } basic; };
-static int k_is_pre_kernel(void) { return 0; }
-static void *k_current_get(void) { return NULL; }
+#define THREAD_SENTINEL 0x12345678u
+static bool pre_kernel;
+static int k_is_pre_kernel(void) { return pre_kernel; }
+static void *k_current_get(void) {
+    assert(!pre_kernel);
+    return (void *)(uintptr_t)THREAD_SENTINEL;
+}
 static jmp_buf reboot_exit;
 static void sys_arch_reboot(int type) {
     assert(type == SYS_REBOOT_COLD);
@@ -208,26 +213,40 @@ static void markers_and_uptime(void) {
     }
 #endif
 }
-static void fatal(void) {
+static void fatal(bool before_kernel, uint32_t expected_reset_reason) {
+    const struct arch_esf frame = { .basic = { .pc = 0x10203040u, .lr = 0x50607080u } };
+    pre_kernel = before_kernel;
+    assert(boot_reset_reason == expected_reset_reason);
     for (unsigned marker = 0; marker < 256; marker++) {
-        power_regs.GPREGRET = marker;
-        power_regs.GPREGRET2 = marker ^ 0xA5u;
-        barriers = panics = logs = reboots = 0;
-        if (!setjmp(reboot_exit)) k_sys_fatal_error_handler(42, NULL);
-        assert(reboots == 1 && locks == 0);
+        for (unsigned has_frame = 0; has_frame < 2; has_frame++) {
+            const struct arch_esf *esf = has_frame ? &frame : NULL;
+            unsigned int reason = has_frame ? (0xCAFE0000u | marker) : 42;
+            power_regs.GPREGRET = marker;
+            power_regs.GPREGRET2 = marker ^ 0xA5u;
+            barriers = panics = logs = reboots = 0;
+            if (!setjmp(reboot_exit)) k_sys_fatal_error_handler(reason, esf);
+            assert(reboots == 1 && locks == 0);
 #ifdef TEST_UF2
-        assert(power_regs.GPREGRET == (recovery_capable ? 0xE3u : 0x57u));
-        assert(barriers == 1 && panics == 0 && logs == 0);
+            assert(power_regs.GPREGRET == (recovery_capable ? 0xE3u : 0x57u));
+            assert(barriers == 1 && panics == 0 && logs == 0);
 #else
-        assert(power_regs.GPREGRET == marker && barriers == 0 && panics == 1 && logs == 1);
+            assert(power_regs.GPREGRET == marker && barriers == 0 && panics == 1 && logs == 1);
 #endif
-        assert(power_regs.GPREGRET2 == (marker ^ 0xA5u));
+            assert(power_regs.GPREGRET2 == (marker ^ 0xA5u));
+            const struct sys_fatal_record *record = sys_last_fatal();
+            assert(record != NULL);
+            assert(record->reason == reason);
+            assert(record->pc == (esf ? frame.basic.pc : 0));
+            assert(record->lr == (esf ? frame.basic.lr : 0));
+            assert(record->thread == (before_kernel ? 0u : THREAD_SENTINEL));
+            assert(record->reset_reason == expected_reset_reason);
+        }
     }
 }
 int main(void) {
     /* Fatal before PRE_KERNEL_1 must use legacy fallback, even with a token. */
     timer_regs.CC[1] = 0x52435631u;
-    fatal();
+    fatal(true, 0);
     const uint32_t tokens[] = {
         0, 0x52435630u, 0x52435632u, 0xFFFFFFFFu, 0x00005631u, 0x52435631u, 0
     };
@@ -238,7 +257,8 @@ int main(void) {
 #endif
         snapshot_and_button();
         markers_and_uptime();
-        fatal();
+        fatal(true, 0x100u | POWER_RESETREAS_VBUS_Msk);
+        fatal(false, 0x100u | POWER_RESETREAS_VBUS_Msk);
     }
     puts("receiver recovery: runtime capability, timer reuse, snapshot/button, "
          "60s acknowledgment, pending requests, early/final fatal passed");

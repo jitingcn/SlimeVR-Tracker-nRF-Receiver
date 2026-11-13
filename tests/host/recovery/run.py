@@ -40,7 +40,7 @@ production += '#define __noinit\n' + re.search(
     r'^static __noinit struct sys_fatal_record fatal_record;\n#define FATAL_RECORD_MAGIC .*$', system, re.M).group(0) + '\n'
 production += '\n'.join(function(system, name) for name in (
     'sys_reset_reason_init', 'sys_mark_boot_success', 'sys_skip_dfu_marker',
-    'fatal_check', 'k_sys_fatal_error_handler', 'sys_button_init'))
+    'fatal_check', 'sys_last_fatal', 'k_sys_fatal_error_handler', 'sys_button_init'))
 production += function(main, 'boot_confirm_after_healthy_uptime')
 production += '#define main receiver_main\n' + function(main, 'main') + '#undef main\n'
 with tempfile.TemporaryDirectory(prefix='receiver-recovery-') as directory:
