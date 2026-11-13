@@ -176,9 +176,11 @@ choice SEGGER_RTT_SECTION
     default SEGGER_RTT_SECTION_NONE if SOC_NRF52833
 endchoice
 
+# The `relay` console dump goes through the deferred log buffer and loses its
+# first lines at 4 KB with 11 trackers. Builds without relay keep 4 KB.
 config LOG_BUFFER_SIZE
-    default 4096 if SOC_NRF52833
-    default 16384
+    default 16384 if RELAY && !SOC_NRF52833
+    default 4096
 
 source "Kconfig.zephyr"
 
