@@ -26,6 +26,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* False is a refused attempt; relay retains the record for retry, so a
+ * refusal is not counted as a drop. */
+bool hid_try_write_packet_n(const uint8_t *data, uint8_t rssi);
+/* Count a report that was discarded for good. IRQ safe. */
+void hid_note_dropped(const uint8_t *data);
 void hid_write_packet_n(const uint8_t *data, uint8_t rssi);
 /* Nonzero subscription generation; false means the FIFO did not accept it. */
 bool hid_write_tracker_event(const uint8_t record[16], uint32_t generation);

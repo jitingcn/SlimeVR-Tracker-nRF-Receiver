@@ -4,6 +4,11 @@
 NVS and hardware leaves are modeled. The real PING validation, membership,
 deadline and publication bodies are exercised without RF or HID timing.
 """
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse
 import importlib.util
 import os
@@ -18,12 +23,13 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE.parent / 'harness'))
 from c_extract import extract_block
+from relay_support import relay_declarations
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--source', type=Path, default=ROOT / 'src/connection/esb.c')
 parser.add_argument('--case', choices=['owner-store-lock-delay'])
 args = parser.parse_args()
-source = args.source.read_text()
+source = select_relay(args.source.read_text())
 header = (ROOT / 'src/connection/esb.h').read_text()
 spec = importlib.util.spec_from_file_location('tdma_loss_extract', HERE.parent / 'tdma_loss/run.py')
 extract = importlib.util.module_from_spec(spec)
@@ -72,10 +78,12 @@ declarations = [
 ]
 declarations.extend(declaration(name) for name in variables)
 declarations.append(extract.diagnostic_loss_declarations(source))
+declarations.append(relay_declarations(source))
 functions = [function(name) for name in (
     'tdma_loss_reset_windows', 'tdma_pack_config', 'tdma_shadow_observe',
-    'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
-    'tdma_membership_wait_ms', 'tdma_slot_ticks_for', 'tdma_recalculate',
+    'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
+    'tdma_membership_wait_ms', 'tdma_slot_ticks_for', 'tdma_staging_supported_locked',
+    'tdma_apply_locked', 'tdma_apply_finish', 'tdma_advertised_config', 'tdma_recalculate',
     'tracker_store_restore',
 )]
 functions.append('static uint32_t sys_get_be32(const uint8_t *p) {\n'
@@ -109,8 +117,8 @@ with tempfile.TemporaryDirectory(prefix='receiver-tdma-membership-') as director
     for diagnostics in (False, True):
         flags = ['-DCONFIG_TDMA_DIAGNOSTICS=1'] if diagnostics else []
         subprocess.run(compiler + [
-            '-std=c11', '-g', '-O1', '-Wall', '-Wextra',
+            '-DCONFIG_RELAY_RUNTIME_LAYOUT=1', '-std=c11', '-g', '-O1', '-Wall', '-Wextra',
             '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-            '-fno-pie', '-no-pie', *flags, str(generated), '-o', str(executable),
+            '-fno-pie', '-no-pie', '-I', str(ROOT / 'src/connection'), *flags, str(generated), '-o', str(executable),
         ], check=True)
         subprocess.run([str(executable)] + ([args.case] if args.case else []), check=True, timeout=20)

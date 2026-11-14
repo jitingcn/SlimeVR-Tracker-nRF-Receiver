@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 """Exercise production sequence, membership and recovery bodies."""
 
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse
 import os
 from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'harness'))
+from c_extract import extract_block
+from relay_support import relay_section, staging_helpers  # noqa: E402
 
 
 CASES = (
@@ -99,12 +109,17 @@ def membership_declarations(source):
     ))
 
 
+# These two read relay and staging state, which is declared later.
+LATE_MEMBERSHIP = ('tdma_admissible_mask', 'tdma_membership_wait_ms')
+
+
 def membership_bodies(source):
-    return '\n'.join(function(source, name) for name in (
+    prototypes = ('static uint32_t tdma_admissible_mask(uint32_t desired);\n'
+                  'static uint32_t tdma_membership_wait_ms(uint32_t maximum_ms);')
+    return '\n'.join((prototypes, *(function(source, name) for name in (
         'tdma_shadow_observe', 'tdma_shadow_forget_tracker',
         'tdma_shadow_merge_locked', 'tdma_shadow_update',
-        'tdma_membership_wait_ms',
-    ))
+    ))))
 
 
 
@@ -151,15 +166,31 @@ def production_bodies(source, header=''):
         snapshot += function(source, 'esb_auto_loss_rebase', optional=True)
         snapshot += function(source, 'esb_reset_all_stats')
 
-    start = source.index('uint8_t received_sequence = rx_payload.data[16];')
-    end = source.index('if (seq_result == 3', start)
-    admission = ('\nstatic bool normal_admit(uint8_t tracker_id, struct esb_payload rx_payload) {\n'
-                 'do {\n' + source[start:end] + 'return true;\n} while (0);\nreturn false;\n}\n')
+    relay = 'static void esb_receive_normal(' in source
+    if relay:
+        # The 17-byte path is its own function; admission = forwarded to HID.
+        admission = '''
+static bool normal_admit(uint8_t tracker_id, struct esb_payload payload) {
+    unsigned before = fixture_pose_count;
+    payload.data[1] = tracker_id;
+    if (payload.data[0] > 223) {
+        payload.data[0] = 1; /* scenarios reuse composite buffers; admission is type-blind */
+    }
+    esb_receive_normal(&payload, 0, false);
+    return fixture_pose_count != before;
+}
+'''
+    else:
+        start = source.index('uint8_t received_sequence = rx_payload.data[16];')
+        end = source.index('if (seq_result == 3', start)
+        admission = ('\nstatic bool normal_admit(uint8_t tracker_id, struct esb_payload rx_payload) {\n'
+                     'do {\n' + source[start:end] + 'return true;\n} while (0);\nreturn false;\n}\n')
+    composite_args = '&payload, 0, false' if relay else '&payload, 0'
     admission += '''
 static bool composite_admit(uint8_t tracker_id, struct esb_payload payload) {
     unsigned before = fixture_pose_count;
     payload.data[1] = tracker_id;
-    esb_receive_composite(&payload, 0);
+    esb_receive_composite(''' + composite_args + ''');
     return fixture_pose_count != before;
 }
 static void restart_ping(uint8_t tracker_id) {
@@ -185,14 +216,22 @@ static void restart_ping(uint8_t tracker_id) {
         snapshot,
         function(source, 'tdma_loss_controller_update'),
         function(source, 'tdma_loss_controller_tick'),
-        function(source, 'packet_stats_refresh'), function(source, 'packet_stats_count'), function(source, 'check_packet_sequence'),
+        function(source, 'packet_stats_refresh'), function(source, 'packet_stats_count'),
+        function(source, 'check_packet_sequence'),
         function(source, 'composite_body_length'),
         function(source, 'tdma_pack_config'),
         function(source, 'tdma_slot_ticks_for'),
         membership_bodies(source),
         diagnostic_function(source, 'account_ping_clock'),
         function(source, 'esb_receive_ping'),
+        relay_section(source, stats=False) if relay else '',
+        extract_block(source, r'^struct composite_result\s*\{', True),
+        function(source, 'composite_validate'),
+        function(source, 'esb_execute_composite'),
         function(source, 'esb_receive_composite'),
+        function(source, 'esb_receive_normal', optional=True),
+        staging_helpers(source, recalc=True) if relay else '',
+        *(function(source, name) for name in LATE_MEMBERSHIP),
         function(source, 'tdma_recalculate'),
         admission,
     ))
@@ -212,7 +251,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    source = (args.source_root / 'src/connection/esb.c').read_text()
+    source = select_relay((args.source_root / 'src/connection/esb.c').read_text())
     header = (args.source_root / 'src/connection/esb.h').read_text()
     fixture = Path(__file__).with_name('fixture.c').read_text()
     prelude, scenarios = fixture.split('/* PRODUCTION BODIES */')
@@ -236,7 +275,7 @@ def main():
         for diagnostics in (False, True):
             diagnostic_flags = ['-DCONFIG_TDMA_DIAGNOSTICS=1'] if diagnostics else []
             subprocess.run(compiler + flags + diagnostic_flags + [
-                '-I', str(args.source_root / 'src'), str(generated), '-o', str(binary)], check=True)
+                '-I', str(args.source_root / 'src'), '-I', str(args.source_root / 'src/connection'), str(generated), '-o', str(binary)], check=True)
             for case in args.case or CASES:
                 subprocess.run([str(binary), case], check=True)
                 print(f'PASS diagnostics={int(diagnostics)} {case}', flush=True)

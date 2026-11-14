@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse
 import os
 from pathlib import Path
@@ -20,7 +25,7 @@ fixture = Path(__file__).with_name('fixture.c')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness'))
 from c_extract import extract_block
 
-radio_source = (source_root / 'src/connection/esb.c').read_text()
+radio_source = select_relay((source_root / 'src/connection/esb.c').read_text())
 radio_functions = '\n\n'.join(
     extract_block(radio_source, r'^[\w \t*]+\b' + re.escape(name) +
                   r'\s*\([^;{}]*\)\s*\{')
@@ -64,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix='receiver-ota-relay-') as directory:
     for name, source, enabled in builds:
         executable = root / name
         subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
-            '-std=c11', '-O0', '-g', '-Wall', '-Wextra',
+            '-DCONFIG_RELAY=1', '-std=c11', '-O0', '-g', '-Wall', '-Wextra',
             '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
             '-I', str(root), '-I', str(source_root / 'src'),
             f'-DRELAY_SOURCE="{source}"', f'-DINSTRUMENTED={enabled}',

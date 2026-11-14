@@ -182,6 +182,8 @@ static uint8_t reports[512][16];
 static size_t report_count;
 
 bool esb_ota_relay_is_active(void);
+static uint16_t relayed_ids;
+bool esb_relay_blocks_ota(uint8_t id) { return id < 16 && (relayed_ids & (1u << id)); }
 static bool receiver_ota_is_active(void) { return receiver_ota_active; }
 static bool data_collect_is_active(void) { return collect_active; }
 static bool data_collect_batch_is_active(void) { return collect_batch_active; }
@@ -355,6 +357,7 @@ static const uint8_t abort_at_100[13] = {0xf1, 0, 0, 0, 0, 0, 100, 0x31, 0, 0, 0
 static void reset_world(void)
 {
     assert(!irq_mask && !spin_depth && !pending_irq && !radio_owned);
+    relayed_ids = 0;
     memset(&ota_relay, 0, sizeof(ota_relay));
     memset(ota_abort_valid, 0, sizeof(ota_abort_valid));
     memset(ota_abort_expiry_ticks, 0, sizeof(ota_abort_expiry_ticks));
@@ -749,6 +752,17 @@ static void test_reservation(void)
         assert(radio_begins == 2 && radio_ends == 1 && !radio_owned);
         expect_ack(ack(0, 0), begin_ack_a, 64);
     }
+
+    /* OTA needs a direct link: a relayed tracker is refused before any
+     * radio ownership or admission, and accepted again once direct. */
+    reset_world();
+    relayed_ids = 1u << 2;
+    begin(2, begin_a);
+    assert(!esb_ota_relay_is_active() && !esb_ota_relay_is_target(2) && !ack(2, 0).has);
+    assert(radio_begins == 0 && radio_claims == 0);
+    relayed_ids = 0;
+    begin(2, begin_a);
+    assert(esb_ota_relay_is_target(2));
 
     reset_world();
     radio_begin_hook = fill_capacity;

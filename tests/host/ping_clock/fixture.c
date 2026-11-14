@@ -79,7 +79,14 @@ static unsigned error_count;
 #define LOG_ERR(...) (error_count++, log_message(__VA_ARGS__))
 #define LOG_INF(...) log_message(__VA_ARGS__)
 
-struct esb_payload { uint8_t length, pipe; bool noack; int8_t rssi; uint8_t data[64]; };
+struct esb_payload {
+	uint8_t length, pipe;
+	bool noack;
+	int8_t rssi;
+	uint8_t data[64];
+	uint32_t rx_ticks, rx_context;
+	bool rx_pose;
+};
 struct esb_evt { int evt_id; unsigned tx_attempts; };
 /* PRODUCTION STATE */
 static uint32_t decision_ready_mask, decision_fence_mask;
@@ -336,24 +343,27 @@ static struct esb_payload ack_for(const struct esb_payload *p, bool *has_ack)
     assert(!suppress);
     if (*has_ack) {
         ++pong_tick_reads;
-        assert(ack.length == ESB_PONG_LEN && ack.data[0] == ESB_PONG_TYPE);
-        assert(ack.data[1] == p->data[1] && ack.data[2] == p->data[2]);
-        assert(sys_get_be32(&ack.data[3]) == now_ticks);
-        assert(crc8_ccitt(0x07, ack.data, ESB_PONG_LEN - 1) == ack.data[ESB_PONG_LEN - 1]);
-        printf("PROTOCOL ack pipe=%u data=", ack.pipe);
-        for (unsigned i = 0; i < ack.length; ++i) printf("%02x", ack.data[i]);
-        putchar('\n');
-    }
-    tick_context = TICK_EVENT;
-    return ack;
+		assert(ack.length >= ESB_PONG_LEN && ack.data[0] == ESB_PONG_TYPE);
+		assert(ack.data[1] == p->data[1] && ack.data[2] == p->data[2]);
+		assert(sys_get_be32(&ack.data[3]) == now_ticks);
+		assert(crc8_ccitt(0x07, ack.data, ESB_PONG_LEN - 1) == ack.data[ESB_PONG_LEN - 1]);
+		printf("PROTOCOL ack pipe=%u data=", ack.pipe);
+		for (unsigned i = 0; i < ack.length; ++i) {
+			printf("%02x", ack.data[i]);
+		}
+		putchar('\n');
+	}
+	tick_context = TICK_EVENT;
+	return ack;
 }
 static void dispatch(const struct esb_payload *p)
 {
     incoming = *p;
-    incoming_ready = true;
-    const struct esb_evt event = {.evt_id = ESB_EVENT_RX_RECEIVED};
-    event_handler(&event);
-    assert(!incoming_ready);
+	incoming.rx_ticks = now_ticks;
+	incoming_ready = true;
+	const struct esb_evt event = {.evt_id = ESB_EVENT_RX_RECEIVED};
+	event_handler(&event);
+	assert(!incoming_ready);
 }
 static void confirm(uint8_t id, uint8_t flag)
 {
@@ -431,6 +441,27 @@ static void test_invalid(const char *which)
     }
     if (strcmp(which, "bad-crc") == 0) assert(tracker_slots[id].crc_error_count == 1);
 }
+static void test_maintenance(void)
+{
+	const uint8_t id = 2;
+	relay_profile = RELAY_PROFILE_120HZ;
+	tdma_active_mask = 7;
+	relay_coord_note_caps(&relay_coord, id, RELAY_CAP_HELPER | (RELAY_V3_VERSION << RELAY_CAP_VERSION_SHIFT));
+	now_ticks = RELAY_V3_REPAIR_START + RELAY_V3_TX_OFFSET;
+	struct esb_payload p = packet(ESB_PING_TYPE, id, 3, 1, now_ticks, ESB_PONG_FLAG_NORMAL);
+	bool has_ack = false;
+	struct esb_payload ack = ack_for(&p, &has_ack);
+	struct relay_pong_trailer trailer;
+	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_NORMAL && ack.pipe == 3);
+	assert(ack.length == ESB_PONG_LEN + RELAY_TRAILER_PENDING_LEN);
+	assert(relay_trailer_decode_len(&ack.data[ESB_PONG_LEN], ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.pending && trailer.pending_total == relay_geometry_code(3, relay_applied_settings.max_repairs));
+	assert(trailer.pending_member_mask == 7 && trailer.pending_slot_ticks == RELAY_V3_SLOT_TICKS);
+	tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
+	ack = ack_for(&p, &has_ack);
+	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
+}
+
 static void test_valid(void)
 {
     const uint8_t id = 2;
@@ -729,8 +760,9 @@ static void test_detailed_warning(void)
 static void fifo_push(struct esb_payload p, uint32_t ticks)
 {
     assert(fifo_count < 32);
-    fifo[fifo_count] = p;
-    fifo_ticks[fifo_count++] = ticks;
+	p.rx_ticks = ticks;
+	fifo[fifo_count] = p;
+	fifo_ticks[fifo_count++] = ticks;
 }
 
 static void test_drain(void)
@@ -809,7 +841,7 @@ static void test_drain(void)
     event_handler(&rx);
     assert(fifo_next == 23 && fifo_count == 23);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-    assert(tick_reads == 23 && event_tick_reads == 23);
+	assert(tick_reads == 0 && event_tick_reads == 0);
 #else
     assert(tick_reads == 0 && event_tick_reads == 0);
 #endif
@@ -923,24 +955,42 @@ int main(int argc, char **argv)
         printf("PASS %s\n", argv[1]);
         return 0;
     }
-    if (strcmp(argv[1], "pairing-gate") == 0) {
-        test_pairing_gate();
-        printf("PASS %s\n", argv[1]);
-        return 0;
-    }
-    if (strcmp(argv[1], "valid") == 0) test_valid();
-    else if (strcmp(argv[1], "valid-dirty") == 0) test_valid_dirty();
-    else if (strcmp(argv[1], "reacquire") == 0) test_reacquire();
-    else if (strcmp(argv[1], "event-fallback") == 0) test_event_fallback();
-    else if (strcmp(argv[1], "interleaved-pipe") == 0) test_interleaved_pipe();
-    else if (strcmp(argv[1], "ota-status") == 0) test_ota(ESB_OTA_STATUS_TYPE);
-    else if (strcmp(argv[1], "ota-info") == 0) test_ota(ESB_OTA_FW_INFO_TYPE);
-    else if (strcmp(argv[1], "valid-after-invalid") == 0) test_valid_after_invalid();
-    else if (strcmp(argv[1], "late-metadata") == 0) test_late_metadata();
-    else if (strcmp(argv[1], "duplicate") == 0) test_early_sequence_exit(true);
-    else if (strcmp(argv[1], "out-of-order") == 0) test_early_sequence_exit(false);
-    else test_invalid(argv[1]);
-    assert_tick_reads();
-    printf("PASS %s\n", argv[1]);
-    return 0;
+	if (strcmp(argv[1], "maintenance") == 0) {
+		test_maintenance();
+		printf("PASS %s\n", argv[1]);
+		return 0;
+	}
+	if (strcmp(argv[1], "pairing-gate") == 0) {
+		test_pairing_gate();
+		printf("PASS %s\n", argv[1]);
+		return 0;
+	}
+	if (strcmp(argv[1], "valid") == 0) {
+		test_valid();
+	} else if (strcmp(argv[1], "valid-dirty") == 0) {
+		test_valid_dirty();
+	} else if (strcmp(argv[1], "reacquire") == 0) {
+		test_reacquire();
+	} else if (strcmp(argv[1], "event-fallback") == 0) {
+		test_event_fallback();
+	} else if (strcmp(argv[1], "interleaved-pipe") == 0) {
+		test_interleaved_pipe();
+	} else if (strcmp(argv[1], "ota-status") == 0) {
+		test_ota(ESB_OTA_STATUS_TYPE);
+	} else if (strcmp(argv[1], "ota-info") == 0) {
+		test_ota(ESB_OTA_FW_INFO_TYPE);
+	} else if (strcmp(argv[1], "valid-after-invalid") == 0) {
+		test_valid_after_invalid();
+	} else if (strcmp(argv[1], "late-metadata") == 0) {
+		test_late_metadata();
+	} else if (strcmp(argv[1], "duplicate") == 0) {
+		test_early_sequence_exit(true);
+	} else if (strcmp(argv[1], "out-of-order") == 0) {
+		test_early_sequence_exit(false);
+	} else {
+		test_invalid(argv[1]);
+	}
+	assert_tick_reads();
+	printf("PASS %s\n", argv[1]);
+	return 0;
 }

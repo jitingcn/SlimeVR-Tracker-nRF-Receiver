@@ -5,6 +5,11 @@ Lifecycle and private-frame isolation use mocked SDK leaves. The shared full
 FIFO smoke also exercises the real channel decoder and complete packet handlers.
 Neither fixture proves RF timing or RTOS scheduling.
 """
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 from pathlib import Path
 import re
 import subprocess
@@ -16,6 +21,7 @@ HERE = Path(__file__).resolve().parent
 SOURCE = ROOT / "src/connection"
 sys.path.insert(0, str(HERE.parent / "harness"))
 from c_extract import extract_block
+from relay_support import relay_section, staging_helpers
 
 
 def function(source, name, occurrence=0):
@@ -39,7 +45,7 @@ def function(source, name, occurrence=0):
     raise ValueError(f"Unterminated function {name}")
 
 
-esb = (SOURCE / "esb.c").read_text()
+esb = select_relay((SOURCE / "esb.c").read_text())
 auto = (SOURCE / "auto_channel.c").read_text()
 lifecycle = "\n\n".join(function(esb, name) for name in (
     "esb_radio_quiesce", "esb_initialize_internal", "esb_initialize",
@@ -48,16 +54,17 @@ lifecycle = "\n\n".join(function(esb, name) for name in (
     "channel_apply"))
 ack = function(esb, "esb_ack_handler_cb").split("/* ---- Discovery pairing packets", 1)[0]
 ack += "\n downstream_ack++; (void)pipe_id; (void)ack_payload;\n}\n"
-event = "\n\n".join(
+event = extract_block(esb, r'^struct composite_result\s*\{', True) + '\n' + "\n\n".join(
     ("#if defined(CONFIG_TDMA_DIAGNOSTICS)\n" + function(esb, name) + "\n#endif\n")
     if name == "account_ping_clock" else function(esb, name)
-    for name in ("composite_body_length", "account_ping_clock", "esb_receive_ping",
-                 "esb_receive_composite", "event_handler"))
+    for name in ("relay_rx_metadata", "composite_body_length", "account_ping_clock", "esb_receive_ping",
+                 "composite_validate", "esb_execute_composite", "esb_receive_composite", "esb_receive_normal", "esb_receive_bundle", "esb_receive_repair", "esb_receive_peer_report",
+                 "event_handler"))
 common = function(auto, "auto_channel_is_beacon")
 receive_on = function(auto, "auto_channel_receive")
 receive_off = function(auto, "auto_channel_receive", 1)
 restore = function(auto, "restore")
-fixture = (HERE / "radio_fixture.c").read_text()
+fixture = "static unsigned tdma_active_mask;\n" + (HERE / "radio_fixture.c").read_text()
 slot_declarations = "\n".join(
     extract_block(esb, rf"^struct {name}\s*\{{", True)
     for name in ("packet_stats", "tracker_slot")
@@ -79,7 +86,7 @@ fixture = '#include "rssi_scan_fem.h"\n' + fixture
 fixture = fixture.replace("/* ACTUAL_COMMON */", common)
 fixture = fixture.replace("/* ACTUAL_RECEIVE_ON */", receive_on)
 fixture = fixture.replace("/* ACTUAL_RECEIVE_OFF */", receive_off)
-fixture = fixture.replace("/* ACTUAL_ACK */", ack)
+fixture = fixture.replace("/* ACTUAL_ACK */", relay_section(esb) + staging_helpers(esb) + ack)
 fixture = fixture.replace("/* ACTUAL_EVENT */", event)
 fixture = fixture.replace("/* ACTUAL_LIFECYCLE */", lifecycle)
 fixture = fixture.replace("/* ACTUAL_RESTORE */", restore)
@@ -93,7 +100,7 @@ with tempfile.TemporaryDirectory(prefix="auto-channel-radio-") as directory:
         subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
                         "-Wno-unused-function", "-Wno-unused-variable",
                         "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
-                        "-I", str(SOURCE), "-I", str(ROOT / "src"),
+                        "-I", str(SOURCE), "-I", str(ROOT / "src"), "-I", str(ROOT / "src/connection"),
                         *flags, f"-DTEST_FEATURE_ON={enabled}", str(source), "-o", str(exe)], check=True)
         subprocess.run([str(exe)], check=True)
 subprocess.run([sys.executable, str(HERE.parent / "ping_clock/run.py"), "--case", "drain"], check=True)

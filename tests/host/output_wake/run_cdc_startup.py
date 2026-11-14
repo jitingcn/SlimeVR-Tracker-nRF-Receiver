@@ -3,6 +3,11 @@
 
 Use --source-root to run the same fixture against another receiver source tree.
 """
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse
 import importlib.util
 import os
@@ -45,7 +50,7 @@ console = (src / 'console.c').read_text()
 collect = (src / 'data_collect.c').read_text()
 command = (src / 'rcv_cmd.c').read_text()
 hid = (src / 'hid.c').read_text()
-esb = (src / 'connection/esb.c').read_text()
+esb = select_relay((src / 'connection/esb.c').read_text())
 esb_header = (src / 'connection/esb.h').read_text()
 
 flags = '\n'.join(re.findall(r'^#define ESB_(?:PONG_FLAG|RAW_)\w+[^\n]*', esb_header, re.M))

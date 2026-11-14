@@ -171,4 +171,112 @@ config TDMA_DIAGNOSTICS
 
 endmenu
 
+# App defaults must precede the SDK defaults.
+# With RTT in its own section at the RAM start, MPU alignment of the relay
+# RAM functions adds about 15 KB of padding. RTT stays enabled either way.
+choice SEGGER_RTT_SECTION
+    default SEGGER_RTT_SECTION_NONE if RELAY
+endchoice
+
+# The `relay` console dump goes through the deferred log buffer and loses its
+# first lines at 4 KB with 11 trackers. Builds without relay keep 4 KB.
+config LOG_BUFFER_SIZE
+    default 16384 if RELAY && !SOC_NRF52833
+    default 4096
+
 source "Kconfig.zephyr"
+
+config RELAY
+    bool "Receiver-coordinated peer relay (relay v3)"
+    default y if SRAM_SIZE >= 128 && !(SOC_NRF52833 && DATA_COLLECT)
+    depends on ESB_HAS_PRX_BROADCAST && ESB_HAS_RX_METADATA
+    select ESB_PRX_BROADCAST
+    select ESB_RX_METADATA
+    help
+        Enable peer relay when the SDK provides the optional ESB extensions.
+        It is on by default on every SoC the SDK supports with at least
+        128 KB of RAM. Stock sdk-nrf builds retain the ordinary direct
+        tracker protocol. The SDK broadcast is nRF52-only for now; nRF54L
+        receivers (DPPI, GRTC) are WIP.
+        nRF52833 runs relay code from flash and is not recommended as a
+        relay receiver. On nRF52833, relay and
+        DATA_COLLECT do not fit together, so relay defaults off there when
+        raw data collection is enabled.
+
+if RELAY
+
+config RELAY_RAMFUNC
+    bool "Run relay freeze and repeat code from RAM"
+    default n if SOC_NRF52833
+    default y
+
+config RELAY_RESCUE_DIAGNOSTICS
+    bool "Rescue candidate eligibility ledger"
+    default n
+    depends on RELAY_FRAME_LEDGER
+
+config RELAY_CYCLE_DIAGNOSTICS
+    bool "Detailed relay CPU cycle diagnostics"
+    depends on CPU_CORTEX_M_HAS_DWT
+    default n
+    help
+        Measure relay processing with DWT. Production omits these probes.
+
+config RELAY_IRQ_DIAGNOSTICS
+    bool "Whole relay IRQ lock duration probes"
+    depends on CPU_CORTEX_M_HAS_DWT
+    default n
+    help
+        Diagnostic-only DWT maxima for complete source or coordinator locks.
+        Retains all production guards. Never enable for acceptance images.
+
+config RELAY_RUNTIME_LAYOUT
+    bool
+    default y
+
+config RELAY_MAX_TRACKERS
+    int "Maximum private relay members"
+    range 1 16
+    default 16
+
+config RELAY_MAX_REPAIRS
+    int "Maximum ordinary repair slots"
+    range 0 5
+    default 5
+
+config RELAY_REPAIR_FLOOR
+    int "Minimum ordinary repair slots (experimental below ceiling)"
+    range 0 5
+    default RELAY_MAX_REPAIRS
+    help
+      Equal to the ceiling selects production static repair. Lower values
+      explicitly opt into experimental on-demand repair.
+
+config RELAY_EXPERIMENTAL_SLOT_15
+    bool "Allow experimental 15-tick relay slots"
+    default n
+
+config RELAY_SLOT_TICKS
+    int "Private relay slot width"
+    range 15 16 if RELAY_EXPERIMENTAL_SLOT_15
+    range 16 16 if !RELAY_EXPERIMENTAL_SLOT_15
+    default 16
+
+config RELAY_TPS_MIN
+    int "TPS target held by shrinking repair slots"
+    range 1 32768
+    default 120
+
+config RELAY_TPS_MAX
+    int "Private relay TPS cap"
+    range 1 32768
+    default 120
+
+config RELAY_FORCE_FULL_FLEET_PLAN
+    bool "Plan B at the full-fleet lead"
+    default n
+    help
+        Exercise live direct-slot planning even with a partially populated fleet.
+        Applies to every runtime layout when enabled.
+
+endif # RELAY

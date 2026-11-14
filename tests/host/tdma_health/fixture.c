@@ -85,6 +85,7 @@ static void health_command(void)
 static const char expected_prefix[] =
 	"HEALTH TDMA source=data_ping_shadow stored=4 active=2 mask=0x0005 desired=0x000d recent=0x0001 slot=48 epoch=7 TPS=9 HID=8 recv=12 gaps=3 hid_drop_total=11 cap=180 lvl=1/4 loss_pm=217 trig=2 rec=3 probe=4 step_ms=7654\n"
 	"HEALTH observed=0x0003\n"
+	"HEALTH pose direct=0 repair=0 duplicate=0\n"
 	"HEALTH SHADOW desired=0x000d join=0x000a leave=0x0004 ping=0x0005 data=0x0009 stable_ms=2000\n";
 static const char expected_rx[] =
 	"HEALTH RX trk=0 slot=1 pred=2 n=4 adj_min_p50_p99_max=-2/0/3/3 raw_min_p50_p99_max=-4/-4/6/6 rssi_p10_p50=-70/-70 viol=2\n";

@@ -194,7 +194,6 @@ uint8_t rcv_cmd_info(void)
 	printk("Target: " CONFIG_BOARD_TARGET "\n");
 
 	printk("\nDevice address: %012llX\n", *(uint64_t *)NRF_FICR->DEVICEADDR & 0xFFFFFFFFFFFF);
-
 	const struct sys_fatal_record *fatal = sys_last_fatal();
 	if (fatal) {
 		printk("Last fatal: reason=%u pc=0x%08x lr=0x%08x thread=0x%08x\n",

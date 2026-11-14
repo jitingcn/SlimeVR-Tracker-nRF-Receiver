@@ -5,6 +5,11 @@ Store and peripheral leaves are modeled; tuple tests inject a possible interrupt
 after each production shared-field store, without changing the store or order.
 --source-root or --esb-source selects function bodies; declarations use the live contract.
 """
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse
 import os
 from pathlib import Path
@@ -18,6 +23,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE.parent / 'harness'))
 from c_extract import extract_block
+from relay_support import relay_declarations
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--source-root', type=Path, default=ROOT)
@@ -25,8 +31,8 @@ parser.add_argument('--esb-source', type=Path)
 parser.add_argument('--case', action='append', choices=['slots', 'shadow', 'tuples', 'pairing'])
 args = parser.parse_args()
 cases = args.case or ['slots', 'shadow', 'tuples', 'pairing']
-source = (args.esb_source or args.source_root / 'src/connection/esb.c').read_text()
-live = (ROOT / 'src/connection/esb.c').read_text()
+source = select_relay((args.esb_source or args.source_root / 'src/connection/esb.c').read_text())
+live = select_relay((ROOT / 'src/connection/esb.c').read_text())
 
 # Explicit inventory is independent of the reset implementation: removing a
 # production reset store must leave a seeded field nonzero and fail the test.
@@ -91,7 +97,7 @@ if 'pairing' in cases:
     declarations += '\n' + extract_block(live, r'^struct pairing_event\s*\{', semicolon=True)
 
 names = ['esb_auto_loss_invalidate',
-         'tdma_shadow_observe', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
+         'tdma_shadow_observe', 'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
          'esb_send_remote_command_sens', 'esb_send_remote_command_sens_auto',
          'esb_send_remote_command_sens_auto_all', 'esb_send_remote_command_arg']
 if 'slots' in cases or 'pairing' in cases:
@@ -166,6 +172,8 @@ for name, lines in checks.items():
     value = 0 if name == 'check_slot' else 1
     generated += [f'assert(rssi[id] == {value});', '}']
 fixture = (HERE / 'fixture.c').read_text()
+if 'relay_coord_forget' in source:
+    declarations += '\n' + relay_declarations(source)
 fixture = fixture.replace('/* PRODUCTION_DECLARATIONS */', declarations)
 fixture = fixture.replace('/* PRODUCTION_FUNCTIONS */', '\n'.join(functions))
 fixture = fixture.replace('/* GENERATED_SLOT_CHECKS */', '\n'.join(generated))
@@ -185,7 +193,7 @@ with tempfile.TemporaryDirectory(prefix='receiver-state-') as directory:
         subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
             '-std=gnu11', '-g', '-O1', '-fsanitize=address,undefined',
             '-fno-omit-frame-pointer', '-fno-pie', '-no-pie',
-            '-I', str(temporary), '-I', str(ROOT / 'src'), *flags, *diagnostic_flags,
+            '-I', str(temporary), '-I', str(ROOT / 'src'), '-I', str(ROOT / 'src/connection'), *flags, *diagnostic_flags,
             str(probe), str(ROOT / 'src/connection/tracker_roster.c'),
             '-o', str(executable),
         ], check=True)
