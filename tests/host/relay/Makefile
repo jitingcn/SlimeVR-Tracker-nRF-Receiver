@@ -23,6 +23,7 @@ check:
 	$(TMP)/runtime_geometry
 	CC="$(CC)" python3 run_plan_snapshot.py
 	CC="$(CC)" python3 run_cedeea0.py
+	CC="$(CC)" python3 run_snapshot_equivalence.py
 	CC="$(CC)" python3 run_layout_range.py
 	$(CC) $(CFLAGS) -DCONFIG_RELAY_LAYOUT_FOLLOW_RECEIVER=1 test_geometry_link.c geometry_provider.c -o $(TMP)/geometry_link
 	$(TMP)/geometry_link

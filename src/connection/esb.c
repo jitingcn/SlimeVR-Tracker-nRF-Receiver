@@ -2200,7 +2200,7 @@ static void print_tracker_stats_batch(void)
  * observation, but must never publish across a membership/session change. */
 static void relay_learn_update(uint32_t now)
 {
-	static struct relay_coord snapshot;
+	static struct rc_learn_snapshot snapshot;
 	unsigned key = irq_lock();
 	uint32_t session = relay_session;
 	uint8_t epoch = relay_epoch;
@@ -2220,14 +2220,15 @@ static void relay_learn_update(uint32_t now)
 	for (unsigned i = 0; i < RC_MAX; i++) {
 		key = irq_lock();
 		uint32_t start = k_cycle_get_32();
-		snapshot.t[i] = relay_coord.t[i];
+		snapshot.t[i].direct_permille = relay_coord.t[i].direct_permille;
+		snapshot.t[i].rssi = relay_coord.t[i].rssi;
 		memcpy(snapshot.peer[i], relay_coord.peer[i], sizeof(snapshot.peer[i]));
 		memcpy(snapshot.choice[i], relay_coord.choice[i], sizeof(snapshot.choice[i]));
 		relay_learn_lock_max = MAX(relay_learn_lock_max, k_cycle_get_32() - start);
 		irq_unlock(key);
 	}
 	snapshot.learn_members = members;
-	relay_coord_learn_tick(&snapshot, now);
+	relay_learn_snapshot_tick(&snapshot, now);
 	key = irq_lock();
 	uint32_t start = k_cycle_get_32();
 	if (session == relay_session && epoch == relay_epoch && members == tdma_active_mask) {
@@ -6251,17 +6252,12 @@ void esb_relay_print_status(void)
     irq_unlock(probe_key);
     printk("irq_probe plan count=%u max=%u tick count=%u max=%u cycles\n", pc, pm, tc, tm);
 #endif
-	static struct relay_coord snapshot;
-	/* Diagnostic rows need not share one instant. Bound interrupt masking
-	 * while copying the large coordinator, so querying it cannot delay B. */
-	for (size_t offset = 0; offset < sizeof(snapshot); offset += 128U) {
-		unsigned key = irq_lock();
-		memcpy((uint8_t *)&snapshot + offset, (const uint8_t *)&relay_coord + offset,
-			MIN(128U, sizeof(snapshot) - offset));
-		irq_unlock(key);
-	}
 	unsigned int key = irq_lock();
 	struct relay_control control = relay_grants;
+	bool enabled = relay_coord.enabled, requested = relay_coord.v3_requested;
+	uint16_t pinned = relay_coord.pinned, forward = relay_coord.forward_mask, relayed = relay_coord.relayed_mask;
+	uint32_t assignments = relay_coord.assignments, rotations = relay_coord.rotations, releases = relay_coord.releases;
+	bool ready = relay_coord_v3_ready(&relay_coord, (uint16_t)tdma_active_mask);
 	uint16_t members = (uint16_t)tdma_active_mask;
 	uint8_t block_id = relay_block_id, block_pct = relay_block_percent;
 	uint16_t block_mask = relay_block_mask;
@@ -6272,9 +6268,9 @@ void esb_relay_print_status(void)
 #endif
 	irq_unlock(key);
 	printk("relay: %s pinned=0x%04x members=0x%04x forward=0x%04x relayed=0x%04x assignments=%u rotations=%u releases=%u\n",
-		snapshot.enabled ? "on" : (relay_user_enabled ? "paused(ota)" : "off"),
-		snapshot.pinned, members, snapshot.forward_mask, snapshot.relayed_mask,
-		snapshot.assignments, snapshot.rotations, snapshot.releases);
+		enabled ? "on" : (relay_user_enabled ? "paused(ota)" : "off"),
+		pinned, members, forward, relayed,
+		assignments, rotations, releases);
 	printk("relay: profile=%u B_sent=%u B_failed=%u last_err=%d\n", relay_profile, relay_b_sent,
 		relay_b_failed, relay_b_err);
 	printk("relay: B2_sent=%u B2_failed=%u last_err=%d\n", relay_b2_sent, relay_b2_failed, relay_b2_err);
@@ -6295,8 +6291,8 @@ void esb_relay_print_status(void)
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 	printk("relay: diagnostics_overflow=%u\n", tdma_diag_overflow);
 #endif
-	printk("relay: v3 requested=%s eligible=%u\n", snapshot.v3_requested ? "on" : "off",
-		relay_coord_v3_ready(&snapshot, members));
+	printk("relay: v3 requested=%s eligible=%u\n", requested ? "on" : "off",
+		ready);
 	printk("relay: repair seen=%u invalid=%u phase=%u slot=%u record=%u\n",
 	relay_rx_stats.repair.seen, relay_rx_stats.repair.invalid, relay_rx_stats.repair.phase, relay_rx_stats.repair.slot, relay_rx_stats.repair.record);
 	if (relay_profile) {
@@ -6315,7 +6311,10 @@ void esb_relay_print_status(void)
 					printk(" %s=-1", k ? "backup" : "primary");
 					continue;
 				}
-				const struct rc_peer *p = &snapshot.peer[h][child];
+				unsigned row_key = irq_lock();
+				struct rc_peer peer = relay_coord.peer[h][child];
+				irq_unlock(row_key);
+				const struct rc_peer *p = &peer;
 				uint16_t ratio = relay_coord_peer_ratio(p);
 				printk(" %s=%d ratio=%u rssi=-%u expected=%u state=%s", k ? "backup" : "primary",
 					valid ? h : -1, valid ? ratio : 0, valid ? p->rssi_x8 / 8U : 0,
@@ -6327,14 +6326,23 @@ void esb_relay_print_status(void)
 				uint16_t uplink = 0, topology = 0, negative = 0, capacity = 0, eligible = 0;
 				for (unsigned h = 0; h < RC_MAX; h++) {
 					if (!(members & BIT(h))) continue;
-					if (snapshot.t[h].direct_permille < RC_HEAD_MIN_PERMILLE) uplink |= BIT(h);
+					unsigned row_key = irq_lock();
+					uint16_t direct = relay_coord.t[h].direct_permille;
+					struct rc_peer peer = relay_coord.peer[h][child];
+					irq_unlock(row_key);
+					if (direct < RC_HEAD_MIN_PERMILLE) uplink |= BIT(h);
 					if (!relay_can_overhear(members, h, child)) topology |= BIT(h);
-					const struct rc_peer *p = &snapshot.peer[h][child];
+					const struct rc_peer *p = &peer;
 					if (p->expected >= 30U && !p->heard) negative |= BIT(h);
 					unsigned load = 0;
-					for (unsigned c = 0; c < RC_MAX; c++)
+					for (unsigned c = 0; c < RC_MAX; c++) {
+						struct rc_choice choice[2];
+						row_key = irq_lock();
+						memcpy(choice, relay_coord.choice[c], sizeof(choice));
+						irq_unlock(row_key);
 						for (unsigned k = 0; k < 2; k++)
-							load += snapshot.choice[c][k].valid && snapshot.choice[c][k].helper == h;
+							load += choice[k].valid && choice[k].helper == h;
+					}
 					if (load >= RELAY_MAX_CHILDREN) capacity |= BIT(h);
 				}
 				eligible = members & ~(uplink | topology | negative);
@@ -6353,7 +6361,11 @@ void esb_relay_print_status(void)
 		block_left > 0 ? block_mask : 0, block_mask && block_left > 0 ? (unsigned)block_left : 0);
 
 	for (uint8_t i = 0; i < RC_MAX && i < stored_trackers; i++) {
-		const struct rc_tracker *t = &snapshot.t[i];
+		unsigned row_key = irq_lock();
+		struct rc_tracker tracker = relay_coord.t[i];
+		uint8_t slot = relay_coord_forward_slot(&relay_coord, i, members);
+		irq_unlock(row_key);
+		const struct rc_tracker *t = &tracker;
 		if (!t->seen && !t->capable) {
 			continue;
 		}
@@ -6364,7 +6376,7 @@ void esb_relay_print_status(void)
 			printk(" head=%u delivered=%u", t->head, t->delivered);
 		} else if (t->role == RC_ROLE_HEAD) {
 			printk(" children=0x%04x fwd_slot=%u", t->children,
-				relay_coord_forward_slot(&snapshot, i, members));
+				slot);
 		}
 		printk("\n");
 	}
@@ -6620,13 +6632,14 @@ static void relay_repeat_callback(int32_t channel, uint64_t expires, void *conte
 static bool relay_broadcast_context_current(const struct relay_control *control, uint32_t origin);
 static void relay_broadcast_plan(struct relay_control *control, struct rc_grant_plan *plan, struct esb_payload *payload)
 {
-	static struct relay_coord snapshot;
+	static struct rc_plan_snapshot snapshot;
 	for (unsigned i = 0; i < RC_MAX; i++) {
 		unsigned key = irq_lock();
 		IRQ_PROBE_BEGIN(plan);
-		snapshot.t[i] = relay_coord.t[i];
-		memcpy(snapshot.peer[i], relay_coord.peer[i], sizeof(snapshot.peer[i]));
-		memcpy(snapshot.choice[i], relay_coord.choice[i], sizeof(snapshot.choice[i]));
+		snapshot.learn.t[i].direct_permille = relay_coord.t[i].direct_permille;
+		snapshot.learn.t[i].rssi = relay_coord.t[i].rssi;
+		memcpy(snapshot.learn.peer[i], relay_coord.peer[i], sizeof(snapshot.learn.peer[i]));
+		memcpy(snapshot.learn.choice[i], relay_coord.choice[i], sizeof(snapshot.learn.choice[i]));
 		snapshot.maintenance_ms[i] = relay_coord.maintenance_ms[i];
 		snapshot.report_ms[i] = relay_coord.report_ms[i];
 		IRQ_PROBE_END(plan);
@@ -6642,15 +6655,15 @@ static void relay_broadcast_plan(struct relay_control *control, struct rc_grant_
 	}
 	unsigned key = irq_lock();
 	IRQ_PROBE_BEGIN(plan);
-	snapshot.learn_members = relay_coord.learn_members;
+	snapshot.learn.learn_members = relay_coord.learn_members;
 	snapshot.maintenance_next = relay_coord.maintenance_next;
 	snapshot.report_next = relay_coord.report_next;
 	snapshot.survey_next = relay_coord.survey_next;
+	snapshot.cache_frames = relay_coord.cache_frames;
 	IRQ_PROBE_END(plan);
 	irq_unlock(key);
-	snapshot.cache_frames = relay_coord.cache_frames;
-	relay_coord_plan_watch(&snapshot, control);
-	relay_coord_plan_grants(&snapshot, control, plan, k_uptime_get_32());
+	relay_plan_snapshot_watch(&snapshot, control);
+	relay_plan_snapshot_grants(&snapshot, control, plan, k_uptime_get_32());
 	if (relay_applied_settings.repair_floor < 2U && control->frame % 8U == 0 && control->repair_count >= 2U
 		&& plan->maintenance >= 0) {
 		plan->urgent = true;

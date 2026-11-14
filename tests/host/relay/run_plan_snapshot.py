@@ -27,18 +27,18 @@ static unsigned locks, plans;
 static unsigned irq_lock(void){assert(!locked);locked=true;locks++;return 0;}
 static void irq_unlock(unsigned key){(void)key;assert(locked);locked=false;}
 static uint32_t k_uptime_get_32(void){assert(!locked);return 5000;}
-static void plan_watch(struct relay_coord *snapshot,struct relay_control *c){
- assert(!locked);assert(snapshot->t[15].direct_permille==987);
- assert(snapshot->peer[15][14].heard==77);
+static void plan_watch(struct rc_plan_snapshot *snapshot,struct relay_control *c){
+ assert(!locked);assert(snapshot->learn.t[15].direct_permille==987);
+ assert(snapshot->learn.peer[15][14].heard==77);
  assert(snapshot->watch[0].frame==12 && snapshot->receipt[0].received==8);
- relay_coord_plan_watch(snapshot,c);plans++;
+ relay_plan_snapshot_watch(snapshot,c);plans++;
  /* Concurrent evidence must survive; planning publishes no coordinator state. */
  relay_coord.peer[15][14].heard=88;
 }
-static void plan_grants(struct relay_coord *snapshot,struct relay_control *c,struct rc_grant_plan *p,uint32_t now){assert(!locked);relay_coord_plan_grants(snapshot,c,p,now);plans++;}
+static void plan_grants(struct rc_plan_snapshot *snapshot,struct relay_control *c,struct rc_grant_plan *p,uint32_t now){assert(!locked);relay_plan_snapshot_grants(snapshot,c,p,now);plans++;}
 static void encode(uint8_t *wire,const struct relay_control *c){assert(!locked);relay_control_encode(wire,c);plans++;}
-#define relay_coord_plan_watch plan_watch
-#define relay_coord_plan_grants plan_grants
+#define relay_plan_snapshot_watch plan_watch
+#define relay_plan_snapshot_grants plan_grants
 #define relay_control_encode encode
 '''+src[a:b].replace('#endif', '')+r'''
 int main(void){
@@ -64,7 +64,7 @@ int main(void){
 with tempfile.TemporaryDirectory() as d:
  p=Path(d);(p/'test.c').write_text(code)
  for index in (0,1):
-  subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-Wall','-Wextra','-Werror','-Wno-unknown-attributes','-DRELAY_HOST_REPAIR_SLOTS='+str(3 if index else 5),'-I'+str(root/'src/connection'),str(p/'test.c'),str(root/'src/connection/relay_coord.c'),'-o',str(p/'test')],check=True)
+  subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-fsanitize=address,undefined','-Wall','-Wextra','-Werror','-Wno-unknown-attributes','-DRELAY_HOST_REPAIR_SLOTS='+str(3 if index else 5),'-I'+str(root/'src/connection'),str(p/'test.c'),str(root/'src/connection/relay_coord.c'),'-o',str(p/'test')],check=True)
   subprocess.run([str(p/'test')],check=True)
 print('B planning runs unlocked, retains concurrent evidence and fences all network context changes')
 

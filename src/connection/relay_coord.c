@@ -708,7 +708,7 @@ bool relay_coord_report(struct relay_coord *rc, const struct relay_control *c, u
 	return true;
 }
 
-static bool rc_listener(const struct relay_coord *rc, uint8_t child, uint8_t h)
+static bool rc_listener(const struct rc_learn_snapshot *rc, uint8_t child, uint8_t h)
 {
 	if (RC_ID_OUTSIDE(h) || RC_ID_OUTSIDE(child)) return false;
 	const struct rc_peer *p = &rc->peer[h][child];
@@ -718,7 +718,7 @@ static bool rc_listener(const struct relay_coord *rc, uint8_t child, uint8_t h)
 		!(p->expected >= 30U && p->heard == 0);
 }
 
-static bool rc_better(const struct relay_coord *rc, uint8_t child, uint8_t a, uint8_t b,
+static bool rc_better(const struct rc_learn_snapshot *rc, uint8_t child, uint8_t a, uint8_t b,
 	const uint8_t *load)
 {
 	const struct rc_peer *pa = &rc->peer[a][child], *pb = &rc->peer[b][child];
@@ -734,7 +734,7 @@ static bool rc_better(const struct relay_coord *rc, uint8_t child, uint8_t a, ui
 	return load[a] != load[b] ? load[a] < load[b] : a < b;
 }
 
-static void rc_learn_preferences(struct relay_coord *rc, uint32_t now)
+static void rc_learn_preferences(struct rc_learn_snapshot *rc, uint32_t now)
 {
 	for (uint8_t c = 0; c < RC_MAX; c++) {
 		uint8_t load[RC_MAX] = {0};
@@ -794,7 +794,7 @@ static void rc_learn_preferences(struct relay_coord *rc, uint32_t now)
 
 /* Bounded alternating-path search. Each helper is visited once and each
  * existing choice queued at most once. No recursion on the stats stack. */
-static bool rc_cover(struct relay_coord *rc, struct rc_choice preferred[RC_MAX][2],
+static bool rc_cover(struct rc_learn_snapshot *rc, struct rc_choice preferred[RC_MAX][2],
 	uint8_t *load, uint8_t child, unsigned kind, uint32_t now)
 {
 	uint8_t queue[2 * RC_MAX], parent[2 * RC_MAX];
@@ -846,7 +846,7 @@ static bool rc_cover(struct relay_coord *rc, struct rc_choice preferred[RC_MAX][
 	return false;
 }
 
-void relay_coord_learn_tick(struct relay_coord *rc, uint32_t now)
+void relay_learn_snapshot_tick(struct rc_learn_snapshot *rc, uint32_t now)
 {
 	uint8_t load[RC_MAX] = {0};
 	for (unsigned h = 0; h < RC_MAX; h++)
@@ -866,15 +866,15 @@ void relay_coord_learn_tick(struct relay_coord *rc, uint32_t now)
 	}
 }
 
-void relay_coord_plan_watch(struct relay_coord *rc, struct relay_control *c)
+void relay_plan_snapshot_watch(struct rc_plan_snapshot *rc, struct relay_control *c)
 {
-	rc->learn_members = c->members;
+	rc->learn.learn_members = c->members;
 	c->primary_valid = c->backup_valid = 0;
 	memset(c->helpers, 0, sizeof(c->helpers));
 	for (uint8_t child = 0; child < RC_MAX; child++) {
 		for (unsigned k = 0; k < 2; k++) {
-			struct rc_choice *q = &rc->choice[child][k];
-			if (!q->valid || !rc_listener(rc, child, q->helper)) {
+			struct rc_choice *q = &rc->learn.choice[child][k];
+			if (!q->valid || !rc_listener(&rc->learn, child, q->helper)) {
 				continue;
 			}
 			c->helpers[child] |= q->helper << (k * 4U);
@@ -899,7 +899,7 @@ static bool rc_narrow_pool(const struct relay_control *c)
 }
 
 static bool rc_rescue_better(
-	const struct relay_coord *rc,
+	const struct rc_plan_snapshot *rc,
 	bool narrow,
 	uint16_t tried,
 	unsigned child,
@@ -917,19 +917,19 @@ static bool rc_rescue_better(
 	if (narrow) {
 		/* Rescue capacity needs the best measured copy probability. Do not trade
 		 * several percent of capture for a small RSSI advantage at last chance. */
-		unsigned candidate = relay_coord_peer_ratio(&rc->peer[h][child]);
-		unsigned previous = relay_coord_peer_ratio(&rc->peer[incumbent][child]);
+		unsigned candidate = relay_coord_peer_ratio(&rc->learn.peer[h][child]);
+		unsigned previous = relay_coord_peer_ratio(&rc->learn.peer[incumbent][child]);
 		if (candidate != previous) {
 			return candidate > previous;
 		}
 	}
-	return rc_better(rc, child, h, incumbent, load);
+	return rc_better(&rc->learn, child, h, incumbent, load);
 }
 
 /* Capture history is permission to listen, not proof of capture. Try up to two eligible
  * alternates for a missing record, oldest first, never inferred from RSSI alone.
  * The frozen step rechecks that the selected record is still missing. */
-static void rc_plan_rescue(const struct relay_coord *rc, const struct relay_control *c,
+static void rc_plan_rescue(const struct rc_plan_snapshot *rc, const struct relay_control *c,
 	struct rc_grant_plan *p)
 {
 	for (unsigned remaining = relay_control_cache_frames(c); remaining > 0; remaining--) {
@@ -971,7 +971,7 @@ static void rc_plan_rescue(const struct relay_coord *rc, const struct relay_cont
 				if (!(listeners & RC_BIT(h)) ||
 				    ((w->primary_valid & RC_BIT(child)) && (w->helpers[child] & 15U) == h) ||
 				    ((w->backup_valid & RC_BIT(child)) && (w->helpers[child] >> 4) == h) ||
-				    !relay_can_overhear(w->members, h, child) || !rc_listener(rc, child, h)) continue;
+				    !relay_can_overhear(w->members, h, child) || !rc_listener(&rc->learn, child, h)) continue;
 				if (rc_rescue_better(rc, rc_narrow_pool(c), tried, child, h, best, load)) {
 					second = best;
 					best = h;
@@ -994,7 +994,7 @@ static void rc_plan_rescue(const struct relay_coord *rc, const struct relay_cont
  * raced R0 gets a retry after preparation time; otherwise try the qualified
  * alternate already selected by rescue planning. Coverage is permission from
  * the capture-frame watch, never an assumption that the cache holds a copy. */
-static void rc_plan_emergency(const struct relay_coord *rc, const struct relay_control *c, struct rc_grant_plan *p)
+static void rc_plan_emergency(const struct rc_plan_snapshot *rc, const struct relay_control *c, struct rc_grant_plan *p)
 {
 	const unsigned age = relay_control_cache_frames(c) - 1U;
 	const struct rc_watch *w = &rc->watch[(c->frame - age) % (rc->cache_frames ? rc->cache_frames : 3U)];
@@ -1007,10 +1007,10 @@ static void rc_plan_emergency(const struct relay_coord *rc, const struct relay_c
 	const uint8_t load[RC_MAX] = {0};
 	for (unsigned h = 0; h < RC_MAX; h++) {
 		if (!(w->r0_only[child] & RC_BIT(h)) || !relay_can_overhear(w->members, h, child)
-			|| !rc_listener(rc, child, h)) {
+			|| !rc_listener(&rc->learn, child, h)) {
 			continue;
 		}
-		if (retry < 0 || rc_better(rc, child, h, retry, load)) {
+		if (retry < 0 || rc_better(&rc->learn, child, h, retry, load)) {
 			retry = h;
 		}
 	}
@@ -1021,7 +1021,7 @@ static void rc_plan_emergency(const struct relay_coord *rc, const struct relay_c
 	p->emergency_helper = helper;
 	for (unsigned ch = 0; ch < RC_MAX; ch++) {
 		if (!(c->expected & RC_BIT(ch)) || !relay_can_overhear(w->members, helper, ch)
-			|| !rc_listener(rc, ch, helper)) {
+			|| !rc_listener(&rc->learn, ch, helper)) {
 			continue;
 		}
 		if ((w->listeners[ch] | rc_watch_helpers(w, ch)) & RC_BIT(helper)) {
@@ -1036,7 +1036,7 @@ static void rc_plan_emergency(const struct relay_coord *rc, const struct relay_c
  * includes ineligible peers so the historical ordering can be reconstructed. */
 #ifdef CONFIG_RELAY_RESCUE_DIAGNOSTICS
 static void
-rc_rescue_diagnose(const struct relay_coord *rc, const struct relay_control *c, const struct rc_grant_plan *p)
+rc_rescue_diagnose(const struct rc_plan_snapshot *rc, const struct relay_control *c, const struct rc_grant_plan *p)
 {
 	const uint8_t load[RC_MAX] = {0};
 	for (unsigned age = 0; age < relay_control_cache_frames(c); age++) {
@@ -1058,9 +1058,9 @@ rc_rescue_diagnose(const struct relay_coord *rc, const struct relay_control *c, 
 				bool primary = (w->primary_valid & RC_BIT(child)) && (w->helpers[child] & 15U) == h;
 				bool backup = (w->backup_valid & RC_BIT(child)) && (w->helpers[child] >> 4) == h;
 				bool topology
-					= relay_can_overhear(w->members, h, child) && relay_can_overhear(rc->learn_members, h, child);
-				bool uplink = rc->t[h].direct_permille >= RC_HEAD_MIN_PERMILLE;
-				bool silent = rc->peer[h][child].expected >= 30U && rc->peer[h][child].heard == 0;
+					= relay_can_overhear(w->members, h, child) && relay_can_overhear(rc->learn.learn_members, h, child);
+				bool uplink = rc->learn.t[h].direct_permille >= RC_HEAD_MIN_PERMILLE;
+				bool silent = rc->learn.peer[h][child].expected >= 30U && rc->learn.peer[h][child].heard == 0;
 				bool eligible = listener && !primary && !backup && topology && uplink && !silent;
 				bool choice = p->rescue_child == RC_BIT(child) && p->rescue_age == age;
 				unsigned flags = listener | (primary << 1) | (backup << 2) | (topology << 3) | (uplink << 4)
@@ -1074,7 +1074,7 @@ rc_rescue_diagnose(const struct relay_coord *rc, const struct relay_control *c, 
 					}
 				}
 				ledger_note(c->session, frame, child, LEDGER_CANDIDATE_FLAGS, flags, h, age);
-				ledger_note(c->session, frame, child, LEDGER_CANDIDATE_UPLINK, rc->t[h].direct_permille, h, age);
+				ledger_note(c->session, frame, child, LEDGER_CANDIDATE_UPLINK, rc->learn.t[h].direct_permille, h, age);
 				ledger_note(c->session, frame, child, LEDGER_CANDIDATE_RANK, rank, h, age);
 			}
 		}
@@ -1084,7 +1084,7 @@ rc_rescue_diagnose(const struct relay_coord *rc, const struct relay_control *c, 
 
 static void rc_finish_demand(struct relay_control *c, const struct rc_grant_plan *p, uint8_t *wire);
 /* Selection scans run before the mask freeze. Ties retain rotation order. */
-void relay_coord_plan_grants(struct relay_coord *rc, struct relay_control *c,
+void relay_plan_snapshot_grants(struct rc_plan_snapshot *rc, struct relay_control *c,
 	struct rc_grant_plan *p, uint32_t now_ms)
 {
 	for (unsigned i = 0; i < RELAY_V3_REPAIR_MAX; i++) {
@@ -1096,7 +1096,7 @@ void relay_coord_plan_grants(struct relay_coord *rc, struct relay_control *c,
 	uint32_t oldest_m = 0, oldest_r = 0;
 	for (unsigned n = 0; n < RC_MAX; n++) {
 		unsigned id = (rc->maintenance_next + n) % RC_MAX;
-		if (rc->t[id].direct_permille < RC_HEAD_MIN_PERMILLE) p->fresh_survey |= RC_BIT(id);
+		if (rc->learn.t[id].direct_permille < RC_HEAD_MIN_PERMILLE) p->fresh_survey |= RC_BIT(id);
 		uint32_t age = now_ms - rc->maintenance_ms[id];
 		if ((c->members & RC_BIT(id)) && age >= RC_MAINTENANCE_MS &&
 		    (p->maintenance < 0 || age > oldest_m)) {
@@ -1161,7 +1161,7 @@ void relay_coord_plan_grants(struct relay_coord *rc, struct relay_control *c,
 		unsigned weakest = RC_HEAD_MIN_PERMILLE;
 		for (unsigned n = 0; n < RC_MAX; n++) {
 			unsigned child = (rc->survey_next + n) % RC_MAX;
-			unsigned direct = rc->t[child].direct_permille;
+			unsigned direct = rc->learn.t[child].direct_permille;
 			if ((c->members & RC_BIT(child)) && (direct || (c->expected & RC_BIT(child))) && direct < weakest) {
 				weakest = direct;
 				p->survey = RC_BIT(child);
@@ -1184,7 +1184,7 @@ void relay_coord_plan_grants(struct relay_coord *rc, struct relay_control *c,
 				for (unsigned ch = 0; ch < RC_MAX; ch++) {
 					uint16_t holders = w->listeners[ch] | rc_watch_helpers(w, ch);
 					for (unsigned h = 0; h < RC_MAX; h++) {
-						if ((holders & RC_BIT(h)) && rc_listener(rc, ch, h)) {
+						if ((holders & RC_BIT(h)) && rc_listener(&rc->learn, ch, h)) {
 							p->demand_eligible[age] |= RC_BIT(ch);
 							if (!age) {
 								p->fresh_helper[ch] = h;
@@ -1223,7 +1223,7 @@ void relay_coord_plan_grants(struct relay_coord *rc, struct relay_control *c,
 					if (RC_ID_OUTSIDE(h)) continue;
 					if (c->on_demand) {
 						unsigned lane = 4U - age, bit = copy * 16U + child;
-						if (!age && rc_listener(rc, child, h)) {
+						if (!age && rc_listener(&rc->learn, child, h)) {
 							/* Replace the provisional listener with the actual
 							 * static primary lane, then retain its backup too. */
 							if (!copy && (p->fresh_candidates & RC_BIT(child))) {
@@ -1734,4 +1734,51 @@ void relay_coord_commit_grants(struct relay_coord *rc, const struct relay_contro
 	memcpy(next->helpers, c->helpers, sizeof(next->helpers));
 	for (unsigned child = 0; child < RC_MAX; child++)
 		next->listeners[child] = (c->survey & RC_BIT(child)) ? c->members : p->next_listeners[child];
+}
+
+/* Convenience adapters for serialized pure-policy callers. The receiver's
+ * concurrent threads capture their own snapshots in bounded locked rows. */
+static void rc_copy_learn(struct rc_learn_snapshot *s, const struct relay_coord *rc)
+{
+	memcpy(s->peer, rc->peer, sizeof(s->peer));
+	memcpy(s->choice, rc->choice, sizeof(s->choice));
+	for (unsigned i = 0; i < RC_MAX; i++) {
+		s->t[i].direct_permille = rc->t[i].direct_permille;
+		s->t[i].rssi = rc->t[i].rssi;
+	}
+	s->learn_members = rc->learn_members;
+}
+static void rc_copy_plan(struct rc_plan_snapshot *s, const struct relay_coord *rc)
+{
+	rc_copy_learn(&s->learn, rc);
+	memcpy(s->watch, rc->watch, sizeof(s->watch));
+	memcpy(s->receipt, rc->receipt, sizeof(s->receipt));
+	memcpy(s->maintenance_ms, rc->maintenance_ms, sizeof(s->maintenance_ms));
+	memcpy(s->report_ms, rc->report_ms, sizeof(s->report_ms));
+	s->maintenance_next = rc->maintenance_next;
+	s->report_next = rc->report_next;
+	s->survey_next = rc->survey_next;
+	s->cache_frames = rc->cache_frames;
+}
+void relay_coord_learn_tick(struct relay_coord *rc, uint32_t now)
+{
+	struct rc_learn_snapshot s;
+	rc_copy_learn(&s, rc);
+	relay_learn_snapshot_tick(&s, now);
+	memcpy(rc->peer, s.peer, sizeof(rc->peer));
+	memcpy(rc->choice, s.choice, sizeof(rc->choice));
+}
+void relay_coord_plan_watch(struct relay_coord *rc, struct relay_control *c)
+{
+	struct rc_plan_snapshot s;
+	rc_copy_plan(&s, rc);
+	relay_plan_snapshot_watch(&s, c);
+	rc->learn_members = s.learn.learn_members;
+}
+void relay_coord_plan_grants(struct relay_coord *rc, struct relay_control *c,
+	struct rc_grant_plan *p, uint32_t now)
+{
+	struct rc_plan_snapshot s;
+	rc_copy_plan(&s, rc);
+	relay_plan_snapshot_grants(&s, c, p, now);
 }

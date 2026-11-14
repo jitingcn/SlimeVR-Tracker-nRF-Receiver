@@ -240,6 +240,31 @@ struct relay_coord {
 };
 
 
+/* Independent working storage for learning and B planning. No legacy role,
+ * window, ban, publication or statistics state belongs in these snapshots. */
+struct rc_link_input {
+	uint16_t direct_permille;
+	uint8_t rssi;
+};
+struct rc_learn_snapshot {
+	struct rc_peer peer[RC_MAX][RC_MAX];
+	struct rc_choice choice[RC_MAX][2];
+	struct rc_link_input t[RC_MAX];
+	uint16_t learn_members;
+};
+struct rc_plan_snapshot {
+	struct rc_learn_snapshot learn;
+	struct rc_watch watch[RELAY_CACHE_MAX_FRAMES];
+	struct rc_receipt receipt[RELAY_CACHE_MAX_FRAMES];
+	uint32_t maintenance_ms[RC_MAX], report_ms[RC_MAX];
+	uint8_t maintenance_next, report_next, survey_next, cache_frames;
+};
+void relay_learn_snapshot_tick(struct rc_learn_snapshot *rc, uint32_t now_ms);
+void relay_plan_snapshot_watch(struct rc_plan_snapshot *rc, struct relay_control *c);
+void relay_plan_snapshot_grants(struct rc_plan_snapshot *rc, struct relay_control *c,
+	struct rc_grant_plan *p, uint32_t now_ms);
+
+
 /* Background expiry; caller must serialize against report updates. */
 void relay_coord_expire_peer(struct relay_coord *rc, unsigned helper,
 	unsigned child, uint32_t now);
