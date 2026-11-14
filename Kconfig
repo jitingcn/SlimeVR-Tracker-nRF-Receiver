@@ -172,8 +172,10 @@ config TDMA_DIAGNOSTICS
 endmenu
 
 # App defaults must precede the SDK defaults.
+# With RTT in its own section at the RAM start, MPU alignment of the relay
+# RAM functions adds about 15 KB of padding. RTT stays enabled either way.
 choice SEGGER_RTT_SECTION
-    default SEGGER_RTT_SECTION_NONE if SOC_NRF52833
+    default SEGGER_RTT_SECTION_NONE if RELAY
 endchoice
 
 # The `relay` console dump goes through the deferred log buffer and loses its
