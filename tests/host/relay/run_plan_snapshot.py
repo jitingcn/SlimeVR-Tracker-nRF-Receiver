@@ -8,6 +8,9 @@ from pathlib import Path
 import os,shlex,subprocess,tempfile
 root=Path(__file__).resolve().parents[3]
 src=select_relay((root/'src/connection/esb.c').read_text());a=src.index('static void relay_broadcast_plan(');b=src.index('/* B is prepared outside the radio ISR.',a)
+learn_a=src.index('static void relay_learn_update(uint32_t now)\n{')
+learn_b=src.index('\nstatic void esb_stats_thread(void)\n{',learn_a)
+learning=src[learn_a:learn_b]
 code=r'''
 #define IRQ_PROBE_BEGIN(name)
 #define IRQ_PROBE_END(name)
@@ -24,6 +27,10 @@ static uint8_t relay_profile=1,relay_epoch=2;
 static uint16_t tdma_active_mask=0x7ff;
 static uint32_t relay_session=42,relay_origin=100;
 static unsigned locks, plans;
+static uint32_t relay_learn_lock_max;
+#define MAX(a,b) ((a)>(b)?(a):(b))
+static uint32_t k_cycle_get_32(void){return 1;}
+static void relay_learn_update(uint32_t now);
 static unsigned irq_lock(void){assert(!locked);locked=true;locks++;return 0;}
 static void irq_unlock(unsigned key){(void)key;assert(locked);locked=false;}
 static uint32_t k_uptime_get_32(void){assert(!locked);return 5000;}
@@ -31,6 +38,10 @@ static void plan_watch(struct rc_plan_snapshot *snapshot,struct relay_control *c
  assert(!locked);assert(snapshot->learn.t[15].direct_permille==987);
  assert(snapshot->learn.peer[15][14].heard==77);
  assert(snapshot->watch[0].frame==12 && snapshot->receipt[0].received==8);
+ /* Learning can run while B still holds its captured input. */
+ struct rc_plan_snapshot before = *snapshot;
+ relay_learn_update(5000);
+ assert(!memcmp(snapshot, &before, sizeof(before)));
  relay_plan_snapshot_watch(snapshot,c);plans++;
  /* Concurrent evidence must survive; planning publishes no coordinator state. */
  relay_coord.peer[15][14].heard=88;
@@ -40,7 +51,7 @@ static void encode(uint8_t *wire,const struct relay_control *c){assert(!locked);
 #define relay_plan_snapshot_watch plan_watch
 #define relay_plan_snapshot_grants plan_grants
 #define relay_control_encode encode
-'''+src[a:b].replace('#endif', '')+r'''
+'''+learning+src[a:b].replace('#endif', '')+r'''
 int main(void){
  relay_coord_init(&relay_coord);relay_coord.v3_requested=true;
  for(unsigned i=0;i<11;i++)relay_coord_note_caps(&relay_coord,i,RELAY_INFO_CAPS);
@@ -49,7 +60,7 @@ int main(void){
  struct relay_control c={.profile=1,.session=42,.epoch=2,.members=0x7ff,.expected=0x7ff,.repair_count=RELAY_V3_REPAIR_SLOTS};
  struct rc_grant_plan p;struct esb_payload wire;
  relay_broadcast_plan(&c,&p,&wire);
- assert(plans==3 && !locked && locks==RC_MAX+RELAY_CACHE_MAX_FRAMES+1);
+ assert(plans==3 && !locked && locks==RC_MAX+RELAY_CACHE_MAX_FRAMES+1 + 2+RC_MAX*RC_MAX+RC_MAX);
  assert(relay_coord.peer[15][14].heard==88);
  assert(relay_broadcast_context_current(&c,100));
  c.epoch++;assert(!relay_broadcast_context_current(&c,100));c.epoch--;
@@ -66,6 +77,6 @@ with tempfile.TemporaryDirectory() as d:
  for index in (0,1):
   subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-fsanitize=address,undefined','-Wall','-Wextra','-Werror','-Wno-unknown-attributes','-DRELAY_HOST_REPAIR_SLOTS='+str(3 if index else 5),'-I'+str(root/'src/connection'),str(p/'test.c'),str(root/'src/connection/relay_coord.c'),'-o',str(p/'test')],check=True)
   subprocess.run([str(p/'test')],check=True)
-print('B planning runs unlocked, retains concurrent evidence and fences all network context changes')
+print('Overlapping B/learning snapshots stay independent, run unlocked, retain concurrent evidence and fence network context changes')
 
 assert "static struct rc_grant_plan plan;" in (root / "src/connection/esb.c").read_text()

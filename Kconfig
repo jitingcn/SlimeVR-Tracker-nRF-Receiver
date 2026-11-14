@@ -198,22 +198,11 @@ config RELAY
         128 KB of RAM. Stock sdk-nrf builds retain the ordinary direct
         tracker protocol. The SDK broadcast is nRF52-only for now; nRF54L
         receivers (DPPI, GRTC) are WIP.
-        nRF52833 has a 10-tracker capacity and runs relay code from flash.
-        It is not recommended as a relay receiver. On nRF52833, relay and
+        nRF52833 runs relay code from flash. On nRF52833, relay and
         DATA_COLLECT do not fit together, so relay defaults off there when
         raw data collection is enabled.
 
 if RELAY
-
-config RELAY_COORD_CAPACITY
-    int
-    default 10 if SOC_NRF52833
-    default 16
-    help
-        Coordinator capacity by tracker ID, independent of the 16-bit wire
-        masks. Only IDs below this capacity may join private relay v3.
-        On nRF52833, any active ID >= 10 keeps the entire fleet in mode 0
-        with ordinary direct service, including fleets over ten trackers.
 
 config RELAY_RAMFUNC
     bool "Run relay freeze and repeat code from RAM"
@@ -246,8 +235,8 @@ config RELAY_RUNTIME_LAYOUT
 
 config RELAY_MAX_TRACKERS
     int "Maximum private relay members"
-    range 1 RELAY_COORD_CAPACITY
-    default RELAY_COORD_CAPACITY
+    range 1 16
+    default 16
 
 config RELAY_MAX_REPAIRS
     int "Maximum ordinary repair slots"

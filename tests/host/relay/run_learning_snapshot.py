@@ -22,7 +22,7 @@ static struct relay_coord relay_coord;
 static uint32_t relay_session=42, relay_learn_lock_max;
 static uint8_t relay_epoch=1;
 static uint16_t tdma_active_mask=0x7ff;
-static bool locked, change_epoch;
+static bool locked, change_epoch, change_session, change_members;
 static unsigned irq_lock(void) { assert(!locked); locked=true; return 0; }
 static void irq_unlock(unsigned key) { (void)key; assert(locked); locked=false; }
 static uint32_t k_cycle_get_32(void) { return 1; }
@@ -33,6 +33,8 @@ void test_learn_tick(struct rc_learn_snapshot *snapshot, uint32_t now) {
  /* An ISR/report arrived after the snapshot. Publishing must retain it. */
  relay_coord.peer[2][0].heard=77;
  if(change_epoch) relay_epoch++;
+ if(change_session) relay_session++;
+ if(change_members) tdma_active_mask ^= 1;
 }
 '''+'\n#define relay_learn_snapshot_tick test_learn_tick\n'+src[a:b]+r'''
 int main(void) {
@@ -44,6 +46,12 @@ int main(void) {
  assert(relay_coord.choice[0][0].valid && relay_coord.choice[0][0].helper==2);
  assert(relay_coord.peer[2][0].heard==77 && !locked);
  relay_coord.choice[0][0].valid=false; change_epoch=true;
+ relay_learn_update(2);
+ assert(!relay_coord.choice[0][0].valid && !locked);
+ change_epoch=false; change_session=true;
+ relay_learn_update(2);
+ assert(!relay_coord.choice[0][0].valid && !locked);
+ change_session=false; change_members=true;
  relay_learn_update(2);
  assert(!relay_coord.choice[0][0].valid && !locked);
  return 0;

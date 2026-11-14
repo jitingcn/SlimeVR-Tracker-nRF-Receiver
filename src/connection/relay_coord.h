@@ -21,23 +21,13 @@
 
 #include "relay_protocol.h"
 
-/* Local storage capacity by tracker ID; wire masks and IDs stay 16-wide. */
-#ifdef CONFIG_RELAY_COORD_CAPACITY
-#define RELAY_COORD_CAPACITY CONFIG_RELAY_COORD_CAPACITY
-#else
-#define RELAY_COORD_CAPACITY RELAY_MAX_TRACKERS
-#endif
-_Static_assert(RELAY_COORD_CAPACITY > 0 && RELAY_COORD_CAPACITY <= RELAY_MAX_TRACKERS,
-	"coordinator capacity must fit wire IDs");
-#define RC_MAX RELAY_COORD_CAPACITY
+/* Coordinator storage covers every protocol tracker ID on all chips. */
+#define RC_MAX RELAY_MAX_TRACKERS
 #if defined(CONFIG_RELAY_RAMFUNC) || !defined(__ZEPHYR__)
 #define RELAY_RAMFUNC __ramfunc
 #else
 #define RELAY_RAMFUNC
 #endif
-/* New storage bounds compile away at the original 16-ID capacity. */
-#define RC_ID_OUTSIDE(id) (RC_MAX < RELAY_MAX_TRACKERS && (unsigned)(id) >= RC_MAX)
-#define RC_MEMBER_MASK ((uint16_t)((1U << RC_MAX) - 1U))
 #define RC_WINDOW_MS 500U
 
 /* Weak: direct delivery below this share of expected frames (>= RC_MIN_EXPECTED

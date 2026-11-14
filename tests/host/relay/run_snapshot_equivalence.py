@@ -8,7 +8,7 @@ with tempfile.TemporaryDirectory() as directory:
     p = Path(directory)
     (p / 'old.c').write_bytes(source)
     names = sorted(set(re.findall(rb'\brelay_coord_\w+\b', source)))
-    (p / 'rename.h').write_text('\n'.join('#define '+n.decode()+' baseline_'+n.decode() for n in names)+'\n')
+    (p / 'rename.h').write_text('#define RC_ID_OUTSIDE(id) 0\n#define RC_MEMBER_MASK 65535U\n'+'\n'.join('#define '+n.decode()+' baseline_'+n.decode() for n in names)+'\n')
     cc = shlex.split(os.environ.get('CC', 'cc'))
     flags = ['-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
              '-I'+str(root / 'src/connection')]
