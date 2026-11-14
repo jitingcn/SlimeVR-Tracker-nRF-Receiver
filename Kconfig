@@ -198,7 +198,8 @@ config RELAY
         128 KB of RAM. Stock sdk-nrf builds retain the ordinary direct
         tracker protocol. The SDK broadcast is nRF52-only for now; nRF54L
         receivers (DPPI, GRTC) are WIP.
-        nRF52833 runs relay code from flash. On nRF52833, relay and
+        nRF52833 runs relay code from flash and is not recommended as a
+        relay receiver. On nRF52833, relay and
         DATA_COLLECT do not fit together, so relay defaults off there when
         raw data collection is enabled.
 
