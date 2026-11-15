@@ -890,7 +890,8 @@ static uint32_t tdma_advertised_config(uint8_t id, uint32_t now_ticks)
 static bool tdma_staging_supported_locked(uint32_t old_mask, uint32_t new_mask)
 {
 	uint32_t affected = old_mask | new_mask;
-	if (!old_mask || !relay_user_enabled) {
+	/* `relay off` still stages the exit from an applied profile 1. */
+	if (!old_mask || (!relay_user_enabled && !relay_profile)) {
 		return false;
 	}
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
@@ -929,6 +930,13 @@ static void tdma_apply_locked(const struct tdma_publication *p, int64_t now)
 		relay_timeline_clear(&relay_timeline_active);
 		relay_demand_reset(&relay_demand_state, seed, relay_applied_settings.repair_floor);
 		relay_frame_announce(seed, relay_origin);
+	}
+	if (relay_profile && !p->profile) {
+		/* Profile 1 bypassed the native sequence check while trackers kept
+		 * counting; re-anchor it instead of judging against the old base. */
+		for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+			tracker_slots[i].sequence_initialized = false;
+		}
 	}
 	relay_applied_generation = p->settings_generation;
 	relay_profile = p->profile;
@@ -2605,6 +2613,23 @@ static bool relay_block_drop(uint8_t id, uint8_t salt)
 	return drop;
 }
 
+/* Host-visible totals for one profile-1 frame that relay_coord_publish()
+ * just accepted, direct or repaired, counted once per frame. `skipped` uses
+ * check_packet_sequence()'s gap rule (relay_coord_skipped()). */
+static void relay_host_stats_publish(uint8_t id, uint8_t skipped)
+{
+	struct packet_stats *stats = &tracker_slots[id].stats;
+	stats->total_received++;
+	stats->status_received++;
+	if (skipped) {
+		stats->gap_events++;
+		stats->total_gaps += skipped;
+		stats->status_lost += skipped;
+	} else {
+		stats->normal_packets++;
+	}
+}
+
 /* Sequence check plus relay accounting: gaps revealed, path, RSSI. */
 static int relay_sequence_check(uint8_t id, uint8_t seq, bool relayed, uint8_t rssi)
 {
@@ -2623,13 +2648,14 @@ static int relay_sequence_check(uint8_t id, uint8_t seq, bool relayed, uint8_t r
 			return RC_SEQ_OLD;
 		}
 
-		relay_coord_note_frame(&relay_coord, id, RC_DIRECT, RC_SEQ_NORMAL,
-				       relay_coord_skipped(&relay_coord, id, frame), rssi,
+		uint8_t skipped = relay_coord_skipped(&relay_coord, id, frame);
+		relay_coord_note_frame(&relay_coord, id, RC_DIRECT, RC_SEQ_NORMAL, skipped, rssi,
 				       k_uptime_get_32());
 		if (!relay_coord_publish(&relay_coord, id, frame)) {
 			return RC_SEQ_DUP;
 		}
 		packet_stats_count(&tracker_slots[id].stats);
+		relay_host_stats_publish(id, skipped);
 #ifdef CONFIG_RELAY_FRAME_LEDGER
 		ledger_note(relay_session, frame, id, LEDGER_ACCEPT, -(int16_t)rssi, 255, 0);
 #endif
@@ -4007,6 +4033,7 @@ static void esb_receive_repair(const struct esb_payload *payload, uint32_t event
 			}
 			continue;
 		}
+		relay_host_stats_publish(child, skipped);
 		struct esb_payload part = {.length = r->source.length,
 					   .rssi = MAX(payload->rssi, r->source.rssi)};
 		memcpy(part.data, r->source.frame, part.length);
@@ -6720,12 +6747,13 @@ static void relay_broadcast_plan(struct relay_control *control, struct rc_grant_
 	relay_control_encode(payload->data, control);
 }
 
-/* B maintains an applied profile 1 until its staged exit activates. Automatic
- * permission (`relay v3 off`) only gates future entry: trackers' B-derived
- * direct anchors last ~25 ms, far shorter than the 3.5 s exit lead. */
+/* B maintains an applied profile 1 until its staged exit activates:
+ * trackers' B-derived direct anchors last ~25 ms, far shorter than the 3.5 s
+ * exit lead. `relay off`, `relay v3 off` and OTA stage that exit; pairing
+ * only pauses automatic decisions, so the fleet keeps running meanwhile. */
 static bool relay_broadcast_eligible(void)
 {
-	return esb_initialized && relay_profile && !esb_pairing
+	return esb_initialized && relay_profile
 		&& relay_coord_v3_capable(&relay_coord, (uint16_t)tdma_active_mask);
 }
 

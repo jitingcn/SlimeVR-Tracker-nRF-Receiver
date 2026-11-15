@@ -136,6 +136,7 @@ static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t length)
 }
 /* DIAGNOSTIC DECLARATIONS */
 static uint32_t decision_ready_mask, decision_fence_mask;
+static bool esb_ota_relay_is_active(void) { return false; }
 static atomic_t test_all_state_valid, test_all_confirmed_mask;
 static void (*remote_confirm_cb)(uint8_t, uint8_t);
 static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return ticks; }
@@ -864,6 +865,50 @@ static void permission_off_keeps_b_through_exit(void)
 	puts("PASS permission off: B maintains applied profile 1 until the staged exit activates");
 }
 
+/* `relay off` and pairing while profile 1 is applied: B keeps running until a
+ * staged exit activates; the exit re-anchors the native sequence. */
+static void relay_off_and_pairing_keep_b(void)
+{
+	two_member_layout(2, true);
+	now_ms = 6000;
+	service();
+	esb_relay_set_v3_enabled(true);
+	relay_coord.auto_engaged = true;
+	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
+	assert(relay_profile == 1 && relay_broadcast_eligible());
+	/* Pairing pauses automatic decisions only; the private layout keeps its B. */
+	esb_pairing = true;
+	for (unsigned step = 0; step < 50; step++) {
+		now_ms += 100; live(); service();
+		assert(relay_profile == 1 && !tdma_staged.valid && relay_broadcast_eligible());
+	}
+	esb_pairing = false;
+	/* Native base from before entry; the tracker keeps counting in profile 1. */
+	tracker_slots[0].sequence_initialized = tracker_slots[1].sequence_initialized = true;
+	tracker_slots[0].last_packet_sequence = 10;
+	esb_relay_set_enabled(false);
+	assert(!relay_coord_v3_ready(&relay_coord, (uint16_t)tdma_active_mask));
+	assert(relay_broadcast_eligible());
+	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
+	assert(tdma_staged.valid && !tdma_staged.p.profile && relay_profile == 1);
+	uint64_t activation = now_ms + RELAY_LAYOUT_ACTIVATION_MS;
+	while (now_ms + 10 < activation) {
+		now_ms += 10; live(); service();
+		assert(tdma_staged.valid && relay_profile == 1 && relay_broadcast_eligible());
+	}
+	now_ms = activation + 1; live(); service();
+	assert(!tdma_staged.valid && !relay_profile && !relay_broadcast_eligible());
+	/* 4091 packets later the sequence sits 5 behind the old base; without a
+	 * re-anchor this and the next 58 packets would be dropped as old. */
+	assert(!tracker_slots[0].sequence_initialized && !tracker_slots[1].sequence_initialized);
+	assert(check_packet_sequence(0, 5) == 0 && check_packet_sequence(0, 6) == 0);
+	esb_relay_set_enabled(true);
+	relay_coord.auto_engaged = false;
+	relay_coord.v3_requested = false;
+	puts("PASS relay off and pairing: B maintains applied profile 1, exit re-anchors native sequence");
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2) {
@@ -886,6 +931,7 @@ int main(int argc, char **argv)
 	automatic_profile_publication();
 	automatic_reentry_continues_frames();
 	permission_off_keeps_b_through_exit();
+	relay_off_and_pairing_keep_b();
 	runtime_settings_publication();
 	member_cap_owner_blocks();
 	puts("PASS staged layout publication: announce, serialize, activate, legacy and forced");

@@ -115,7 +115,7 @@ def main():
              "static struct tracker_slot tracker_slots[MAX_TRACKERS];\n",
              relay_state,
              function("packet_stats_refresh"), function("packet_stats_count"), function("check_packet_sequence"),
-             function("relay_multi_blocked"), function("relay_block_drop"), function("relay_sequence_check"), function("relay_take_caps"),
+             function("relay_multi_blocked"), function("relay_block_drop"), function("relay_host_stats_publish"), function("relay_sequence_check"), function("relay_take_caps"),
              function("composite_body_length"),
              block(r"^struct composite_result\s*\{"), function("composite_validate"), function("esb_execute_composite"), function("esb_receive_composite"), function("esb_receive_normal"), function("esb_receive_bundle"), function("esb_receive_repair"), function("esb_receive_peer_report"),
              (HERE / "hid_cases.c").read_text()]

@@ -55,7 +55,7 @@ def function(name):
 
 constants = '\n'.join(re.findall(
     r'^#define (?:PING_TIMEOUT_MS|PING_CLEAN_REACQUIRE_STREAK|TDMA_SHADOW_\w+|TDMA_MEMBERSHIP_COHORT_MS|'
-    r'TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|'
+    r'TPS_CALCULATION_INTERVAL_MS|TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|'
     r'RECONFIG_MIN_MS|LOSS_RECONFIG_MIN_MS|CAP_LEVEL_MAX))\b[^\n]*', source, re.MULTILINE))
 constants += '\n' + '\n'.join(re.findall(
     r'^#define ESB_(?:PING|PONG)_\w+\b[^\n]*', header, re.MULTILINE))
@@ -87,7 +87,8 @@ functions = [function(name) for name in (
     'tdma_membership_wait_ms', 'tdma_slot_ticks_for', 'tdma_staging_supported_locked',
     'tdma_apply_locked', 'tdma_apply_finish', 'tdma_advertised_config', 'tdma_recalculate',
     'tracker_store_restore', 'relay_auto_ladder_paused', 'esb_relay_set_v3_enabled',
-    'relay_broadcast_eligible',
+    'esb_relay_set_enabled', 'relay_broadcast_eligible', 'decision_accept',
+    'packet_stats_refresh', 'packet_stats_count', 'check_packet_sequence',
 )]
 functions.append('static uint32_t sys_get_be32(const uint8_t *p) {\n'
                  'return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | '

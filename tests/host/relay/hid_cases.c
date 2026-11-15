@@ -208,11 +208,14 @@ static void test_fast_repair(void)
 	esb_receive_repair(&packet, at);
 	CHECK(hid_count == 1);
 	CHECK(shadow_seen == (1U << 2)); /* valid repairs renew membership */
+	/* A published repair counts once in the host totals. */
+	CHECK(tracker_slots[2].stats.total_received == 1 && tracker_slots[2].stats.status_received == 1);
 	CHECK(relay_coord.peer[0][2].rssi_x8 == 480 && !relay_coord.peer[0][2].expected);
 	shadow_seen = 0;
 	esb_receive_repair(&packet, at);
 	CHECK(hid_count == 1);
 	CHECK(shadow_seen == 0); /* a duplicate renews nothing */
+	CHECK(tracker_slots[2].stats.total_received == 1); /* nor counts */
 	r.helper = 1;
 	packet.pipe = 2;
 	packet.length = relay_repair_encode(packet.data, &r);
@@ -226,6 +229,7 @@ static void test_fast_repair(void)
 	relay_direct_start = relay_frame_start(relay_origin, 11) + 2 * RELAY_V3_SLOT_TICKS + 10;
 	esb_receive_normal(&source, relay_direct_start, false);
 	CHECK(hid_count == 2);
+	CHECK(tracker_slots[2].stats.total_received == 2 && !tracker_slots[2].stats.total_gaps);
 	r.helper = 0;
 	r.records[0].capture_frame = 9;
 	packet.pipe = 1;
@@ -243,6 +247,43 @@ static void test_fast_repair(void)
 	CHECK(hid_count == 3);		      /* primary silent */
 	relay_coord_fast_reset(&relay_coord); /* receiver/new layout resets frame order */
 	CHECK(relay_coord_publish(&relay_coord, 2, 0));
+	relay_profile = 0;
+}
+
+/* Host loss totals: frames skipped on the private path count like skipped
+ * native sequence numbers, so status packets report the same loss. */
+static void test_private_host_stats(void)
+{
+	struct packet_stats native, priv;
+	struct esb_payload p;
+	reset_state();
+	tdma_active_mask = 7;
+	make_normal(&p, 1, 2, 0, 60);
+	esb_receive_normal(&p, 0, false);
+	p.data[16] = 3; /* two native sequence numbers lost */
+	esb_receive_normal(&p, 0, false);
+	esb_receive_normal(&p, 0, false); /* duplicate */
+	native = tracker_slots[2].stats;
+	CHECK(hid_count == 2 && native.total_received == 2 && native.total_gaps == 2 && native.status_lost == 2);
+
+	reset_state();
+	relay_profile = RELAY_PROFILE_120HZ;
+	relay_origin = 1000; relay_frame_anchor = 0; relay_start_anchor = relay_origin;
+	relay_coord_fast_reset(&relay_coord);
+	tdma_active_mask = 7;
+	relay_direct_pose = true;
+	static const uint32_t frames[] = {10, 13, 13}; /* two frames lost, then a duplicate */
+	for (unsigned i = 0; i < 3; i++) {
+		make_normal(&p, 1, 2, (uint8_t)(200 + i), 60);
+		relay_direct_start = relay_frame_start(relay_origin, frames[i]) + 2 * RELAY_V3_SLOT_TICKS + 10;
+		esb_receive_normal(&p, relay_direct_start, false);
+	}
+	priv = tracker_slots[2].stats;
+	CHECK(hid_count == 2);
+	CHECK(priv.total_received == native.total_received && priv.total_gaps == native.total_gaps);
+	CHECK(priv.status_received == native.status_received && priv.status_lost == native.status_lost);
+	CHECK(priv.gap_events == native.gap_events && priv.normal_packets == native.normal_packets);
+	relay_direct_pose = false;
 	relay_profile = 0;
 }
 
@@ -332,6 +373,7 @@ int main(void)
 	test_bundle_rejections();
 	test_block_hook();
 	test_fast_repair();
+	test_private_host_stats();
 	test_peer_report();
 	test_layout_frame_anchor();
 	if (failures) {

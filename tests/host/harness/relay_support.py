@@ -84,7 +84,7 @@ def relay_helpers(esb, stats=True):
     interval = re.search(r"^#define TPS_CALCULATION_INTERVAL_MS .*$", esb, re.MULTILINE).group(0)
     return "#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored \"-Wunused-function\"\n" + \
         f"#ifndef TPS_CALCULATION_INTERVAL_MS\n{interval}\n#endif\n" * stats + "\n\n".join(_function(esb, name) for name in
-                       ("packet_stats_refresh", "packet_stats_count") * stats + ("relay_multi_blocked", "relay_block_drop", "relay_sequence_check", "relay_take_caps",
+                       ("packet_stats_refresh", "packet_stats_count") * stats + ("relay_multi_blocked", "relay_block_drop", "relay_host_stats_publish", "relay_sequence_check", "relay_take_caps",
                         "esb_receive_relay_diag")) + "\n#pragma GCC diagnostic pop\n"
 
 

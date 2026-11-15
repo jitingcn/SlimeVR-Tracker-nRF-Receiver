@@ -67,12 +67,12 @@ int main(void){
  c.session++;assert(!relay_broadcast_context_current(&c,100));c.session--;
  c.members^=1;assert(!relay_broadcast_context_current(&c,100));c.members^=1;
  assert(!relay_broadcast_context_current(&c,101));
- esb_pairing=true;assert(!relay_broadcast_context_current(&c,100));esb_pairing=false;
+ esb_pairing=true;assert(relay_broadcast_context_current(&c,100));esb_pairing=false; /* pairing pauses decisions, not B */
  /* Permission off keeps B for the applied profile 1 until its staged exit activates. */
  relay_coord.v3_requested=false;assert(relay_broadcast_context_current(&c,100));
  relay_profile=0;assert(!relay_broadcast_context_current(&c,100));relay_profile=1;
  relay_coord.t[3].capable=false;assert(!relay_broadcast_context_current(&c,100));relay_coord.t[3].capable=true;
- relay_coord.enabled=false;assert(!relay_broadcast_context_current(&c,100));relay_coord.enabled=true;
+ relay_coord.enabled=false;assert(relay_broadcast_context_current(&c,100));relay_coord.enabled=true; /* relay off stages the exit */
  esb_initialized=false;assert(!relay_broadcast_context_current(&c,100));esb_initialized=true;
  assert(relay_broadcast_context_current(&c,100));
  return 0;

@@ -689,12 +689,12 @@ void relay_coord_pin(struct relay_coord *rc, uint8_t id, bool pinned)
 
 bool relay_coord_v3_ready(const struct relay_coord *rc, uint16_t members)
 {
-	return rc->v3_requested && relay_coord_v3_capable(rc, members);
+	return rc->enabled && rc->v3_requested && relay_coord_v3_capable(rc, members);
 }
 
 bool relay_coord_v3_capable(const struct relay_coord *rc, uint16_t members)
 {
-	if (!rc->enabled || !members) {
+	if (!members) {
 		return false;
 	}
 	for (uint8_t id = 0; id < RC_MAX; id++) {
