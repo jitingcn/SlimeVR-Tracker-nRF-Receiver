@@ -19,26 +19,31 @@ that ceiling. The queued current/next/next2 budgets remain immutable except
 for the established future choice. Membership/settings publish atomically
 through staged activation and reset the demand queue to the new layout.
 
-`relay layout second_b 1` opts into experimental adjacent duplicate B;
-`relay layout second_b 2` opts into experimental trailing duplicate B;
-`relay layout second_b 0` disables it. It trades one nominal repair for B2
-only when the one-B layout has at least R3, leaving at least R2. Otherwise
-it is suspended for that membership, preserving the desired setting. Demand
-mode's effective floor is at least R2 while two Bs are active. Adjacent B2
-shifts repairs one slot later; trailing B2 follows the last repair. Helpers
-retain the same direct capture windows, and the extra B never owns an R slot.
+`relay layout control_repeat_mode 1` enables an experimental repeat control
+frame after the primary control frame, with one empty slot between them.
+`relay layout control_repeat_mode 2` places the repeat control frame after the
+repair area. `relay layout control_repeat_mode 0` disables repetition.
+Repetition trades one nominal repair for the repeat control frame only when
+the layout with a single control frame has at least R3, leaving at least R2.
+Otherwise it is suspended for that membership, preserving the desired setting.
+Demand mode's effective floor is at least R2 while two control frames are active.
+The adjacent repeat control frame shifts repairs one slot later; the trailing
+repeat control frame follows the last repair. Helpers retain the same direct
+capture windows, and the extra control frame never owns an R slot.
 
 Both copies carry the first freeze's identical grants and announcements.
-B2 changes only type, preamble timestamp and CRC. Its type is 0xEC; first B
-remains 0xE8. Byte 68's upper two bits encode placement 0/1/2, its lower bits
-retain static width or demand owner/width. The version remains local 7 or
-upstream consolidated 4. Trackers normalize B2 back to the first B anchor.
-A valid first copy allows repair service immediately. If it is absent or
-rejected, the window stays/reopens through B2; only failure of both counts
-one missed frame. A late trailing B can restore future announcements but
-cannot recover repairs whose slots have passed. The third whole missed B
-frame still fences direct transmission. Both copies missed while acquiring
-continue the existing bounded broad acquisition with poses fenced.
+The repeat control frame changes only type, preamble timestamp and CRC. Its
+type is 0xEC; the primary control frame remains 0xE8. Byte 68's upper two bits
+encode placement 0/1/2, its lower bits retain static width or demand owner/width.
+The version remains local 7 or upstream consolidated 4. Trackers normalize the
+repeat control frame back to the primary control frame anchor.
+A valid primary control frame allows repair service immediately. If it is
+absent or rejected, the window stays/reopens through the repeat control frame;
+only failure of both counts one missed frame. A late trailing repeat control
+frame can restore future announcements but cannot recover repairs whose slots
+have passed. The third whole missed control frame still fences direct
+transmission. Both copies missed while acquiring continue the existing bounded
+broad acquisition with poses fenced.
 
 Settings use NVS record v3, same ten bytes, with placement in the width byte's
 upper bits. v1 records infer static floor=ceiling; v2 preserves explicit floor.

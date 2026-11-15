@@ -273,7 +273,7 @@ config RELAY_TPS_MAX
     default 120
 
 config RELAY_FORCE_FULL_FLEET_PLAN
-    bool "Plan B at the full-fleet lead"
+    bool "Plan control frame at the full-fleet lead"
     default n
     help
         Exercise live direct-slot planning even with a partially populated fleet.

@@ -1040,8 +1040,8 @@ void relay_coord_plan_grants(struct relay_coord *rc, struct relay_control *c, st
 			oldest_r = age;
 		}
 	}
-	/* A tracker that misses B can still listen under either of the preceding
-	 * two B plans. Match its unchanged three-frame control lifetime exactly.
+	/* A tracker that misses control frame can still listen under either of the preceding
+	 * two control frame plans. Match its unchanged three-frame control lifetime exactly.
 	 * Keep raw plans separate so inherited listeners cannot extend themselves. */
 	for (unsigned child = 0; child < RC_MAX; child++) {
 		if (c->primary_valid & RC_BIT(child)) {

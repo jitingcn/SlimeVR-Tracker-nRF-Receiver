@@ -93,10 +93,10 @@ int main(void){
   relay_applied_settings=applied;for(unsigned f=0;f<24;f++)assert(relay_frame_repairs(f)==(r==1 && f%8==0?2:r));
  }
  defaults();assert(!esb_relay_layout_set("tps_min",100));assert(!esb_relay_layout_set("max_trackers",11));
- assert(!esb_relay_layout_set("second_b",2));assert(storage[0]==3 && storage[3]>>6==2);
- read_result=10;relay_settings.second_b=0;relay_settings_load();
- assert(relay_settings.second_b==2 && relay_settings.max_trackers==11 && relay_settings.tps_min==100);
- assert(esb_relay_layout_set("second_b",3)==-EINVAL);
+ assert(!esb_relay_layout_set("control_repeat_mode",2));assert(storage[0]==3 && storage[3]>>6==2);
+ read_result=10;relay_settings.control_repeat_mode=0;relay_settings_load();
+ assert(relay_settings.control_repeat_mode==2 && relay_settings.max_trackers==11 && relay_settings.tps_min==100);
+ assert(esb_relay_layout_set("control_repeat_mode",3)==-EINVAL);
  assert(!mutex && !depth);puts("Settings migration, exact defaults, explicit choices, write atomicity and per-member static R pass");
 }
 '''

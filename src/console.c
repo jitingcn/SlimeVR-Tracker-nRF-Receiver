@@ -1049,7 +1049,7 @@ static void console_thread(void)
 				if (!parse_long_bounded(argv[3], 0, 32768, &value) || esb_relay_layout_set(arg2, value)) {
 					printk(
 						"Relay layout rejected or persistence failed. Use relay layout "
-						"<max_trackers|max_repairs|repair_floor|second_b|slot_ticks|tps_min|tps_max> <value>\n"
+						"<max_trackers|max_repairs|repair_floor|control_repeat_mode|slot_ticks|tps_min|tps_max> <value>\n"
 					);
 				}
 			} else if (argc == 2 && strcmp(arg, "pool") == 0) {

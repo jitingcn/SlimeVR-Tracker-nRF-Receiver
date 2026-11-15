@@ -30,12 +30,12 @@ parser.add_argument('--repairs', type=int, choices=range(6), default=5)
 parser.add_argument('--max-trackers', type=int, choices=range(1,17), default=16)
 parser.add_argument('--slot-ticks', type=int, choices=(15,16), default=16)
 parser.add_argument('--tps-max', type=int, default=120)
-parser.add_argument('--second-b',type=int,choices=(0,1,2),default=0)
+parser.add_argument('--control-repeat-mode',type=int,choices=(0,1,2),default=0)
 parser.add_argument('--on-demand', action='store_true')
 args = parser.parse_args()
 if not 1 <= args.tps_max <= 32768:
     parser.error('--tps-max must be 1..32768')
-fixture_flags = ['-DRELAY_BENCH_SECOND_B='+str(args.second_b),'-DRELAY_BENCH_DEMAND='+str(int(args.on_demand)),'-DRELAY_HOST_REPAIR_SLOTS='+str(args.repairs),
+fixture_flags = ['-DRELAY_BENCH_CONTROL_REPEAT_MODE='+str(args.control_repeat_mode),'-DRELAY_BENCH_DEMAND='+str(int(args.on_demand)),'-DRELAY_HOST_REPAIR_SLOTS='+str(args.repairs),
                  '-DRELAY_HOST_DIRECT_SLOTS='+str(args.max_trackers),
                  '-DRELAY_BENCH_MAX_MEMBERS='+str(args.max_trackers),
                  '-DRELAY_HOST_SLOT_TICKS='+str(args.slot_ticks),
@@ -206,7 +206,7 @@ initial_peripherals = bytes(u.mem_read(0x40000000, 0x20000))
 with tempfile.TemporaryDirectory(prefix='relay-arm-model-') as temporary:
     temporary = Path(temporary)
     fixture = temporary / 'fixture.elf'
-    environment = dict(os.environ, BENCH_SECOND_B=str(args.second_b), BENCH_DEMAND=str(int(args.on_demand)), BENCH_EXPORT=str(fixture), BENCH_TEXT_ORIGIN='0x80000', BENCH_RAM_ORIGIN=hex(fixture_ram), BENCH_REPAIR_SLOTS=str(args.repairs),
+    environment = dict(os.environ, BENCH_CONTROL_REPEAT_MODE=str(args.control_repeat_mode), BENCH_DEMAND=str(int(args.on_demand)), BENCH_EXPORT=str(fixture), BENCH_TEXT_ORIGIN='0x80000', BENCH_RAM_ORIGIN=hex(fixture_ram), BENCH_REPAIR_SLOTS=str(args.repairs),
                        BENCH_MAX_MEMBERS=str(args.max_trackers), BENCH_SLOT_TICKS=str(args.slot_ticks),
                        BENCH_TPS_MAX=str(args.tps_max))
     subprocess.run([sys.executable, str(here / 'bench_cycles.py')], env=environment, check=True)
@@ -297,12 +297,12 @@ int main(int argc, char **argv) {
         assert (0x4000a144, 0x40001000) in endpoints, (hex(enabled), endpoints)
         if cycles > maximum:
             maximum, worst_seed, worst_phases = cycles, seed, dict(phases)
-        if args.second_b:
+        if args.control_repeat_mode:
             # The copy is built before its own freeze. Measure that work and
             # the actual repeat arm entry separately against the same ceilings.
             source = 0x2003c200
             u.mem_write(source, actual)
-            at = int.from_bytes(actual[12:16],'big') + ((args.repairs+1)*args.slot_ticks if args.second_b==2 else 2*args.slot_ticks)
+            at = int.from_bytes(actual[12:16],'big') + ((args.repairs+1)*args.slot_ticks if args.control_repeat_mode==2 else 2*args.slot_ticks)
             # Execute the real copy-1 DISABLED/PRX restoration,
             # then encoding/preparation; caller/wait-return cost is reserved below.
             # No assumption that this work happens
@@ -329,18 +329,18 @@ int main(int argc, char **argv) {
             # Keep a separate 128us allowance for IRQ/thread dispatch and RTC
             # exact_set callers. This is pipeline slack, not an arm/encode limit.
             post_end_cycles += 8192
-            callback_ticks = ((args.repairs+1)*args.slot_ticks if args.second_b==2 else 2*args.slot_ticks)-2-3
+            callback_ticks = ((args.repairs+1)*args.slot_ticks if args.control_repeat_mode==2 else 2*args.slot_ticks)-2-3
             slack_cycles = (callback_ticks-11)*64000000//32768
             repeat_post_end_max=max(repeat_post_end_max,post_end_cycles)
-            assert post_end_cycles < slack_cycles, (seed,'B2 callback already due',post_end_cycles,slack_cycles)
+            assert post_end_cycles < slack_cycles, (seed,'repeat control frame callback already due',post_end_cycles,slack_cycles)
             generation=read32(sym['relay_layout_generation.lto_priv.0'])
             assert call('relay_repeat_arm',event,generation+1) & 0x80000000
             assert read32(sym['radio_operation_busy.lto_priv.0'])==0
             assert call('relay_repeat_arm',event,generation,measure=True)==0
             repeat_arm_max=max(repeat_arm_max,cycles+24)
-    if args.second_b:
-        print('second B arm/encode:',repeat_arm_max,repeat_encode_max)
-        print('B1 END to prepared B2, including 128us dispatch/caller allowance:',repeat_post_end_max,'cycles; callback slack',slack_cycles,'cycles')
+    if args.control_repeat_mode:
+        print('repeat control frame arm/encode:',repeat_arm_max,repeat_encode_max)
+        print('primary control frame END to prepared repeat control frame, including 128us dispatch/caller allowance:',repeat_post_end_max,'cycles; callback slack',slack_cycles,'cycles')
         assert repeat_arm_max<=1130 and repeat_encode_max<=805
     # Failures must not steal another owner's radio, or leak our ownership.
     for failure in ('stale', 'busy', 'not_prx', 'late', 'reinit', 'disabled_stuck', 'disabled_late'):

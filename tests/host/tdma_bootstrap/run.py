@@ -87,7 +87,7 @@ functions = [function(name) for name in (
     'tdma_membership_wait_ms', 'tdma_slot_ticks_for', 'tdma_staging_supported_locked',
     'tdma_apply_locked', 'tdma_apply_finish', 'tdma_advertised_config', 'tdma_recalculate',
     'tracker_store_restore', 'relay_auto_ladder_paused', 'esb_relay_set_v3_enabled',
-    'esb_relay_set_enabled', 'relay_broadcast_eligible', 'decision_accept',
+    'esb_relay_set_enabled', 'relay_control_eligible', 'decision_accept',
     'packet_stats_refresh', 'packet_stats_count', 'check_packet_sequence',
 )]
 functions.append('static uint32_t sys_get_be32(const uint8_t *p) {\n'

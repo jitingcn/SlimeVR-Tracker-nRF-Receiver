@@ -142,8 +142,8 @@ int main(void)
  rc.receipt[(c.frame-2)%3].received=1U<<9;
  plan();relay_coord_finish_grants(&rc,&c,&p);relay_coord_commit_grants(&rc,&c,&p);
  assert(!(rc.watch[(c.frame - 1) % 3].rescue_tried[9] & (1U << 2)));
- /* The B plan first used in frame 99 can also cover frame 101 after two
-  * missed B packets. Preserve that opportunity, but never extend inherited
+ /* The control frame plan first used in frame 99 can also cover frame 101 after two
+  * missed control frame packets. Preserve that opportunity, but never extend inherited
   * listeners or cross an epoch/session/membership boundary. */
  for(unsigned fault=0;fault<8;fault++) {
   setup();rc.t[2].direct_permille=0;rc.t[4].direct_permille=1000;

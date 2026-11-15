@@ -175,7 +175,7 @@ static void control_coordinates(void)
 	for (uint32_t f = 15728630; f < 15728660; f++) {
 		uint32_t origin = 0xfffffff0U;
 		uint32_t start = relay_frame_start(origin, f);
-		uint32_t preamble = start + RELAY_V3_B_PREAMBLE;
+		uint32_t preamble = start + RELAY_V3_CONTROL_PREAMBLE;
 		assert(relay_control_start(preamble) == start);
 		assert(relay_control_origin(preamble, f) == origin);
 		for (unsigned i = 0; i < RELAY_V3_REPAIR_SLOTS; i++) {

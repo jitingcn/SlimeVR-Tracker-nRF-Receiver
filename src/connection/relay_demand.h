@@ -41,7 +41,7 @@ relay_demand_advance(struct relay_demand *d, uint32_t frame, const struct relay_
 		d->queued[2] = relay_demand_slots(d->frame + 2U, d->target);
 	}
 }
-/* Only f+2 can change. The caller chooses once per B before wire encoding. */
+/* Only f+2 can change. The caller chooses once per control frame before wire encoding. */
 static inline __attribute__((always_inline)) void
 relay_demand_update(struct relay_demand *d, uint32_t frame, unsigned missing, const struct relay_runtime_settings *s)
 {

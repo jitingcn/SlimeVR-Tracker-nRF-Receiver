@@ -302,7 +302,7 @@ static void simulate(unsigned members, unsigned mode, unsigned trace, unsigned f
 		assert(relay_control_decode(buf, 72, &decoded));
 		assert(decoded.repair_count == c.repair_count && decoded.on_demand == c.on_demand);
 		relay_coord_commit_grants(&rc, &c, &plan);
-		/* Helpers receive feedback only in the next B. A second holder spends
+		/* Helpers receive feedback only in the next control frame. A second holder spends
 		 * capacity on a duplicate even when the receiver heard the first holder. */
 		uint16_t selected[RC_MAX][5] = {{0}};
 		for (unsigned slot = 0; slot < c.repair_count; slot++) {

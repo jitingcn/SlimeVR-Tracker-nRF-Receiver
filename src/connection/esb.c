@@ -699,7 +699,7 @@ static void relay_frame_announce(uint32_t frame, uint32_t start)
 	relay_runtime_anchor_set(
 		&a,
 		frame,
-		start + RELAY_V3_B_PREAMBLE,
+		start + RELAY_V3_CONTROL_PREAMBLE,
 		RELAY_V3_DIRECT_SLOTS,
 		relay_frame_repairs(frame),
 		relay_frame_repairs(frame + 1U),
@@ -707,13 +707,13 @@ static void relay_frame_announce(uint32_t frame, uint32_t start)
 		RELAY_V3_SLOT_TICKS,
 		relay_geometry_current()->tps
 	);
-	relay_runtime_anchor_second_b(
+	relay_runtime_anchor_control_repeat(
 		&a,
 		relay_frame_repairs(frame),
 		relay_frame_repairs(frame + 1U),
 		relay_frame_repairs(frame + 2U),
 		relay_geometry_current()->tps,
-		relay_applied_settings.second_b
+		relay_applied_settings.control_repeat_mode
 	);
 	relay_timeline_announce(&relay_timeline_active, &a);
 }
@@ -802,21 +802,21 @@ static uint32_t irq_probe_tick_max, irq_probe_tick_count;
 #define IRQ_PROBE_END(name)
 #endif
 
-static uint32_t relay_b2_sent, relay_b2_failed;
-static int relay_b2_err;
-static uint32_t relay_b_sent, relay_b_failed;
-/* B timing, ticks: launch past preamble - TX_OFFSET (count, max), plan and grant work (max). */
-static uint32_t relay_b_late, relay_b_late_max, relay_b_plan_max, relay_b_grant_max;
+static uint32_t relay_control_repeat_sent, relay_control_repeat_failed;
+static int relay_control_repeat_err;
+static uint32_t relay_control_sent, relay_control_failed;
+/* The control frame timing, ticks: launch past preamble - TX_OFFSET (count, max), plan and grant work (max). */
+static uint32_t relay_control_late, relay_control_late_max, relay_control_plan_max, relay_control_grant_max;
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
-static uint32_t relay_b_arm_cycles_max;
-static uint32_t relay_b_encode_cycles_max;
+static uint32_t relay_control_arm_cycles_max;
+static uint32_t relay_control_encode_cycles_max;
 #endif
-static uint32_t relay_b_entry_late, relay_b_entry_max;
+static uint32_t relay_control_entry_late, relay_control_entry_max;
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
 static uint32_t relay_rx_cycles_max, relay_rx_packets;
 static uint64_t relay_rx_cycles_total;
 #endif
-static int relay_b_err;
+static int relay_control_err;
 static uint32_t relay_layout_generation;
 static uint32_t relay_direct_start;
 static bool relay_direct_pose;
@@ -921,7 +921,7 @@ static void tdma_apply_locked(const struct tdma_publication *p, int64_t now)
 	relay_applied_settings = relay_runtime_for_members(p->settings, p->active_count);
 	relay_coord.cache_frames = relay_applied_settings.repair_floor < relay_applied_settings.max_repairs ? 5 : 3;
 	if (p->profile) {
-		/* Trackers keep the last B frame of this session and reject any B
+		/* Trackers keep the last control frame of this session and reject any control frame
 		 * that does not advance it, so a re-entry continues the count. */
 		uint32_t seed = relay_profile || relay_timeline_active.valid
 			? relay_timeline_active.frame + 1U : 0U;
@@ -1121,13 +1121,13 @@ static void tdma_recalculate(bool forced)
 #if defined(CONFIG_RELAY)
 		struct relay_geometry geometry = relay_receiver_geometry;
 		if (profile) {
-			(void)relay_geometry_make_b(
+			(void)relay_geometry_make_control(
 				&geometry,
 				active_count,
 				relay_runtime_for_members(relay_settings, active_count).max_repairs,
 				relay_settings.slot_ticks,
 				relay_settings.tps_max,
-				relay_runtime_for_members(relay_settings, active_count).second_b
+				relay_runtime_for_members(relay_settings, active_count).control_repeat_mode
 			);
 #else
 		uint8_t slot = 0;
@@ -2574,7 +2574,7 @@ SYS_INIT(relay_coord_init_once, APPLICATION, 0);
 static int composite_body_length(uint8_t type);
 
 /* Conservative fast validation. Unusual/event composites stay on the full
- * event path; only a completely known record list may suppress B early. */
+ * event path; only a completely known record list may suppress control frame early. */
 static bool relay_early_receipt_valid(const uint8_t *data, uint8_t length)
 {
 	if (data[0] != ESB_COMPOSITE_TYPE) return length == 17 && data[0] < 0x10;
@@ -2819,7 +2819,7 @@ static void esb_ack_handler_cb(
 				(int32_t)(start_ticks - slot_start), 255, 0);
 		}
 #endif
-		/* B can preempt the deferred RX event after D10 has reached the
+		/* The control frame can preempt the deferred RX event after D10 has reached the
 		 * radio. Freeze RF receipt here; publication keeps its own watermark.
 		 * A configured drop must still be announced as missing. */
 		if (pose && id < stored_trackers
@@ -3055,7 +3055,7 @@ static void esb_ack_handler_cb(
 			} else if (relay_profile && !tdma_staged.valid && ack_payload->data[7] == ESB_PONG_FLAG_NORMAL) {
 				/* The legacy tuple cannot say profile 1, so a tracker joining a
 				 * running profile learns it as a layout activating on the next
-				 * actual frame boundary; B then anchors its cap and future R. */
+				 * actual frame boundary; control frame then anchors its cap and future R. */
 				uint32_t frame = relay_frame_near(relay_frame_anchor, relay_start_anchor, rx_ticks);
 				uint32_t lead = relay_frame_start(relay_origin, frame + 1U) - rx_ticks;
 				trailer.pending = true;
@@ -6230,7 +6230,7 @@ void esb_relay_layout_print(void)
 	irq_unlock(key);
 	printk(
 		"relay layout: max_trackers=%u max_repairs=%u slot_ticks=%u tps_min=%u tps_max=%u "
-		"generation=%u applied=%u repair_floor=%u second_b=%u\n",
+		"generation=%u applied=%u repair_floor=%u control_repeat_mode=%u\n",
 		desired.max_trackers,
 		desired.max_repairs,
 		desired.slot_ticks,
@@ -6239,11 +6239,11 @@ void esb_relay_layout_print(void)
 		requested,
 		current,
 		desired.repair_floor,
-		desired.second_b
+		desired.control_repeat_mode
 	);
 	printk(
 		"relay layout active: profile=%u direct=%u max_repairs=%u slot_ticks=%u tps_min=%u "
-		"tps_max=%u repair_floor=%u second_b=%u\n",
+		"tps_max=%u repair_floor=%u control_repeat_mode=%u\n",
 		profile,
 		direct,
 		applied.max_repairs,
@@ -6251,10 +6251,10 @@ void esb_relay_layout_print(void)
 		applied.tps_min,
 		applied.tps_max,
 		applied.repair_floor,
-		applied.second_b
+		applied.control_repeat_mode
 	);
 	printk(
-		"relay B plan: session=%u frame=%u direct=%u R=%u next_R=%u next2_R=%u slot_ticks=%u tps_max=%u\n",
+		"relay control frame plan: session=%u frame=%u direct=%u R=%u next_R=%u next2_R=%u slot_ticks=%u tps_max=%u\n",
 		announced.session,
 		announced.frame,
 		announced.direct_count,
@@ -6278,8 +6278,8 @@ int esb_relay_layout_set(const char *name, uint16_t value)
 		if (relay_settings.repair_floor == relay_settings.max_repairs || candidate.repair_floor > value) {
 			candidate.repair_floor = value;
 		}
-	} else if (!strcmp(name, "second_b") && value <= 2U) {
-		candidate.second_b = value;
+	} else if (!strcmp(name, "control_repeat_mode") && value <= 2U) {
+		candidate.control_repeat_mode = value;
 	} else if (!strcmp(name, "repair_floor") && value <= 5U) {
 		candidate.repair_floor = value;
 	} else if (!strcmp(name, "slot_ticks") && value <= 255U) {
@@ -6299,13 +6299,13 @@ int esb_relay_layout_set(const char *name, uint16_t value)
 	if (candidate.max_trackers == relay_settings.max_trackers && candidate.max_repairs == relay_settings.max_repairs
 		&& candidate.slot_ticks == relay_settings.slot_ticks && candidate.tps_min == relay_settings.tps_min
 		&& candidate.tps_max == relay_settings.tps_max && candidate.repair_floor == relay_settings.repair_floor
-		&& candidate.second_b == relay_settings.second_b) {
+		&& candidate.control_repeat_mode == relay_settings.control_repeat_mode) {
 		k_mutex_unlock(&tracker_store_lock);
 		esb_relay_layout_print();
 		return 0;
 	}
 	uint8_t record[10]
-		= {3, candidate.max_trackers, candidate.max_repairs, candidate.slot_ticks | (candidate.second_b << 6)};
+		= {3, candidate.max_trackers, candidate.max_repairs, candidate.slot_ticks | (candidate.control_repeat_mode << 6)};
 	relay_put_be16(record + 4, candidate.tps_min);
 	relay_put_be16(record + 6, candidate.tps_max);
 	record[8] = candidate.repair_floor;
@@ -6354,19 +6354,19 @@ void esb_relay_print_status(void)
 		enabled ? "on" : (relay_user_enabled ? "paused(ota)" : "off"),
 		pinned, members, forward, relayed,
 		assignments, rotations, releases);
-	printk("relay: profile=%u B_sent=%u B_failed=%u last_err=%d\n", relay_profile, relay_b_sent,
-		relay_b_failed, relay_b_err);
-	printk("relay: B2_sent=%u B2_failed=%u last_err=%d\n", relay_b2_sent, relay_b2_failed, relay_b2_err);
-	printk("relay: B late=%u late_max=%u plan_max=%u grant_max=%u ticks\n", relay_b_late,
-		relay_b_late_max, relay_b_plan_max, relay_b_grant_max);
+	printk("relay: profile=%u control_sent=%u control_failed=%u last_err=%d\n", relay_profile, relay_control_sent,
+		relay_control_failed, relay_control_err);
+	printk("relay: control_repeat_sent=%u control_repeat_failed=%u last_err=%d\n", relay_control_repeat_sent, relay_control_repeat_failed, relay_control_repeat_err);
+	printk("relay: control late=%u late_max=%u plan_max=%u grant_max=%u ticks\n", relay_control_late,
+		relay_control_late_max, relay_control_plan_max, relay_control_grant_max);
 	printk("relay: learning irq_max=%u ticks\n", relay_learn_lock_max);
 	printk("relay: HID enqueued=%u refused_attempts=%u dropped_output=%u overflow=%u\n",
 		relay_hid_enqueued, relay_hid_refused, relay_hid_dropped_output, relay_hid_overflow);
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
-	printk("relay: B entry_late=%u entry_max=%u ticks encode_max=%u cycles\n",
-		relay_b_entry_late, relay_b_entry_max, relay_b_encode_cycles_max);
-	printk("relay: B freeze_arm_max=%u cycles; RX max=%u avg=%u cycles packets=%u HID_overflow=%u learning_overflow=%u HID_dropped_output=%u HID_enqueued=%u HID_refused=%u\n",
-		relay_b_arm_cycles_max, rx_max,
+	printk("relay: control entry_late=%u entry_max=%u ticks encode_max=%u cycles\n",
+		relay_control_entry_late, relay_control_entry_max, relay_control_encode_cycles_max);
+	printk("relay: control freeze_arm_max=%u cycles; RX max=%u avg=%u cycles packets=%u HID_overflow=%u learning_overflow=%u HID_dropped_output=%u HID_enqueued=%u HID_refused=%u\n",
+		relay_control_arm_cycles_max, rx_max,
 		rx_packets ? (uint32_t)(rx_cycles / rx_packets) : 0,
 		rx_packets, relay_hid_overflow, relay_learning_overflow, relay_hid_dropped_output, relay_hid_enqueued, relay_hid_refused);
 
@@ -6498,7 +6498,7 @@ void esb_relay_print_status(void)
 
 /* This is the entire mask-dependent and radio-arm path. Keep its boundary
  * visible to the linked-firmware instruction benchmark. IRQs are held by caller. */
-struct relay_broadcast_work {
+struct relay_control_work {
 	struct relay_control *control;
 	const struct rc_grant_plan *plan;
 	uint8_t *wire;
@@ -6511,7 +6511,7 @@ struct relay_broadcast_work {
 
 /* Keep the five-age work out of the static encoder's register lifetime. */
 __attribute__((noipa, optimize("O3"))) static RELAY_RAMFUNC void
-relay_freeze_demand(struct relay_coord *rc, const struct relay_broadcast_work *w)
+relay_freeze_demand(struct relay_coord *rc, const struct relay_control_work *w)
 {
 	struct relay_control *c = w->control;
 
@@ -6531,7 +6531,7 @@ relay_freeze_demand(struct relay_coord *rc, const struct relay_broadcast_work *w
 
 /* Attribute provenance: Round 11 linked model and DWT arm evidence retain the freeze boundary. Whole-thread O3 has only group-level evidence; keep pending isolated A/B. */
 __attribute__((noipa, optimize("O3")))
-static RELAY_RAMFUNC int relay_freeze_arm(struct relay_coord *rc, const struct relay_broadcast_work *w)
+static RELAY_RAMFUNC int relay_freeze_arm(struct relay_coord *rc, const struct relay_control_work *w)
 {
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
 	uint32_t cycles = DWT->CYCCNT;
@@ -6554,7 +6554,7 @@ static RELAY_RAMFUNC int relay_freeze_arm(struct relay_coord *rc, const struct r
 #endif
 	if (err) goto failed;
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
-	relay_b_arm_cycles_max = MAX(relay_b_arm_cycles_max, armed - cycles);
+	relay_control_arm_cycles_max = MAX(relay_control_arm_cycles_max, armed - cycles);
 #endif
 	if (c->on_demand) {
 		relay_freeze_demand(rc, w);
@@ -6564,7 +6564,7 @@ static RELAY_RAMFUNC int relay_freeze_arm(struct relay_coord *rc, const struct r
 	}
 	__DMB();
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
-	relay_b_encode_cycles_max = MAX(relay_b_encode_cycles_max, DWT->CYCCNT - armed);
+	relay_control_encode_cycles_max = MAX(relay_control_encode_cycles_max, DWT->CYCCNT - armed);
 #endif
 	return 0;
 failed:
@@ -6660,7 +6660,7 @@ static void relay_freeze_callback(int32_t channel, uint64_t expires, void *conte
 {
 	ARG_UNUSED(channel);
 	ARG_UNUSED(expires);
-	struct relay_broadcast_work *w = context;
+	struct relay_control_work *w = context;
 	unsigned polls = 65536;
 	while ((int32_t)((NRF_RTC1->COUNTER - w->freeze_rtc) << 8) < 0) {
 		if (!--polls) {
@@ -6672,17 +6672,17 @@ static void relay_freeze_callback(int32_t channel, uint64_t expires, void *conte
 	unsigned key = irq_lock();
 	uint32_t lag = (NRF_RTC1->COUNTER - w->freeze_rtc) & 0x00ffffffU;
 	int err = relay_freeze_arm(&relay_coord, w);
-	if (!err) relay_b_grant_max = MAX(relay_b_grant_max,
+	if (!err) relay_control_grant_max = MAX(relay_control_grant_max,
 		(NRF_RTC1->COUNTER - w->freeze_rtc) & 0x00ffffffU);
-	relay_b_entry_late += lag > 0;
-	relay_b_entry_max = MAX(relay_b_entry_max, lag);
-	relay_b_late += err == -ETIME;
-	relay_b_late_max = MAX(relay_b_late_max, lag);
+	relay_control_entry_late += lag > 0;
+	relay_control_entry_max = MAX(relay_control_entry_max, lag);
+	relay_control_late += err == -ETIME;
+	relay_control_late_max = MAX(relay_control_late_max, lag);
 	if (!err) {
 		relay_coord_read_grants(w->control, w->wire);
 		relay_grants = *w->control;
 		if (w->control->on_demand) {
-			relay_frame_announce(w->control->frame, w->control->preamble_ticks - RELAY_V3_B_PREAMBLE);
+			relay_frame_announce(w->control->frame, w->control->preamble_ticks - RELAY_V3_CONTROL_PREAMBLE);
 		}
 		relay_coord_commit_grants(&relay_coord, w->control, w->plan);
 	}
@@ -6697,7 +6697,7 @@ static void relay_repeat_callback(int32_t channel, uint64_t expires, void *conte
 {
 	ARG_UNUSED(channel);
 	ARG_UNUSED(expires);
-	struct relay_broadcast_work *w = context;
+	struct relay_control_work *w = context;
 	unsigned polls = 65536;
 	while ((int32_t)((NRF_RTC1->COUNTER - w->freeze_rtc) << 8) < 0) {
 		if (!--polls) {
@@ -6712,8 +6712,8 @@ static void relay_repeat_callback(int32_t channel, uint64_t expires, void *conte
 	k_sem_give(&relay_freeze_done);
 }
 
-static bool relay_broadcast_context_current(const struct relay_control *control, uint32_t origin);
-static void relay_broadcast_plan(struct relay_control *control, struct rc_grant_plan *plan, struct esb_payload *payload)
+static bool relay_control_context_current(const struct relay_control *control, uint32_t origin);
+static void relay_control_plan(struct relay_control *control, struct rc_grant_plan *plan, struct esb_payload *payload)
 {
 	static struct rc_plan_snapshot snapshot;
 	for (unsigned i = 0; i < RC_MAX; i++) {
@@ -6754,38 +6754,38 @@ static void relay_broadcast_plan(struct relay_control *control, struct rc_grant_
 	relay_control_encode(payload->data, control);
 }
 
-/* B maintains an applied profile 1 until its staged exit activates:
- * trackers' B-derived direct anchors last ~25 ms, far shorter than the 3.5 s
+/* The control frame maintains an applied profile 1 until its staged exit activates:
+ * trackers' control frame-derived direct anchors last ~25 ms, far shorter than the 3.5 s
  * exit lead. `relay off`, `relay v3 off` and OTA stage that exit; pairing
  * only pauses automatic decisions, so the fleet keeps running meanwhile. */
-static bool relay_broadcast_eligible(void)
+static bool relay_control_eligible(void)
 {
 	return esb_initialized && relay_profile
 		&& relay_coord_v3_capable(&relay_coord, (uint16_t)tdma_active_mask);
 }
 
-static bool relay_broadcast_context_current(const struct relay_control *control, uint32_t origin)
+static bool relay_control_context_current(const struct relay_control *control, uint32_t origin)
 {
-	return relay_broadcast_eligible() && control->session == relay_session
+	return relay_control_eligible() && control->session == relay_session
 		&& control->epoch == relay_epoch && control->members == (uint16_t)tdma_active_mask && origin == relay_origin;
 }
 
-/* B is prepared outside the radio ISR. ESB owns the bounded PRX/TX/PRX turn. */
+/* The control frame is prepared outside the radio ISR. ESB owns the bounded PRX/TX/PRX turn. */
 /* Attribute provenance: Round 11 linked model and DWT arm evidence retain the freeze boundary. Whole-thread O3 has only group-level evidence; keep pending isolated A/B. */
 __attribute__((optimize("O3")))
-static void relay_broadcast_thread(void)
+static void relay_control_thread(void)
 {
 	int rtc_channel = z_nrf_rtc_timer_chan_alloc();
 	if (rtc_channel < 0) {
-		relay_b_err = rtc_channel;
-		LOG_ERR("No RTC launch channel for relay broadcast: %d", relay_b_err);
+		relay_control_err = rtc_channel;
+		LOG_ERR("No RTC launch channel for relay control frame: %d", relay_control_err);
 		return;
 	}
 	int freeze_channel = z_nrf_rtc_timer_chan_alloc();
 	if (freeze_channel < 0) {
 		z_nrf_rtc_timer_chan_free(rtc_channel);
-		relay_b_err = freeze_channel;
-		LOG_ERR("No RTC freeze channel for relay broadcast: %d", relay_b_err);
+		relay_control_err = freeze_channel;
+		LOG_ERR("No RTC freeze channel for relay control frame: %d", relay_control_err);
 		return;
 	}
 	/* This channel only drives PPI. Keep its event latched until the next
@@ -6798,7 +6798,7 @@ static void relay_broadcast_thread(void)
 	for (;;) {
 		unsigned key = irq_lock();
 		IRQ_PROBE_BEGIN(plan);
-		bool active = relay_broadcast_eligible();
+		bool active = relay_control_eligible();
 		uint32_t origin = relay_origin;
 		uint32_t now = (uint32_t)k_uptime_ticks();
 		uint32_t frame = relay_timeline_active.frame, start;
@@ -6808,9 +6808,9 @@ static void relay_broadcast_thread(void)
 			frame++;
 			relay_frame_announce(frame, start);
 		}
-		uint32_t preamble = relay_frame_start(origin, frame) + RELAY_V3_B_PREAMBLE;
+		uint32_t preamble = relay_frame_start(origin, frame) + RELAY_V3_CONTROL_PREAMBLE;
 		relay_frame_anchor = frame;
-		relay_start_anchor = preamble - RELAY_V3_B_PREAMBLE;
+		relay_start_anchor = preamble - RELAY_V3_CONTROL_PREAMBLE;
 		if (!active || (sent == frame && epoch == relay_epoch)) {
 			IRQ_PROBE_END(plan);
 			irq_unlock(key);
@@ -6836,7 +6836,7 @@ static void relay_broadcast_thread(void)
 			.tps_max = relay_geometry_current()->tps,
 			.epoch = relay_epoch,
 			.repair_count = relay_frame_repairs(frame),
-			.second_b = relay_applied_settings.second_b,
+			.control_repeat_mode = relay_applied_settings.control_repeat_mode,
 			.on_demand = relay_applied_settings.repair_floor < relay_applied_settings.max_repairs,
 			.session = relay_session,
 			.frame = frame,
@@ -6854,11 +6854,11 @@ static void relay_broadcast_thread(void)
 		IRQ_PROBE_END(plan);
 		irq_unlock(key);
 		struct esb_payload payload = {.pipe = 1, .noack = true, .length = RELAY_CONTROL_LEN};
-		relay_broadcast_plan(&control, &plan, &payload);
+		relay_control_plan(&control, &plan, &payload);
 		struct relay_control_crc_plan crc_plan = relay_control_plan_crc(payload.data);
 		key = irq_lock();
 		IRQ_PROBE_RESTART(plan);
-		if (!relay_broadcast_context_current(&control, origin)) {
+		if (!relay_control_context_current(&control, origin)) {
 			IRQ_PROBE_END(plan);
 			irq_unlock(key);
 			continue;
@@ -6868,7 +6868,7 @@ static void relay_broadcast_thread(void)
 		 * this membership input; never overwrite concurrently learned rows. */
 		relay_coord.learn_members = control.members;
 		uint8_t *wire = esb_prx_tx_prepare(&payload);
-		struct relay_broadcast_work work = {
+		struct relay_control_work work = {
 			.control = &control,
 			.plan = &plan,
 			.wire = wire,
@@ -6877,7 +6877,7 @@ static void relay_broadcast_thread(void)
 			.result = -ETIMEDOUT,
 			.generation = relay_layout_generation,
 		};
-		relay_b_plan_max = MAX(relay_b_plan_max, (uint32_t)k_uptime_ticks() - t_plan);
+		relay_control_plan_max = MAX(relay_control_plan_max, (uint32_t)k_uptime_ticks() - t_plan);
 		uint32_t launch_tick = preamble - RELAY_V3_TX_OFFSET;
 		uint64_t plan_ticks = k_uptime_ticks();
 		uint64_t launch_rtc = z_nrf_rtc_timer_get_ticks(K_TIMEOUT_ABS_TICKS(
@@ -6893,8 +6893,8 @@ static void relay_broadcast_thread(void)
 		IRQ_PROBE_END(plan);
 		irq_unlock(key);
 		if (schedule_err || !wire) {
-			relay_b_failed++;
-			relay_b_err = schedule_err ? schedule_err : -EBUSY;
+			relay_control_failed++;
+			relay_control_err = schedule_err ? schedule_err : -EBUSY;
 			continue;
 		}
 		/* Wake the RTC ISR ahead of the unchanged freeze edge so callback
@@ -6902,22 +6902,22 @@ static void relay_broadcast_thread(void)
 		k_sem_take(&relay_freeze_done, K_FOREVER);
 		int err = work.result;
 		if (!err) {
-			err = esb_prx_tx_wait(k_ticks_to_us_ceil32(RELAY_V3_B_PREP_LEAD_TICKS));
+			err = esb_prx_tx_wait(k_ticks_to_us_ceil32(RELAY_V3_CONTROL_PREP_LEAD_TICKS));
 			atomic_set(&radio_operation_busy, 0);
 		}
 		/* Re-encode only the timestamp/type/CRC outside the frozen path. The
 		 * grants and current/next/next2 plan are the first copy's immutable bytes. */
-		if (!err && control.second_b) {
+		if (!err && control.control_repeat_mode) {
 			uint32_t repeat = preamble
-							+ relay_second_b_offset(
+							+ relay_control_repeat_offset(
 								  control.direct_count,
 								  control.repair_count,
 								  control.slot_ticks,
-								  control.second_b
+								  control.control_repeat_mode
 							);
 			relay_repeat_encode(payload.data, work.wire, repeat);
 			key = irq_lock();
-			bool current = relay_broadcast_context_current(&control, origin);
+			bool current = relay_control_context_current(&control, origin);
 			wire = current ? esb_prx_tx_prepare(&payload) : NULL;
 			uint64_t ticks = k_uptime_ticks();
 			uint64_t repeat_rtc = z_nrf_rtc_timer_get_ticks(
@@ -6934,14 +6934,14 @@ static void relay_broadcast_thread(void)
 				k_sem_take(&relay_freeze_done, K_FOREVER);
 				schedule = work.result;
 				if (!schedule) {
-					schedule = esb_prx_tx_wait(k_ticks_to_us_ceil32(RELAY_V3_B_PREP_LEAD_TICKS));
+					schedule = esb_prx_tx_wait(k_ticks_to_us_ceil32(RELAY_V3_CONTROL_PREP_LEAD_TICKS));
 					atomic_set(&radio_operation_busy, 0);
 				}
 			}
-			relay_b2_sent += schedule == 0;
-			relay_b2_failed += schedule != 0;
-			relay_b2_err = schedule;
-			relay_b_err = schedule;
+			relay_control_repeat_sent += schedule == 0;
+			relay_control_repeat_failed += schedule != 0;
+			relay_control_repeat_err = schedule;
+			relay_control_err = schedule;
 		}
 #ifdef CONFIG_RELAY_FRAME_LEDGER
 		if (!err) {
@@ -7004,11 +7004,11 @@ static void relay_broadcast_thread(void)
 			}
 		}
 #endif
-        relay_b_sent += err == 0;
-		relay_b_failed += err != 0;
-		relay_b_err = err ? err : relay_b_err;
+        relay_control_sent += err == 0;
+		relay_control_failed += err != 0;
+		relay_control_err = err ? err : relay_control_err;
 	}
 }
-K_THREAD_DEFINE(relay_broadcast_thread_id, 1536, relay_broadcast_thread,
+K_THREAD_DEFINE(relay_control_thread_id, 1536, relay_control_thread,
 	NULL, NULL, NULL, 1, 0, 0);
 #endif

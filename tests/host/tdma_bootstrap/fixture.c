@@ -663,7 +663,7 @@ static void runtime_settings_publication(void)
 					   .epoch = (uint8_t)(relay_epoch + 1),
 					   .settings = desired,
 					   .settings_generation = ++relay_settings_generation};
-				assert(relay_geometry_make_b(&pending.geometry, n, effective.max_repairs, 16, 120, 0));
+				assert(relay_geometry_make_control(&pending.geometry, n, effective.max_repairs, 16, 120, 0));
 				tdma_staged.p = pending;
 				tdma_staged.valid = true;
 				unsigned previous = relay_applied_settings.max_repairs;
@@ -778,9 +778,9 @@ static void live(void)
 }
 
 /* Hardware run 3 (H3): the session is drawn once per boot, and trackers keep
- * its last B frame across a profile exit, dropping any B that does not
+ * its last control frame across a profile exit, dropping any control frame that does not
  * advance it (pr-tracker esb_relay_control_receive). A second engagement
- * restarted B at frame 0, so no B was accepted until the 3 s layout grant
+ * restarted control frame at frame 0, so no control frame was accepted until the 3 s layout grant
  * expired, no repairs flowed, and a direct-blocked member was evicted. */
 static void automatic_reentry_continues_frames(void)
 {
@@ -794,7 +794,7 @@ static void automatic_reentry_continues_frames(void)
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
 	assert(relay_profile == 1 && relay_timeline_active.frame == 0);
 	uint32_t session = relay_session, start;
-	/* The B thread announces each frame before it sends that frame's B. */
+	/* The control frame thread announces each frame before it sends that frame's control frame. */
 	for (uint32_t frame = 1; frame <= 600; frame++) {
 		assert(relay_timeline_start(&relay_timeline_active, frame, &start));
 		relay_frame_announce(frame, start);
@@ -809,20 +809,20 @@ static void automatic_reentry_continues_frames(void)
 	assert(tdma_staged.valid && tdma_staged.p.profile == 1);
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
 	assert(relay_profile == 1 && relay_session == session);
-	/* The first B of the new engagement advances past the tracker's last. */
+	/* The first control frame of the new engagement advances past the tracker's last. */
 	assert((int32_t)(relay_timeline_active.frame - last_b) > 0);
 	assert(relay_timeline_start(&relay_timeline_active, relay_timeline_active.frame, &start));
 	assert(start == tdma_staged.activation_ticks);
 	relay_coord.auto_engaged = false;
 	relay_coord.v3_requested = false;
-	puts("PASS auto re-entry: B frames continue past the previous engagement");
+	puts("PASS auto re-entry: control frames continue past the previous engagement");
 }
 
-/* Hardware run 8: `relay v3 off` cleared the permission that also gated B, so
- * B stopped while the applied profile 1 still ran for the 3.5 s staged exit.
- * Trackers' B-derived direct anchors expire ~25 ms after the last B, so the
+/* Hardware run 8: `relay v3 off` cleared the permission that also gated control frame, so
+ * control frame stopped while the applied profile 1 still ran for the 3.5 s staged exit.
+ * Trackers' control frame-derived direct anchors expire ~25 ms after the last control frame, so the
  * fleet lost TX admission (Total TPS 0) until the exit activated. */
-static void permission_off_keeps_b_through_exit(void)
+static void permission_off_keeps_control_through_exit(void)
 {
 	two_member_layout(2, true);
 	now_ms = 6000;
@@ -831,12 +831,12 @@ static void permission_off_keeps_b_through_exit(void)
 	relay_coord.auto_engaged = true;
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
-	assert(relay_profile == 1 && relay_broadcast_eligible());
+	assert(relay_profile == 1 && relay_control_eligible());
 	for (unsigned reenable = 0; reenable < 2; reenable++) {
 		esb_relay_set_v3_enabled(false);
 		assert(!relay_coord.v3_requested && !relay_coord.auto_engaged);
 		assert(!relay_coord_v3_ready(&relay_coord, (uint16_t)tdma_active_mask)); /* future entry stays gated */
-		assert(relay_broadcast_eligible());
+		assert(relay_control_eligible());
 		now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 		assert(tdma_staged.valid && !tdma_staged.p.profile && relay_profile == 1);
 		uint64_t activation = now_ms + RELAY_LAYOUT_ACTIVATION_MS;
@@ -846,26 +846,26 @@ static void permission_off_keeps_b_through_exit(void)
 				esb_relay_set_v3_enabled(true);
 			}
 			now_ms += 10; live(); service();
-			assert(tdma_staged.valid && relay_profile == 1 && relay_broadcast_eligible());
+			assert(tdma_staged.valid && relay_profile == 1 && relay_control_eligible());
 		}
 		now_ms = activation + 1; live(); service();
-		assert(!tdma_staged.valid && !relay_profile && !relay_broadcast_eligible());
+		assert(!tdma_staged.valid && !relay_profile && !relay_control_eligible());
 		assert(relay_coord.v3_requested == (reenable != 0));
 		if (!reenable) {
 			esb_relay_set_v3_enabled(true);
 			relay_coord.auto_engaged = true;
 			now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
-			assert(tdma_staged.valid && tdma_staged.p.profile == 1 && !relay_broadcast_eligible());
+			assert(tdma_staged.valid && tdma_staged.p.profile == 1 && !relay_control_eligible());
 			now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
-			assert(relay_profile == 1 && relay_broadcast_eligible());
+			assert(relay_profile == 1 && relay_control_eligible());
 		}
 	}
 	relay_coord.auto_engaged = false;
 	relay_coord.v3_requested = false;
-	puts("PASS permission off: B maintains applied profile 1 until the staged exit activates");
+	puts("PASS permission off: control frame maintains applied profile 1 until the staged exit activates");
 }
 
-/* `relay off` and pairing while profile 1 is applied: B keeps running until a
+/* `relay off` and pairing while profile 1 is applied: control frame keeps running until a
  * staged exit activates; the exit re-anchors the native sequence. */
 static void relay_off_and_pairing_keep_b(void)
 {
@@ -876,12 +876,12 @@ static void relay_off_and_pairing_keep_b(void)
 	relay_coord.auto_engaged = true;
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
-	assert(relay_profile == 1 && relay_broadcast_eligible());
-	/* Pairing pauses automatic decisions only; the private layout keeps its B. */
+	assert(relay_profile == 1 && relay_control_eligible());
+	/* Pairing pauses automatic decisions only; the private layout keeps its control frame. */
 	esb_pairing = true;
 	for (unsigned step = 0; step < 50; step++) {
 		now_ms += 100; live(); service();
-		assert(relay_profile == 1 && !tdma_staged.valid && relay_broadcast_eligible());
+		assert(relay_profile == 1 && !tdma_staged.valid && relay_control_eligible());
 	}
 	esb_pairing = false;
 	/* Native base from before entry; the tracker keeps counting in profile 1. */
@@ -889,16 +889,16 @@ static void relay_off_and_pairing_keep_b(void)
 	tracker_slots[0].last_packet_sequence = 10;
 	esb_relay_set_enabled(false);
 	assert(!relay_coord_v3_ready(&relay_coord, (uint16_t)tdma_active_mask));
-	assert(relay_broadcast_eligible());
+	assert(relay_control_eligible());
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	assert(tdma_staged.valid && !tdma_staged.p.profile && relay_profile == 1);
 	uint64_t activation = now_ms + RELAY_LAYOUT_ACTIVATION_MS;
 	while (now_ms + 10 < activation) {
 		now_ms += 10; live(); service();
-		assert(tdma_staged.valid && relay_profile == 1 && relay_broadcast_eligible());
+		assert(tdma_staged.valid && relay_profile == 1 && relay_control_eligible());
 	}
 	now_ms = activation + 1; live(); service();
-	assert(!tdma_staged.valid && !relay_profile && !relay_broadcast_eligible());
+	assert(!tdma_staged.valid && !relay_profile && !relay_control_eligible());
 	/* 4091 packets later the sequence sits 5 behind the old base; without a
 	 * re-anchor this and the next 58 packets would be dropped as old. */
 	assert(!tracker_slots[0].sequence_initialized && !tracker_slots[1].sequence_initialized);
@@ -906,7 +906,7 @@ static void relay_off_and_pairing_keep_b(void)
 	esb_relay_set_enabled(true);
 	relay_coord.auto_engaged = false;
 	relay_coord.v3_requested = false;
-	puts("PASS relay off and pairing: B maintains applied profile 1, exit re-anchors native sequence");
+	puts("PASS relay off and pairing: control frame maintains applied profile 1, exit re-anchors native sequence");
 }
 
 /* QUERY_INFO needs a reliable 66-byte reply, which no private slot fits: the
@@ -923,7 +923,7 @@ static void query_info_holds_profile0(void)
 	assert(relay_profile == 1);
 	relay_query_until = (int64_t)now_ms + 15000;
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
-	assert(tdma_staged.valid && !tdma_staged.p.profile && relay_broadcast_eligible());
+	assert(tdma_staged.valid && !tdma_staged.p.profile && relay_control_eligible());
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
 	assert(!relay_profile && !tdma_staged.valid);
 	while (now_ms + 500 < (uint64_t)relay_query_until) {
@@ -961,7 +961,7 @@ int main(int argc, char **argv)
     staged_publication();
 	automatic_profile_publication();
 	automatic_reentry_continues_frames();
-	permission_off_keeps_b_through_exit();
+	permission_off_keeps_control_through_exit();
 	relay_off_and_pairing_keep_b();
 	query_info_holds_profile0();
 	runtime_settings_publication();

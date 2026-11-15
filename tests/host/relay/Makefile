@@ -12,8 +12,8 @@ check:
 	CC="$(CC)" python3 run_capacity.py
 	$(CC) $(CFLAGS) test_demand_coverage.c $(SRC)/relay_coord.c -o $(TMP)/coverage
 	$(TMP)/coverage
-	$(CC) $(CFLAGS) test_b2_deadline.c -o $(TMP)/b2_deadline
-	$(TMP)/b2_deadline
+	$(CC) $(CFLAGS) test_control_repeat_deadline.c -o $(TMP)/control_repeat_deadline
+	$(TMP)/control_repeat_deadline
 	$(CC) $(CFLAGS) test_policy.c -o $(TMP)/policy
 	$(TMP)/policy
 	$(CC) $(CFLAGS) test_demand.c $(SRC)/relay_coord.c -o $(TMP)/demand
@@ -53,7 +53,7 @@ check:
 	$(TMP)/test_fast_coord
 	$(CC) $(CFLAGS) test_learn.c $(SRC)/relay_coord.c -o $(TMP)/test_learn
 	$(TMP)/test_learn
-	CC="$(CC)" python3 run_broadcast.py
+	CC="$(CC)" python3 run_control.py
 	python3 check_protocol_sync.py
 	CC="$(CC)" python3 run_hid.py
 	CC="$(CC)" python3 run_deferred.py

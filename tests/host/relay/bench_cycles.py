@@ -28,7 +28,7 @@ ld.write_text("MEMORY { bench_flash(rx): ORIGIN = " + os.environ.get("BENCH_TEXT
               ".data : { *(.data*) } > bench_ram\n"
               ".bss : { *(.bss*) *(COMMON) } > bench_ram }\n")
 subprocess.run([cc, '-Os', '-g', '-mcpu=cortex-m4', '-mthumb', '-ffunction-sections',
- '-fdata-sections', '-fno-builtin', '-DRELAY_BENCH_FREESTANDING', '-DRELAY_BENCH_SECOND_B='+os.environ.get('BENCH_SECOND_B','0'), '-DRELAY_BENCH_DEMAND='+os.environ.get('BENCH_DEMAND','0'), '-DRELAY_HOST_REPAIR_SLOTS=' + os.environ.get('BENCH_REPAIR_SLOTS','5'), '-DRELAY_HOST_DIRECT_SLOTS=' + os.environ.get('BENCH_MAX_MEMBERS','16'), '-DRELAY_BENCH_MAX_MEMBERS=' + os.environ.get('BENCH_MAX_MEMBERS','16'), '-DRELAY_HOST_SLOT_TICKS=' + os.environ.get('BENCH_SLOT_TICKS','16'), '-DRELAY_HOST_TPS_MAX=' + os.environ.get('BENCH_TPS_MAX','120'), '-I', str(root / 'src/connection'), str(here / 'bench_cycles.c'),
+ '-fdata-sections', '-fno-builtin', '-DRELAY_BENCH_FREESTANDING', '-DRELAY_BENCH_CONTROL_REPEAT_MODE='+os.environ.get('BENCH_CONTROL_REPEAT_MODE','0'), '-DRELAY_BENCH_DEMAND='+os.environ.get('BENCH_DEMAND','0'), '-DRELAY_HOST_REPAIR_SLOTS=' + os.environ.get('BENCH_REPAIR_SLOTS','5'), '-DRELAY_HOST_DIRECT_SLOTS=' + os.environ.get('BENCH_MAX_MEMBERS','16'), '-DRELAY_BENCH_MAX_MEMBERS=' + os.environ.get('BENCH_MAX_MEMBERS','16'), '-DRELAY_HOST_SLOT_TICKS=' + os.environ.get('BENCH_SLOT_TICKS','16'), '-DRELAY_HOST_TPS_MAX=' + os.environ.get('BENCH_TPS_MAX','120'), '-I', str(root / 'src/connection'), str(here / 'bench_cycles.c'),
  str(root / 'src/connection/relay_coord.c'),
  '-Wl,--gc-sections,-e,setup,-u,timed', '-T', str(ld), '-nostdlib', '-lgcc', '-o', path], check=True)
 if os.environ.get('BENCH_EXPORT'):

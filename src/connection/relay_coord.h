@@ -253,7 +253,7 @@ struct relay_coord {
 };
 
 
-/* Independent working storage for learning and B planning. No legacy role,
+/* Independent working storage for learning and control frame planning. No legacy role,
  * window, ban, publication or statistics state belongs in these snapshots. */
 struct rc_link_input {
 	uint16_t direct_permille;

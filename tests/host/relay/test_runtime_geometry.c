@@ -82,5 +82,5 @@ int main(void)
 		relay_get_be16(wire + RELAY_CONTROL_OFF_CHILDREN) == 0
 		&& relay_get_be16(wire + RELAY_CONTROL_OFF_CHILDREN + 2) == 0
 	);
-	puts("Runtime validation, rational cap, variable R, missed B and tick rollover passed");
+	puts("Runtime validation, rational cap, variable R, missed control frame and tick rollover passed");
 }

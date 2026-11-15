@@ -1,13 +1,13 @@
-# Relay broadcast timing verification
+# Relay control frame timing verification
 
 The frame constants, RX lead, admission reserves, mask freeze at preamble minus
 3 ticks and RTC launch at preamble minus 2 ticks are unchanged.
 
 Hardware testing on 2026-11-02 disproved the previous full-path cycle estimate.
-With all 11 trackers present, the original implementation sent 562 broadcasts
+With all 11 trackers present, the original implementation sent 562 relay control frames
 and failed 2,106, almost all with -ETIME. Its freeze-to-return maximum was 4,485
 cycles, including cancellation. The advertised 1,544-cycle model was not a
-hardware WCET bound. Tracker windows could not receive broadcasts that had been
+hardware WCET bound. Tracker windows could not receive relay control frames that had been
 cancelled before transmission.
 
 Two RTC channels now serve distinct purposes. One compare wakes the freeze
@@ -27,7 +27,7 @@ complete before TXEN, and therefore before START consumes the DMA payload.
 The critical arm functions execute from RAM to avoid instruction-cache misses.
 
 `freeze_arm_max` measures successful hardware arming, excluding subsequent
-encoding and cancellation. `encode_max` measures the post-arm encoder. `B late`
+encoding and cancellation. `encode_max` measures the post-arm encoder. `control late`
 counts rejected hardware launch deadlines. `entry_late` and `entry_max` measure
 whole-tick lateness at the actual mask freeze. `grant_max` measures elapsed ticks
 from the freeze to completion of the encoded payload. These are cumulative
@@ -66,8 +66,8 @@ sections do not delay freeze entry.
 
 ## Hardware acceptance status
 
-The mixed-image diagnostic fleet sent 3,123 broadcasts with 15 failures and 12
-late arms. Smol 2 subsequently received 8,977 B frames and missed 375 in a
+The mixed-image diagnostic fleet sent 3,123 relay control frames with 15 failures and 12
+late arms. Smol 2 subsequently received 8,977 control frames and missed 375 in a
 stable interval (4.0% misses), with 102–112 receiver TPS in three samples and
 zero maintenance lateness (maximum lag 3 ticks). Direct admission and final
 validation refusals remained above the acceptance target.
@@ -76,7 +76,7 @@ After flashing the final tracker code to both RevF devices and all nine Smols,
 Smol 5 repeatedly failed IMU discovery. Four reboots and a final console query
 still reported `IMU: None`; its capability became zero. The receiver correctly
 reported `v3 requested=on eligible=0`, holding the entire fleet in profile 0.
-Thus full-fleet profile-1 throughput, all-tracker B/maintenance statistics,
+Thus full-fleet profile-1 throughput, all-tracker control frame/maintenance statistics,
 learned helpers and forced-drop recovery have not passed acceptance. No forced
 drops remain configured. Restore Smol 5's sensor detection before resuming the
 full-fleet measurements; do not bypass capability eligibility.

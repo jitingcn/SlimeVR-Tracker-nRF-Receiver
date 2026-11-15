@@ -105,7 +105,7 @@ int main(void)
 	assert(m.grants[1].owner == RELAY_OWNER_MAINTENANCE && !m.grants[1].children);
 	assert(m.grants[2].children & 1);
 	assert(m.grants[3].children & 1);
-	/* RF receipt before the event worker must suppress B repair demand,
+	/* RF receipt before the event worker must suppress control frame repair demand,
 	 * without suppressing the first publication or allowing duplicates. */
 	relay_coord_receive(&rc, 0, 1);
 	assert(rc.receipt[1].frame == 1 && (rc.receipt[1].received & 1));

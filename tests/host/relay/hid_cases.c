@@ -172,7 +172,7 @@ static void test_fast_repair(void)
 	relay_session = 42;
 	relay_coord_fast_reset(&relay_coord);
 	tdma_active_mask = 7;
-	relay_grants = (struct relay_control){.preamble_ticks=relay_frame_start(relay_origin,10)+RELAY_V3_B_PREAMBLE, .frame = 10, .session = 42, .epoch = 7, .repair_count = 5};
+	relay_grants = (struct relay_control){.preamble_ticks=relay_frame_start(relay_origin,10)+RELAY_V3_CONTROL_PREAMBLE, .frame = 10, .session = 42, .epoch = 7, .repair_count = 5};
 	relay_grants.grants[0] = (struct relay_grant){.owner = 0, .children = 4};
 	relay_grants.grants[1] = (struct relay_grant){.owner = 1, .children = 4};
 	relay_grants.missing[0] = relay_grants.missing[1] = 4;
@@ -292,7 +292,7 @@ static void test_peer_report(void)
 	reset_state();
 	relay_coord_fast_reset(&relay_coord);
 	relay_profile = 1; relay_origin = 1000; relay_frame_anchor=0; relay_start_anchor=relay_origin; relay_session = 42;
-	relay_grants = (struct relay_control){.members=7,.preamble_ticks=relay_frame_start(relay_origin,10)+RELAY_V3_B_PREAMBLE,.frame=10,.session=42,.epoch=7,.repair_count=5};
+	relay_grants = (struct relay_control){.members=7,.preamble_ticks=relay_frame_start(relay_origin,10)+RELAY_V3_CONTROL_PREAMBLE,.frame=10,.session=42,.epoch=7,.repair_count=5};
 	for (unsigned slot=0;slot<5;slot++) relay_grants.grants[slot].owner=RELAY_OWNER_IDLE;
 	relay_grants.grants[2] = (struct relay_grant){.owner=0,.children=0};
 	struct relay_peer_report report={.helper=0,.session=42,.epoch=7,.count=1};

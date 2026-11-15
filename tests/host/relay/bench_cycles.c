@@ -1,7 +1,7 @@
 #include "relay_coord.h"
 #include "relay_demand.h"
-#ifndef RELAY_BENCH_SECOND_B
-#define RELAY_BENCH_SECOND_B 0
+#ifndef RELAY_BENCH_CONTROL_REPEAT_MODE
+#define RELAY_BENCH_CONTROL_REPEAT_MODE 0
 #endif
 #ifndef RELAY_BENCH_DEMAND
 #define RELAY_BENCH_DEMAND 0
@@ -38,7 +38,7 @@ void setup(unsigned seed)
 		= (1U << (RELAY_BENCH_MIN_MEMBERS + seed % (RELAY_BENCH_MAX_MEMBERS - RELAY_BENCH_MIN_MEMBERS + 1U))) - 1U;
 	c.expected = c.members;
 	c.on_demand = RELAY_BENCH_DEMAND;
-	c.second_b = RELAY_BENCH_SECOND_B;
+	c.control_repeat_mode = RELAY_BENCH_CONTROL_REPEAT_MODE;
 	rc.cache_frames = c.on_demand ? 5 : 3;
 	demand_settings = (struct relay_runtime_settings){
 		RELAY_BENCH_MAX_MEMBERS,
@@ -52,18 +52,18 @@ void setup(unsigned seed)
 
 	rc.learn_members = c.members;
 	c.frame = 30 + seed / 6 % 10;
-	relay_demand_reset(&demand_state, c.frame, c.second_b ? 2 : 0);
-	demand_settings.repair_floor = c.second_b ? 2 : seed % 2U;
-	demand_settings.max_repairs = c.second_b ? RELAY_V3_REPAIR_SLOTS : 5;
-	demand_state.target = c.second_b ? 2 + seed % 3U : seed % 6U;
+	relay_demand_reset(&demand_state, c.frame, c.control_repeat_mode ? 2 : 0);
+	demand_settings.repair_floor = c.control_repeat_mode ? 2 : seed % 2U;
+	demand_settings.max_repairs = c.control_repeat_mode ? RELAY_V3_REPAIR_SLOTS : 5;
+	demand_state.target = c.control_repeat_mode ? 2 + seed % 3U : seed % 6U;
 	demand_state.quiet = seed % 30U;
 	c.repair_count = RELAY_V3_REPAIR_SLOTS;
 	c.profile = RELAY_PROFILE_120HZ;
 	c.direct_count = relay_mask_count(c.members);
 	c.slot_ticks = RELAY_V3_SLOT_TICKS;
 	c.tps_max = RELAY_HOST_TPS_MAX;
-	relay_control_set_next_repairs(&c, c.second_b ? 2 + seed % 3U : seed % 6U);
-	relay_control_set_next2_repairs(&c, c.second_b ? 2 + (seed / 6U) % 3U : (seed / 6U) % 6U);
+	relay_control_set_next_repairs(&c, c.control_repeat_mode ? 2 + seed % 3U : seed % 6U);
+	relay_control_set_next2_repairs(&c, c.control_repeat_mode ? 2 + (seed / 6U) % 3U : (seed / 6U) % 6U);
 	c.primary_valid = c.backup_valid = c.members;
 	for (unsigned id = 0; id < RC_MAX; id++) {
 		rc.t[id].direct_permille = seed % 17 == 2 && id == seed % RC_MAX ? 0 : 1000;

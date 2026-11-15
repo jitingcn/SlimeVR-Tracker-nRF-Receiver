@@ -1,4 +1,4 @@
-"""Run actual unlocked B planning and fence its publication context."""
+"""Run actual unlocked control frame planning and fence its publication context."""
 from pathlib import Path as _RelayPath
 import sys as _relay_sys
 _relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
@@ -7,7 +7,7 @@ from relay_config import select_relay
 from pathlib import Path
 import os,shlex,subprocess,tempfile
 root=Path(__file__).resolve().parents[3]
-src=select_relay((root/'src/connection/esb.c').read_text());a=src.index('static void relay_broadcast_plan(');b=src.index('/* B is prepared outside the radio ISR.',a)
+src=select_relay((root/'src/connection/esb.c').read_text());a=src.index('static void relay_control_plan(');b=src.index('/* The control frame is prepared outside the radio ISR.',a)
 learn_a=src.index('static void relay_learn_update(uint32_t now)\n{')
 learn_b=src.index('\nstatic void esb_stats_thread(void)\n{',learn_a)
 learning=src[learn_a:learn_b]
@@ -38,7 +38,7 @@ static void plan_watch(struct rc_plan_snapshot *snapshot,struct relay_control *c
  assert(!locked);assert(snapshot->learn.t[15].direct_permille==987);
  assert(snapshot->learn.peer[15][14].heard==77);
  assert(snapshot->watch[0].frame==12 && snapshot->receipt[0].received==8);
- /* Learning can run while B still holds its captured input. */
+ /* Learning can run while control frame still holds its captured input. */
  struct rc_plan_snapshot before = *snapshot;
  relay_learn_update(5000);
  assert(!memcmp(snapshot, &before, sizeof(before)));
@@ -59,22 +59,22 @@ int main(void){
  relay_coord.watch[0].frame=12;relay_coord.receipt[0].received=8;
  struct relay_control c={.profile=1,.session=42,.epoch=2,.members=0x7ff,.expected=0x7ff,.repair_count=RELAY_V3_REPAIR_SLOTS};
  struct rc_grant_plan p;struct esb_payload wire;
- relay_broadcast_plan(&c,&p,&wire);
+ relay_control_plan(&c,&p,&wire);
  assert(plans==3 && !locked && locks==RC_MAX+RELAY_CACHE_MAX_FRAMES+1 + 2+RC_MAX*RC_MAX+RC_MAX);
  assert(relay_coord.peer[15][14].heard==88);
- assert(relay_broadcast_context_current(&c,100));
- c.epoch++;assert(!relay_broadcast_context_current(&c,100));c.epoch--;
- c.session++;assert(!relay_broadcast_context_current(&c,100));c.session--;
- c.members^=1;assert(!relay_broadcast_context_current(&c,100));c.members^=1;
- assert(!relay_broadcast_context_current(&c,101));
- esb_pairing=true;assert(relay_broadcast_context_current(&c,100));esb_pairing=false; /* pairing pauses decisions, not B */
- /* Permission off keeps B for the applied profile 1 until its staged exit activates. */
- relay_coord.v3_requested=false;assert(relay_broadcast_context_current(&c,100));
- relay_profile=0;assert(!relay_broadcast_context_current(&c,100));relay_profile=1;
- relay_coord.t[3].capable=false;assert(!relay_broadcast_context_current(&c,100));relay_coord.t[3].capable=true;
- relay_coord.enabled=false;assert(relay_broadcast_context_current(&c,100));relay_coord.enabled=true; /* relay off stages the exit */
- esb_initialized=false;assert(!relay_broadcast_context_current(&c,100));esb_initialized=true;
- assert(relay_broadcast_context_current(&c,100));
+ assert(relay_control_context_current(&c,100));
+ c.epoch++;assert(!relay_control_context_current(&c,100));c.epoch--;
+ c.session++;assert(!relay_control_context_current(&c,100));c.session--;
+ c.members^=1;assert(!relay_control_context_current(&c,100));c.members^=1;
+ assert(!relay_control_context_current(&c,101));
+ esb_pairing=true;assert(relay_control_context_current(&c,100));esb_pairing=false; /* pairing pauses decisions, not control frame */
+ /* Permission off keeps control frame for the applied profile 1 until its staged exit activates. */
+ relay_coord.v3_requested=false;assert(relay_control_context_current(&c,100));
+ relay_profile=0;assert(!relay_control_context_current(&c,100));relay_profile=1;
+ relay_coord.t[3].capable=false;assert(!relay_control_context_current(&c,100));relay_coord.t[3].capable=true;
+ relay_coord.enabled=false;assert(relay_control_context_current(&c,100));relay_coord.enabled=true; /* relay off stages the exit */
+ esb_initialized=false;assert(!relay_control_context_current(&c,100));esb_initialized=true;
+ assert(relay_control_context_current(&c,100));
  return 0;
 }
 '''
@@ -83,6 +83,6 @@ with tempfile.TemporaryDirectory() as d:
  for index in (0,1):
   subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-fsanitize=address,undefined','-Wall','-Wextra','-Werror','-Wno-unknown-attributes','-DRELAY_HOST_REPAIR_SLOTS='+str(3 if index else 5),'-I'+str(root/'src/connection'),str(p/'test.c'),str(root/'src/connection/relay_coord.c'),'-o',str(p/'test')],check=True)
   subprocess.run([str(p/'test')],check=True)
-print('Overlapping B/learning snapshots stay independent, run unlocked, retain concurrent evidence and fence network context changes')
+print('Overlapping control frame/learning snapshots stay independent, run unlocked, retain concurrent evidence and fence network context changes')
 
 assert "static struct rc_grant_plan plan;" in (root / "src/connection/esb.c").read_text()
