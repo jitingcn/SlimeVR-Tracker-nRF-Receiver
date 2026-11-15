@@ -909,6 +909,37 @@ static void relay_off_and_pairing_keep_b(void)
 	puts("PASS relay off and pairing: B maintains applied profile 1, exit re-anchors native sequence");
 }
 
+/* QUERY_INFO needs a reliable 66-byte reply, which no private slot fits: the
+ * receiver stages profile 0 for the hold, then automatic entry resumes. */
+static void query_info_holds_profile0(void)
+{
+	two_member_layout(2, true);
+	now_ms = 6000;
+	service();
+	esb_relay_set_v3_enabled(true);
+	relay_coord.auto_engaged = true;
+	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
+	assert(relay_profile == 1);
+	relay_query_until = (int64_t)now_ms + 15000;
+	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
+	assert(tdma_staged.valid && !tdma_staged.p.profile && relay_broadcast_eligible());
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
+	assert(!relay_profile && !tdma_staged.valid);
+	while (now_ms + 500 < (uint64_t)relay_query_until) {
+		now_ms += 500; live(); service();
+		assert(!relay_profile && !(tdma_staged.valid && tdma_staged.p.profile));
+	}
+	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
+	assert(tdma_staged.valid && tdma_staged.p.profile == 1);
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
+	assert(relay_profile == 1);
+	relay_coord.auto_engaged = false;
+	relay_coord.v3_requested = false;
+	relay_query_until = 0;
+	puts("PASS query info: profile 0 held for the reply, then automatic entry resumes");
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2) {
@@ -932,6 +963,7 @@ int main(int argc, char **argv)
 	automatic_reentry_continues_frames();
 	permission_off_keeps_b_through_exit();
 	relay_off_and_pairing_keep_b();
+	query_info_holds_profile0();
 	runtime_settings_publication();
 	member_cap_owner_blocks();
 	puts("PASS staged layout publication: announce, serialize, activate, legacy and forced");

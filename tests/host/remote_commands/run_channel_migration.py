@@ -100,6 +100,8 @@ for line in header.splitlines():
 defines.extend(re.findall(r'^#define (?:PING_TIMEOUT_MS|PING_CLEAN_REACQUIRE_STREAK)\b[^\n]*',
                           source, re.MULTILINE))
 prelude = "\n".join(defines) + "\n" + prelude
+# The PONG queueing body uses relay state declared later by relay_section().
+prelude += "\nstatic int64_t relay_query_until;\n"
 sys.path.insert(0, str(HERE.parent / "harness"))
 from relay_support import relay_section, staging_helpers  # noqa: E402
 if "tdma_active_mask" not in prelude + production:

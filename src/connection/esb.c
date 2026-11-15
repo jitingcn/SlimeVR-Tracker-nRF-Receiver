@@ -241,6 +241,8 @@ static void tdma_recalculate(bool forced);
 /* Peer relay coordinator (see the relay section below). */
 static struct relay_coord relay_coord;
 static bool relay_auto_ladder_paused(void);
+/* Allow the staged exit lead plus reliable QUERY_INFO reply time. */
+static int64_t relay_query_until;
 static bool relay_user_enabled = true;
 static uint16_t relay_forward_published;
 #endif
@@ -1057,7 +1059,7 @@ static void tdma_recalculate(bool forced)
 		 * count toward the per-tracker rate cap like any other slot. */
 		uint16_t forward_mask = active_count
 			&& !relay_coord.v3_requested ? relay_coord_forward_wanted(&relay_coord, (uint16_t)new_mask) : 0;
-		uint8_t profile = relay_coord.auto_engaged && relay_coord_v3_ready(&relay_coord, (uint16_t)new_mask) ? RELAY_PROFILE_120HZ : 0;
+		uint8_t profile = now >= relay_query_until && relay_coord.auto_engaged && relay_coord_v3_ready(&relay_coord, (uint16_t)new_mask) ? RELAY_PROFILE_120HZ : 0;
 		if (profile) {
 			forward_mask = 0;
 		}
@@ -5468,6 +5470,11 @@ void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8
 	}
 	if (tracker_id < MAX_TRACKERS) {
 		unsigned int key = irq_lock();
+#if defined(CONFIG_RELAY)
+		if (command_flag == ESB_PONG_FLAG_OTA_QUERY_INFO) {
+			relay_query_until = k_uptime_get() + 15000;
+		}
+#endif
 		if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON ||
 		    command_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
 			tracker_slots[tracker_id].last_raw_valid = false;
