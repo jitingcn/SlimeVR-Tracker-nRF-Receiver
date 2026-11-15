@@ -909,8 +909,9 @@ static void relay_off_and_pairing_keep_b(void)
 	puts("PASS relay off and pairing: control frame maintains applied profile 1, exit re-anchors native sequence");
 }
 
-/* QUERY_INFO needs a reliable 66-byte reply, which no private slot fits: the
- * receiver stages profile 0 for the hold, then automatic entry resumes. */
+/* QUERY_INFO needs a reliable 66-byte reply, which no private slot fits: once
+ * the tracker confirms the command, the receiver stages profile 0 for the
+ * hold, then automatic entry resumes. */
 static void query_info_holds_profile0(void)
 {
 	two_member_layout(2, true);
@@ -921,7 +922,15 @@ static void query_info_holds_profile0(void)
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
 	assert(relay_profile == 1);
-	relay_query_until = (int64_t)now_ms + 15000;
+	/* The tracker's PING echoes QUERY_INFO, here delivered while profile 1 runs. */
+	memset(&rx_payload, 0, sizeof(rx_payload));
+	rx_payload.length = ESB_PING_LEN; rx_payload.data[0] = ESB_PING_TYPE;
+	rx_payload.data[1] = 0; rx_payload.pipe = 1;
+	rx_payload.data[2] = (uint8_t)(tracker_slots[0].last_ping_counter + 1); /* next PING */
+	rx_payload.data[7] = ESB_PONG_FLAG_OTA_QUERY_INFO;
+	rx_payload.data[ESB_PING_LEN - 1] = crc8_ccitt(0x07, rx_payload.data, ESB_PING_LEN - 1);
+	assert(host_validated_ping());
+	assert(relay_query_until == (int64_t)now_ms + 15000);
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	assert(tdma_staged.valid && !tdma_staged.p.profile && relay_control_eligible());
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();

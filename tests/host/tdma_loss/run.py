@@ -226,6 +226,8 @@ static void restart_ping(uint8_t tracker_id) {
         function(source, 'tdma_slot_ticks_for'),
         membership_bodies(source),
         diagnostic_function(source, 'account_ping_clock'),
+        # esb_receive_ping uses relay state that relay_section() declares below.
+        'static int64_t relay_query_until;' if relay else '',
         function(source, 'esb_receive_ping'),
         relay_section(source, stats=False) if relay else '',
         function(source, 'relay_auto_ladder_paused'),

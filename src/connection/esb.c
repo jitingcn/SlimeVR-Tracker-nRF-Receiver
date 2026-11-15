@@ -241,7 +241,8 @@ static void tdma_recalculate(bool forced);
 /* Peer relay coordinator (see the relay section below). */
 static struct relay_coord relay_coord;
 static bool relay_auto_ladder_paused(void);
-/* Allow the staged exit lead plus reliable QUERY_INFO reply time. */
+/* Profile 0 is held until this uptime after a tracker confirms QUERY_INFO:
+ * the staged exit lead plus time for its reliable 66-byte reply. */
 static int64_t relay_query_until;
 static bool relay_user_enabled = true;
 static uint16_t relay_forward_published;
@@ -3477,6 +3478,14 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 	} // End of else branch for ping_counter_initialized
 
 	remote_wom_receive(tracker_id, ping_ack_flag, &payload->data[8], counter);
+#if defined(CONFIG_RELAY)
+	/* The tracker echoes QUERY_INFO once it has the command, however it was
+	 * queued (single or all) and in either profile; its 66-byte reply needs
+	 * profile 0, so hold that from delivery, not from queuing. */
+	if (ping_ack_flag == ESB_PONG_FLAG_OTA_QUERY_INFO) {
+		relay_query_until = k_uptime_get() + 15000;
+	}
+#endif
 	if (ping_ack_flag == ESB_PONG_FLAG_METADATA_REQUEST) {
 		uint16_t echoed_token = ((uint16_t)payload->data[10] << 8) | payload->data[11];
 		bool metadata_matches = tracker_slots[tracker_id].metadata_active_mask != 0 &&
@@ -5470,11 +5479,6 @@ void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8
 	}
 	if (tracker_id < MAX_TRACKERS) {
 		unsigned int key = irq_lock();
-#if defined(CONFIG_RELAY)
-		if (command_flag == ESB_PONG_FLAG_OTA_QUERY_INFO) {
-			relay_query_until = k_uptime_get() + 15000;
-		}
-#endif
 		if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON ||
 		    command_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
 			tracker_slots[tracker_id].last_raw_valid = false;
