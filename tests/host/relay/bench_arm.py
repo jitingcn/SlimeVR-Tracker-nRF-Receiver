@@ -111,7 +111,7 @@ def hook_code(uc, address, size, _):
         return
     if address not in instructions:
         raise RuntimeError(f'Unmodeled instruction at {address:#x}')
-    if (last and functions.get(last[0], '').startswith('esb_prx_broadcast_arm_event')
+    if (last and functions.get(last[0], '').startswith('esb_prx_tx_arm_event')
             and functions.get(address, '') == 'relay_freeze_arm'):
         arm_boundary = cycles
     cost = instructions[address]
@@ -254,7 +254,7 @@ int main(int argc, char **argv) {
             u.mem_write(sym['relay_applied_settings.lto_priv.0'], bytes(u.mem_read(bench['demand_settings'], 10)))
 
         u.mem_write(payload, bytes([72, 1, 0, 1, 0]) + bytes(u.mem_read(bench['payload'], 72)))
-        wire = call('esb_prx_broadcast_prepare', payload)
+        wire = call('esb_prx_tx_prepare', payload)
         assert wire
         u.mem_write(work, struct.pack('<III4sI', bench['c'], bench['plan'], wire, bytes(u.mem_read(bench['crc'], 4)), event))
         result = call('relay_freeze_arm', bench['rc'], work, measure=True)
@@ -307,7 +307,7 @@ int main(int argc, char **argv) {
             # then encoding/preparation; caller/wait-return cost is reserved below.
             # No assumption that this work happens
             # before the first packet END is allowed in the duplicate deadline.
-            call('on_radio_disabled_broadcast.lto_priv.0', measure=True)
+            call('on_radio_disabled_prx_tx.lto_priv.0', measure=True)
             post_end_cycles = cycles + 24
             write32(sym['radio_operation_busy.lto_priv.0'], 0)
             call('relay_repeat_encode', payload+5, source, at & 0xffffffff, measure=True)
@@ -324,7 +324,7 @@ int main(int argc, char **argv) {
             # prepare copy 2 through the same linked SDK entry points.
             disable_ready=None
             u.mem_write(payload,bytes([72,1,0,1,0])+repeat)
-            assert call('esb_prx_broadcast_prepare',payload,measure=True)
+            assert call('esb_prx_tx_prepare',payload,measure=True)
             post_end_cycles += cycles + 24
             # Keep a separate 128us allowance for IRQ/thread dispatch and RTC
             # exact_set callers. This is pipeline slack, not an arm/encode limit.
@@ -349,13 +349,13 @@ int main(int argc, char **argv) {
         disable_ready = None
         call('setup', 1)
         u.mem_write(payload, bytes([72, 1, 0, 1, 0]) + bytes(u.mem_read(bench['payload'], 72)))
-        wire = call('esb_prx_broadcast_prepare', payload)
+        wire = call('esb_prx_tx_prepare', payload)
         u.mem_write(work, struct.pack('<III4sI', bench['c'], bench['plan'], wire,
                                      bytes(u.mem_read(bench['crc'], 4)), event))
         busy = sym['radio_operation_busy.lto_priv.0']
         disable_stuck = failure.startswith('disabled_')
         if failure == 'reinit':
-            u.mem_write(sym['broadcast_length.lto_priv.0'], b'\0')
+            u.mem_write(sym['prx_tx_length.lto_priv.0'], b'\0')
         elif failure == 'disabled_stuck':
             pass
         elif failure == 'disabled_late':

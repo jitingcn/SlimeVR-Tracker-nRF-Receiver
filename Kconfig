@@ -189,14 +189,14 @@ source "Kconfig.zephyr"
 config RELAY
     bool "Receiver-coordinated peer relay (relay v3)"
     default y if SRAM_SIZE >= 128 && !(SOC_NRF52833 && DATA_COLLECT)
-    depends on ESB_HAS_PRX_BROADCAST && ESB_HAS_RX_METADATA
-    select ESB_PRX_BROADCAST
+    depends on ESB_HAS_PRX_TX && ESB_HAS_RX_METADATA
+    select ESB_PRX_TX
     select ESB_RX_METADATA
     help
         Enable peer relay when the SDK provides the optional ESB extensions.
         It is on by default on every SoC the SDK supports with at least
         128 KB of RAM. Stock sdk-nrf builds retain the ordinary direct
-        tracker protocol. The SDK broadcast is nRF52-only for now; nRF54L
+        tracker protocol. The SDK PRX TX API is nRF52-only for now; nRF54L
         receivers (DPPI, GRTC) are WIP.
         nRF52833 runs relay code from flash and is not recommended as a
         relay receiver. On nRF52833, relay and

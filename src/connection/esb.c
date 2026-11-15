@@ -6505,7 +6505,7 @@ static RELAY_RAMFUNC int relay_freeze_arm(struct relay_coord *rc, const struct r
 	struct relay_control *c = w->control;
 	if (!relay_profile || relay_epoch != c->epoch || relay_session != c->session) return -ESTALE;
 	if (!atomic_cas(&radio_operation_busy, 0, 1)) return -EBUSY;
-	int err = esb_prx_broadcast_begin();
+	int err = esb_prx_tx_begin();
 	if (err) goto failed;
 	for (unsigned age = 0; age < RELAY_V3_CACHE_FRAMES; age++) {
 		const struct rc_receipt *r = &rc->receipt[w->plan->receipt_index[age]];
@@ -6514,7 +6514,7 @@ static RELAY_RAMFUNC int relay_freeze_arm(struct relay_coord *rc, const struct r
 	/* Arm the immutable radio schedule before encoding the frozen masks.
 	 * TIMER delays TXEN by 21 us after the launch edge, then RADIO ramps
 	 * for 40 us before START consumes the DMA payload. */
-	err = esb_prx_broadcast_arm_event(k_ticks_to_us_floor32(RELAY_V3_TX_OFFSET) - 40U, w->start_event);
+	err = esb_prx_tx_arm_event(k_ticks_to_us_floor32(RELAY_V3_TX_OFFSET) - 40U, w->start_event);
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
 	uint32_t armed = DWT->CYCCNT;
 #endif
@@ -6610,9 +6610,9 @@ __attribute__((noipa, optimize("O3"))) static RELAY_RAMFUNC int relay_repeat_arm
 	if (!atomic_cas(&radio_operation_busy, 0, 1)) {
 		return -EBUSY;
 	}
-	int err = esb_prx_broadcast_begin();
+	int err = esb_prx_tx_begin();
 	if (!err) {
-		err = esb_prx_broadcast_arm_event(k_ticks_to_us_floor32(RELAY_V3_TX_OFFSET) - 40U, event);
+		err = esb_prx_tx_arm_event(k_ticks_to_us_floor32(RELAY_V3_TX_OFFSET) - 40U, event);
 	}
 	if (err) {
 		atomic_set(&radio_operation_busy, 0);
@@ -6832,7 +6832,7 @@ static void relay_broadcast_thread(void)
 		/* Helper selection runs on live state between broadcasts. Publish only
 		 * this membership input; never overwrite concurrently learned rows. */
 		relay_coord.learn_members = control.members;
-		uint8_t *wire = esb_prx_broadcast_prepare(&payload);
+		uint8_t *wire = esb_prx_tx_prepare(&payload);
 		struct relay_broadcast_work work = {
 			.control = &control,
 			.plan = &plan,
@@ -6867,7 +6867,7 @@ static void relay_broadcast_thread(void)
 		k_sem_take(&relay_freeze_done, K_FOREVER);
 		int err = work.result;
 		if (!err) {
-			err = esb_prx_broadcast_wait(k_ticks_to_us_ceil32(RELAY_V3_B_PREP_LEAD_TICKS));
+			err = esb_prx_tx_wait(k_ticks_to_us_ceil32(RELAY_V3_B_PREP_LEAD_TICKS));
 			atomic_set(&radio_operation_busy, 0);
 		}
 		/* Re-encode only the timestamp/type/CRC outside the frozen path. The
@@ -6883,7 +6883,7 @@ static void relay_broadcast_thread(void)
 			relay_repeat_encode(payload.data, work.wire, repeat);
 			key = irq_lock();
 			bool current = relay_broadcast_context_current(&control, origin);
-			wire = current ? esb_prx_broadcast_prepare(&payload) : NULL;
+			wire = current ? esb_prx_tx_prepare(&payload) : NULL;
 			uint64_t ticks = k_uptime_ticks();
 			uint64_t repeat_rtc = z_nrf_rtc_timer_get_ticks(
 				K_TIMEOUT_ABS_TICKS(ticks + (int32_t)(repeat - RELAY_V3_TX_OFFSET - (uint32_t)ticks))
@@ -6899,7 +6899,7 @@ static void relay_broadcast_thread(void)
 				k_sem_take(&relay_freeze_done, K_FOREVER);
 				schedule = work.result;
 				if (!schedule) {
-					schedule = esb_prx_broadcast_wait(k_ticks_to_us_ceil32(RELAY_V3_B_PREP_LEAD_TICKS));
+					schedule = esb_prx_tx_wait(k_ticks_to_us_ceil32(RELAY_V3_B_PREP_LEAD_TICKS));
 					atomic_set(&radio_operation_busy, 0);
 				}
 			}

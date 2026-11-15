@@ -12,7 +12,7 @@ from c_extract import extract_block
 SDK = Path(os.environ.get('NCS_ROOT', HERE.parents[3])) / 'nrf/subsys/esb/esb.c'
 s = SDK.read_text()
 body = '\n'.join(extract_block(s, rf'^(?:static void|static int|int|uint8_t \*)\s*{name}\([^;{{]*\)\s*\{{')
-                 for name in ('esb_prx_broadcast_prepare', 'esb_prx_broadcast_begin', 'on_radio_disabled_broadcast', 'broadcast_cancel', 'esb_prx_broadcast_arm_event', 'esb_prx_broadcast_wait'))
+                 for name in ('esb_prx_tx_prepare', 'esb_prx_tx_begin', 'on_radio_disabled_prx_tx', 'prx_tx_cancel', 'esb_prx_tx_arm_event', 'esb_prx_tx_wait'))
 prefix = r'''
 #include <assert.h>
 #define CONFIG_SOC_SERIES_NRF52 1
@@ -28,7 +28,7 @@ prefix = r'''
 #define ESB_PROTOCOL_ESB_DPL 1
 #define ESB_STATE_UNINITIALIZED 0
 #define ESB_STATE_PRX 1
-#define ESB_STATE_PRX_BROADCAST 2
+#define ESB_STATE_PRX_TX 2
 #define NRF_RADIO ((void *)0)
 #define RADIO_NORMAL_SW_SHORTS 3
 #define ESB_RADIO_EVENT_END 1
@@ -38,10 +38,10 @@ prefix = r'''
 #define __DMB() ((void)0)
 struct esb_payload {unsigned length,pipe;uint8_t data[72];};
 struct esb_radio_pdu {struct {struct {uint8_t length,pid,ack;} dpl_pdu;} type;uint8_t data[72];};
-static uint8_t broadcast_buffer[80];
-static uint8_t broadcast_length, broadcast_pipe, broadcast_channel;
-static int8_t broadcast_power;
-static bool broadcast_begun;
+static uint8_t prx_tx_buffer[80];
+static uint8_t prx_tx_length, prx_tx_pipe, prx_tx_channel;
+static int8_t prx_tx_power;
+static bool prx_tx_begun;
 static struct {struct {struct {unsigned compare_channel_mask; struct {unsigned end;} counter_period;} timer;} event;} tx_time_shifted;
 static int disable_event;
 #define TX_FAST_RAMP_UP_TIME_US 40
@@ -53,10 +53,10 @@ static struct {int mode,protocol; int8_t tx_output_power; bool use_fast_ramp_up;
 static struct {uint8_t rf_channel;} esb_addr;
 static struct {void *p_reg;} esb_timer;
 static int esb_state=ESB_STATE_PRX;
-static volatile bool prx_broadcast_active;
+static volatile bool prx_tx_active;
 static void (*on_radio_disabled)(void);
 static bool pa,ppi,timer,fail,late,stuck;
-static bool broadcast_event_fired(uint32_t event){(void)event;return late;}
+static bool prx_tx_event_fired(uint32_t event){(void)event;return late;}
 static unsigned now,cc,restores,pipe,clears;
 static void start_rx_listening(void){esb_state=ESB_STATE_PRX;restores++;}
 static void esb_ppi_for_retransmission_clear(void){ppi=false;}
@@ -78,7 +78,7 @@ static void nrf_timer_cc_set(void *p,unsigned ch,unsigned n){(void)p;assert(ch==
 static void k_busy_wait(unsigned n){assert(!locked);now+=n;if(!fail && now==cc+120)on_radio_disabled();}
 '''
 prefix += r"""
-static void esb_ppi_for_broadcast_disable_rx(void){ppi=false;}
+static void esb_ppi_for_prx_tx_disable_rx(void){ppi=false;}
 static void nrf_radio_int_disable(void *p,unsigned v){(void)p;(void)v;}
 static void nrf_radio_task_trigger(void *p,unsigned v){(void)p;(void)v;}
 static bool nrf_radio_event_check(void *p,unsigned v){(void)p;(void)v;return !stuck;}
@@ -88,48 +88,48 @@ static void nrf_timer_int_disable(void *p,unsigned v){(void)p;(void)v;}
 static void mpsl_fem_lna_configuration_clear(void){}
 static void mpsl_fem_utils_available_cc_channels_cache(unsigned v){(void)v;}
 static int mpsl_fem_pa_configuration_set(const void *a,const void *b){(void)a;(void)b;pa=true;return 0;}
-static void esb_ppi_for_broadcast_set(uint32_t event){assert(event==1234);timer=false;ppi=true;}
+static void esb_ppi_for_prx_tx_set(uint32_t event){assert(event==1234);timer=false;ppi=true;}
 """
 cases = r'''
 int main(void){
  struct esb_payload p={.length=72,.pipe=1,.data={0xe8}};
  unsigned key=irq_lock();
- uint8_t *wire=esb_prx_broadcast_prepare(&p);
+ uint8_t *wire=esb_prx_tx_prepare(&p);
  assert(wire && wire != p.data);
  wire[20]=0xa5;
- assert(esb_prx_broadcast_begin()==0 && !timer && locked);
- assert(esb_prx_broadcast_arm_event(21,1234)==0 && locked && !timer);
- assert(prx_broadcast_active && ppi && pa && wire[20]==0xa5);
+ assert(esb_prx_tx_begin()==0 && !timer && locked);
+ assert(esb_prx_tx_arm_event(21,1234)==0 && locked && !timer);
+ assert(prx_tx_active && ppi && pa && wire[20]==0xa5);
  /* No CPU polling launches the radio: the external event starts the timer. */
  timer=true;
  irq_unlock(key);
- assert(esb_prx_broadcast_wait(21)==0);
+ assert(esb_prx_tx_wait(21)==0);
  now=0;fail=true;
- assert(esb_prx_broadcast_prepare(&p));
- key=irq_lock();assert(!esb_prx_broadcast_begin());
- assert(!esb_prx_broadcast_arm_event(21,1234));irq_unlock(key);
- assert(esb_prx_broadcast_wait(21)==-ETIMEDOUT);
- assert(restores==2 && !pa && !ppi && !timer && !prx_broadcast_active);
+ assert(esb_prx_tx_prepare(&p));
+ key=irq_lock();assert(!esb_prx_tx_begin());
+ assert(!esb_prx_tx_arm_event(21,1234));irq_unlock(key);
+ assert(esb_prx_tx_wait(21)==-ETIMEDOUT);
+ assert(restores==2 && !pa && !ppi && !timer && !prx_tx_active);
  now=0;fail=false;
- assert(esb_prx_broadcast_prepare(&p));
+ assert(esb_prx_tx_prepare(&p));
  key=irq_lock();
- assert(esb_prx_broadcast_begin()==0);
+ assert(esb_prx_tx_begin()==0);
  late=true;
- assert(esb_prx_broadcast_arm_event(21,1234)==-ETIME);
- assert(esb_state==ESB_STATE_PRX && !pa && !ppi && !timer && !broadcast_begun);
+ assert(esb_prx_tx_arm_event(21,1234)==-ETIME);
+ assert(esb_state==ESB_STATE_PRX && !pa && !ppi && !timer && !prx_tx_begun);
  irq_unlock(key);late=false;
  stuck=true;
- assert(esb_prx_broadcast_prepare(&p));assert(!esb_prx_broadcast_begin());
- assert(esb_prx_broadcast_arm_event(21,1234)==-ETIMEDOUT);
- assert(!broadcast_begun && !ppi && esb_state==ESB_STATE_UNINITIALIZED);
+ assert(esb_prx_tx_prepare(&p));assert(!esb_prx_tx_begin());
+ assert(esb_prx_tx_arm_event(21,1234)==-ETIMEDOUT);
+ assert(!prx_tx_begun && !ppi && esb_state==ESB_STATE_UNINITIALIZED);
  esb_state=ESB_STATE_PRX;
- assert(esb_prx_broadcast_prepare(&p));assert(!esb_prx_broadcast_begin());
- late=true;assert(esb_prx_broadcast_arm_event(21,1234)==-ETIMEDOUT);
+ assert(esb_prx_tx_prepare(&p));assert(!esb_prx_tx_begin());
+ late=true;assert(esb_prx_tx_arm_event(21,1234)==-ETIMEDOUT);
  late=false;stuck=false;esb_state=ESB_STATE_PRX;
- broadcast_length=0;assert(esb_prx_broadcast_begin()==-EBUSY);
- esb_state=9;assert(esb_prx_broadcast_prepare(&p));
- assert(esb_prx_broadcast_begin()==-EBUSY);
- esb_state=ESB_STATE_PRX;p.length=73;assert(!esb_prx_broadcast_prepare(&p));
+ prx_tx_length=0;assert(esb_prx_tx_begin()==-EBUSY);
+ esb_state=9;assert(esb_prx_tx_prepare(&p));
+ assert(esb_prx_tx_begin()==-EBUSY);
+ esb_state=ESB_STATE_PRX;p.length=73;assert(!esb_prx_tx_prepare(&p));
  return 0;
 }
 '''
@@ -139,4 +139,4 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-Wall','-Wextra','-Werror',
         '-fsanitize=address,undefined',str(src),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
-print('PRX broadcast success, late deadline, busy and timeout restoration: passed')
+print('PRX TX success, late deadline, busy and timeout restoration: passed')
