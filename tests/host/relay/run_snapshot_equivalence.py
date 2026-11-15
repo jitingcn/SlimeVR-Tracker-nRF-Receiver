@@ -12,7 +12,8 @@ with tempfile.TemporaryDirectory() as directory:
     cc = shlex.split(os.environ.get('CC', 'cc'))
     flags = ['-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
              '-I'+str(root / 'src/connection')]
-    subprocess.run(cc+flags+['-include', str(p/'rename.h'), '-c', str(p/'old.c'), '-o', str(p/'old.o')], check=True)
+    # old.c is historical source (b4dac52); newer compilers' sign-compare is not its concern.
+    subprocess.run(cc+flags+['-Wno-sign-compare', '-include', str(p/'rename.h'), '-c', str(p/'old.c'), '-o', str(p/'old.o')], check=True)
     subprocess.run(cc+flags+[str(here/'test_snapshot_equivalence.c'), str(root/'src/connection/relay_coord.c'),
                              str(p/'old.o'), '-o', str(p/'test')], check=True)
     subprocess.run([str(p/'test')], check=True)

@@ -63,7 +63,7 @@ int main(void)
 	}
 	relay_control_encode(control, &c);
 	assert(relay_control_decode(control, sizeof(control), &decoded));
-	assert(relay_member_slot(c.members, g->direct - 1U) == g->direct - 1U);
+	assert(relay_member_slot(c.members, g->direct - 1U) == (int)(g->direct - 1U));
 
 	assert((control[3] >> 3) + 1 == g->direct && control[68] == g->slot_ticks);
 	assert(relay_get_be16(control + 69) == g->tps);

@@ -31,7 +31,7 @@ static void make_bundle(struct esb_payload *out, uint8_t head, const struct esb_
 	const struct esb_payload *record, uint8_t capture_rssi, int8_t head_rssi)
 {
 	memset(out, 0, sizeof(*out));
-	struct relay_bundle_builder b;
+	struct relay_bundle_builder b = {0};
 	uint8_t own_len = own ? own->length : 0;
 	CHECK(relay_bundle_begin(&b, out->data, sizeof(out->data), head, own ? own->data : NULL, own_len, false));
 	CHECK(relay_bundle_add(&b, record->data, record->length, capture_rssi));

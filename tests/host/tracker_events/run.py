@@ -221,7 +221,7 @@ static void tracked_tdma_shadow_observe(uint8_t tracker, enum tdma_shadow_eviden
         binary = path/'test'
         command = shlex.split(os.environ.get('CC','cc')) + [
             '-std=c11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
-            '-Wno-unused-parameter','-I'+str(path),'-I'+str(root/'src'),'-I'+str(root/'src/connection'),
+            '-Wno-unused-parameter','-Wno-unused-variable','-I'+str(path),'-I'+str(root/'src'),'-I'+str(root/'src/connection'),
             str(root/'src/tracker_events.c'), str(Path(__file__).with_name('fixture.c')),
             '-o',str(binary),
         ]

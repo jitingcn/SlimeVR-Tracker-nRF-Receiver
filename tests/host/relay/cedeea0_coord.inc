@@ -954,7 +954,7 @@ static void rc_plan_rescue(const struct relay_coord *rc, const struct relay_cont
 			if (best >= 0) {
 				p->rescue_child = RC_BIT(child);
 				p->rescue_helper = best;
-				p->rescue_second = second < 0 ? RELAY_OWNER_IDLE : second;
+				p->rescue_second = second < 0 ? RELAY_OWNER_IDLE : (unsigned)second;
 				p->rescue_age = age;
 				return;
 			}
