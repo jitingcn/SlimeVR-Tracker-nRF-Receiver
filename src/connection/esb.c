@@ -6261,8 +6261,8 @@ void esb_relay_print_status(void)
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 	printk("relay: diagnostics_overflow=%u\n", tdma_diag_overflow);
 #endif
-	printk("relay: permission=%s eligible=%u engaged=%u\n", enabled ? "on" : "off",
-		ready, relay_profile != 0);
+	printk("relay: permission=%s eligible=%u engaged=%u members=0x%04x\n", enabled ? "on" : "off",
+		ready, relay_profile != 0, members);
 	printk("relay: repair seen=%u invalid=%u phase=%u slot=%u record=%u\n",
 	relay_rx_stats.repair.seen, relay_rx_stats.repair.invalid, relay_rx_stats.repair.phase, relay_rx_stats.repair.slot, relay_rx_stats.repair.record);
 	if (relay_profile) {
