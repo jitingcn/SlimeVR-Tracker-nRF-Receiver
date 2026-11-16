@@ -731,6 +731,23 @@ static void member_cap_owner_blocks(void)
 	puts("PASS member cap: owner sleeps while staged and with live members above max_trackers");
 }
 
+/* max_trackers caps private relay members only: with relay off, direct
+ * TDMA keeps every stored live tracker. */
+static void member_cap_relay_off(void)
+{
+	relay_settings = (struct relay_runtime_settings){2, 1, 16, 100, 120, 0};
+	relay_settings_generation++;
+	two_member_layout(3, true);
+	relay_coord.enabled = false;
+	for (unsigned ms = 0; ms < 2 * RELAY_LAYOUT_ACTIVATION_MS; ms += 10) {
+		now_ms += 10;
+		assert(ping(0, true) && ping(1, true) && ping(2, true));
+		service();
+	}
+	assert(tdma_active_mask == 7 && !relay_profile && slot(tracker_slots[2].tdma_config_packed) != 0xff);
+	puts("PASS member cap: relay off keeps direct members above max_trackers");
+}
+
 static void automatic_profile_publication(void)
 {
 	two_member_layout(2, true);
@@ -975,6 +992,7 @@ int main(int argc, char **argv)
 	query_info_holds_profile0();
 	runtime_settings_publication();
 	member_cap_owner_blocks();
+	member_cap_relay_off();
 	puts("PASS staged layout publication: announce, serialize, activate, legacy and forced");
 	puts("Receiver membership admission cases passed");
 	return 0;

@@ -825,13 +825,16 @@ static bool tdma_staged_due_locked(uint32_t now_ticks)
 	return tdma_staged.valid && (int32_t)(now_ticks - tdma_staged.activation_ticks) >= 0;
 }
 
-/* Members the next layout can admit: stored slots, then in relay only the
- * first max_trackers of those. */
+/* Members the next layout can admit: stored slots, then, while relay is
+ * permitted or still applied, only the first max_trackers of those. */
 static uint32_t tdma_admissible_mask(uint32_t desired)
 {
 	uint32_t stored_mask
 		= stored_trackers >= MAX_TRACKERS ? UINT32_MAX : (stored_trackers > 0 ? BIT(stored_trackers) - 1U : 0U);
 	uint32_t candidates = desired & stored_mask;
+	if (!relay_coord.enabled && !relay_profile) {
+		return candidates;
+	}
 	uint32_t selected = 0;
 	for (unsigned n = 0; n < relay_settings.max_trackers && candidates; n++) {
 		uint32_t bit = candidates & (0U - candidates);

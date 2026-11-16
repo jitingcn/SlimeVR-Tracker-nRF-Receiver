@@ -13,6 +13,7 @@ prefix = '''
 #define MAX_TRACKERS 16
 static unsigned stored_trackers = 16;
 static struct relay_coord relay_coord;
+static unsigned char relay_profile;
 static struct relay_runtime_settings relay_settings = {.max_trackers = 16};
 '''
 cases = '''
