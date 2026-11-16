@@ -1,4 +1,4 @@
-"""Compare 50k whole plans, frozen grants and state with the exact round-17 source."""
+"""Compare 50k whole plans, frozen grants and state with the retained round-17 planner."""
 from pathlib import Path
 import subprocess,tempfile,re,os,shlex,hashlib
 here=Path(__file__).resolve().parent;root=here.parents[2]
@@ -11,5 +11,5 @@ with tempfile.TemporaryDirectory() as d:
  subprocess.run(cc+flags+['-include',str(p/'rename.h'),'-c',str(p/'old.c'),'-o',str(p/'old.o')],check=True)
  subprocess.run(cc+flags+['-DCOMPARE_CEDEEA0',str(here/'test_split.c'),str(root/'src/connection/relay_coord.c'),str(p/'old.o'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],check=True)
-print('cedeea0 exact source SHA256:',hashlib.sha256(source).hexdigest())
-print('Production: 50000 exact cedeea0 preplans, grants and coordinator state comparisons passed')
+print('cedeea0 retained planner SHA256:',hashlib.sha256(source).hexdigest())
+print('Production: 50000 cedeea0 planner preplans, grants and coordinator state comparisons passed')

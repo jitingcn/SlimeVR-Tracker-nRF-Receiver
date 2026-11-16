@@ -7,11 +7,11 @@ int main(void)
 	const struct relay_geometry *g = relay_geometry_current();
 	uint16_t members = (uint16_t)((1U << g->direct) - 1U);
 	relay_coord_init(&rc);
-	rc.v3_requested = true;
+	rc.enabled = true;
 	for (unsigned i = 0; i < g->direct; i++) {
 		relay_coord_note_caps(&rc, i, RELAY_INFO_CAPS);
 	}
-	assert(relay_coord_v3_ready(&rc, members));
+	assert(relay_coord_ready(&rc, members));
 	struct relay_control c
 		= {.profile = 1, .members = members, .expected = members, .repair_count = g->repairs, .frame = 10};
 	for (unsigned i = 0; i < RELAY_MAX_TRACKERS; i++) {
@@ -28,7 +28,7 @@ int main(void)
 	if (g->repairs > 1) {
 		assert(c.grants[1].owner == RELAY_OWNER_MAINTENANCE);
 	}
-	for (unsigned i = g->repairs; i < RELAY_V3_REPAIR_MAX; i++) {
+	for (unsigned i = g->repairs; i < RELAY_REPAIR_MAX; i++) {
 		assert(c.grants[i].owner == RELAY_OWNER_IDLE);
 	}
 	uint8_t wire[72];

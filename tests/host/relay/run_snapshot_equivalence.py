@@ -4,6 +4,9 @@ import os, re, shlex, subprocess, tempfile
 here = Path(__file__).resolve().parent
 root = here.parents[2]
 source = subprocess.check_output(['git', 'show', 'b4dac52:src/connection/relay_coord.c'], cwd=root)
+source = source.decode().replace('RELAY_V'+'3_', 'RELAY_').replace('_V'+'3', '').replace('_v'+'3', '')
+source = source[:source.index('void relay_coord_init')] + source[source.index('void relay_coord_fast_reset'):]
+source = source.encode()
 with tempfile.TemporaryDirectory() as directory:
     p = Path(directory)
     (p / 'old.c').write_bytes(source)

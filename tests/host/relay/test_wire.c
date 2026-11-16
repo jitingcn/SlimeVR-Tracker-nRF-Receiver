@@ -16,7 +16,7 @@ static void control(void)
 		c.grants[i] = (struct relay_grant){15, 1};
 	}
 	assert(relay_control_encode(bytes, &c) == 72);
-	assert(bytes[0] == 0xE8 && bytes[1] == RELAY_V3_VERSION && bytes[4] == 0x12 && bytes[7] == 0x78);
+	assert(bytes[0] == 0xE8 && bytes[1] == RELAY_PROTOCOL_VERSION && bytes[4] == 0x12 && bytes[7] == 0x78);
 	assert(bytes[12] == 0xDE && bytes[15] == 0xEF && bytes[30] == 0x2F);
 	assert(bytes[46] == 15 && bytes[51] == 0 && bytes[52] == 1);
 	assert(RELAY_CONTROL_OFF_OWNERS == 46 && RELAY_CONTROL_OFF_CHILDREN == 51);
@@ -175,12 +175,12 @@ static void control_coordinates(void)
 	for (uint32_t f = 15728630; f < 15728660; f++) {
 		uint32_t origin = 0xfffffff0U;
 		uint32_t start = relay_frame_start(origin, f);
-		uint32_t preamble = start + RELAY_V3_CONTROL_PREAMBLE;
+		uint32_t preamble = start + RELAY_CONTROL_PREAMBLE;
 		assert(relay_control_start(preamble) == start);
 		assert(relay_control_origin(preamble, f) == origin);
-		for (unsigned i = 0; i < RELAY_V3_REPAIR_SLOTS; i++) {
+		for (unsigned i = 0; i < RELAY_REPAIR_SLOTS; i++) {
 			uint32_t at = relay_repair_start(preamble, i);
-			assert(at == start + RELAY_V3_REPAIR_START + i * RELAY_V3_SLOT_TICKS);
+			assert(at == start + RELAY_REPAIR_START + i * RELAY_SLOT_TICKS);
 			assert(relay_frame_near(f, start, at) == f);
 			assert(relay_repair_slot(relay_frame_phase(origin, f, at)) == i);
 		}
@@ -191,6 +191,6 @@ int main(void)
 {
  control_coordinates(); frame_epochs();
 	freeze_mask_crc(); control(); repairs(); descriptors(); cadence();
-	puts("v3 wire and rational cadence: passed");
+	puts("relay wire and rational cadence: passed");
 	return 0;
 }

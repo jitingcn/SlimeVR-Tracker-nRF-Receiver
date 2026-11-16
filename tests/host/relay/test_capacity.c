@@ -9,11 +9,11 @@ int main(void)
     _Static_assert(RELAY_MAX_TRACKERS == 16, "wire capacity unchanged");
     struct relay_coord rc;
     relay_coord_init(&rc);
-    rc.v3_requested = true;
+    rc.enabled = true;
     for (unsigned id = 0; id < RC_MAX; id++)
-        relay_coord_note_caps(&rc, id, (RELAY_V3_VERSION << RELAY_CAP_VERSION_SHIFT) | RELAY_CAP_HELPER);
-    assert(relay_coord_v3_ready(&rc, 0xffff));
-    assert(relay_coord_v3_ready(&rc, 0xffff));
+        relay_coord_note_caps(&rc, id, (RELAY_PROTOCOL_VERSION << RELAY_CAP_VERSION_SHIFT) | RELAY_CAP_HELPER);
+    assert(relay_coord_ready(&rc, 0xffff));
+    assert(relay_coord_ready(&rc, 0xffff));
     for (unsigned id = 10; id < 16; id++) {
         assert(relay_coord_is_capable(&rc, id));
         relay_coord_note_frame(&rc, id, RC_DIRECT, RC_SEQ_NORMAL, 0, 60, 100);

@@ -67,7 +67,7 @@ fixture = (HERE / 'fixture.c').read_text()
 fixture = fixture.replace('/* PRODUCTION TYPES */', '\n'.join((
     f'#include "{ROOT / "src/connection/relay_coord.h"}"',
     constants, ladder, packet_type, slot_type, slot_declaration,
-    unique(r'^static struct \{\n\tuint32_t bundles;[\s\S]*?^\} relay_rx_stats;'),
+    unique(r'^static struct \{\n\tuint32_t arrivals;[\s\S]*?^\} relay_rx_stats;'),
     '#if defined(CONFIG_TDMA_DIAGNOSTICS)', phase_type, diag_type,
     diag_declaration, diag_declarations, '#endif',
 )))

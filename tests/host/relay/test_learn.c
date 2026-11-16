@@ -144,8 +144,8 @@ static void surveys_and_grants(void)
 	memset(c.missing,0,sizeof(c.missing));
 	c.frame=40;c.members=0x7ff;
 	/* All five repair slots occupied: no report timestamp advances. */
-	rc.watch[40%RELAY_V3_CACHE_FRAMES]=(struct rc_watch){.frame=40,.primary_valid=0x1f};
-	for(unsigned child=0;child<5;child++) rc.watch[40%RELAY_V3_CACHE_FRAMES].helpers[child]=child+6;
+	rc.watch[40%RELAY_CACHE_FRAMES]=(struct rc_watch){.frame=40,.primary_valid=0x1f};
+	for(unsigned child=0;child<5;child++) rc.watch[40%RELAY_CACHE_FRAMES].helpers[child]=child+6;
 	c.missing[0]=0x1f;
 	relay_coord_build_grants(&rc,&c,1000);
 	for(unsigned h=0;h<RC_MAX;h++) assert(!rc.report_ms[h]);

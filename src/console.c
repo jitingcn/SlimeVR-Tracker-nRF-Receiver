@@ -269,8 +269,6 @@ static void print_help(void)
 		"  relay                      Relay coordinator status\n"
 		"  relay on|off               Enable/disable relaying\n"
 		"  relay layout [field value]  Show or persist runtime limits\n"
-		"  relay v3 on|off            Allow/disable automatic relay v3\n"
-		"  relay pin|unpin <id>       Prefer/stop preferring tracker <id> as a relay head\n"
 		"  relay blockmask <mask> <s> Test: block up to 3 children for at most 60 s\n"
 		"  relay block <id> <pct>     Test: drop pct%% of <id>'s direct uplink (0 = off)\n"
 #endif
@@ -1062,16 +1060,6 @@ static void console_thread(void)
 			} else if (argc == 2 && strcmp(arg, "off") == 0) {
 				esb_relay_set_enabled(false);
 				printk("Relay disabled\n");
-			} else if (argc == 3 && strcmp(arg, "v3") == 0 && (strcmp(arg2, "on") == 0 || strcmp(arg2, "off") == 0)) {
-				esb_relay_set_v3_enabled(strcmp(arg2, "on") == 0);
-				printk("Relay v3 automatic permission %s\n", arg2);
-			} else if (
-				argc == 3 && (strcmp(arg, "pin") == 0 || strcmp(arg, "unpin") == 0) && parse_u8_arg(arg2, &id)
-				&& id < MAX_TRACKERS
-			) {
-				esb_relay_pin(id, strcmp(arg, "pin") == 0);
-				printk("Relay head preference for tracker %u %s\n", id,
-				       strcmp(arg, "pin") == 0 ? "set" : "cleared");
 			} else if (argc == 4 && strcmp(arg, "blockmask") == 0) {
 				char *end;
 				unsigned long mask = strtoul(arg2, &end, 0);
@@ -1088,7 +1076,7 @@ static void console_thread(void)
 				esb_relay_block(id, pct);
 				printk("Direct uplink of tracker %u: %u%% dropped\n", id, pct);
 			} else {
-				printk("Usage: relay [on|off|v3 on|v3 off|pin <id>|unpin <id>|block <id> <pct>]\n");
+				printk("Usage: relay [on|off|block <id> <pct>]\n");
 			}
 #endif
 		} else if (strcmp(argv[0], command_health) == 0) {

@@ -187,7 +187,7 @@ config LOG_BUFFER_SIZE
 source "Kconfig.zephyr"
 
 config RELAY
-    bool "Receiver-coordinated peer relay (relay v3)"
+    bool "Receiver-coordinated peer relay"
     default y if SRAM_SIZE >= 128 && !(SOC_NRF52833 && DATA_COLLECT)
     depends on ESB_HAS_PRX_TX && ESB_HAS_RX_METADATA
     select ESB_PRX_TX

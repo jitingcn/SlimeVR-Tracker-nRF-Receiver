@@ -43,7 +43,7 @@ void setup(unsigned seed)
 	demand_settings = (struct relay_runtime_settings){
 		RELAY_BENCH_MAX_MEMBERS,
 		5,
-		RELAY_V3_SLOT_TICKS,
+		RELAY_SLOT_TICKS,
 		100,
 		RELAY_HOST_TPS_MAX,
 		0,
@@ -54,13 +54,13 @@ void setup(unsigned seed)
 	c.frame = 30 + seed / 6 % 10;
 	relay_demand_reset(&demand_state, c.frame, c.control_repeat_mode ? 2 : 0);
 	demand_settings.repair_floor = c.control_repeat_mode ? 2 : seed % 2U;
-	demand_settings.max_repairs = c.control_repeat_mode ? RELAY_V3_REPAIR_SLOTS : 5;
+	demand_settings.max_repairs = c.control_repeat_mode ? RELAY_REPAIR_SLOTS : 5;
 	demand_state.target = c.control_repeat_mode ? 2 + seed % 3U : seed % 6U;
 	demand_state.quiet = seed % 30U;
-	c.repair_count = RELAY_V3_REPAIR_SLOTS;
+	c.repair_count = RELAY_REPAIR_SLOTS;
 	c.profile = RELAY_PROFILE_120HZ;
 	c.direct_count = relay_mask_count(c.members);
-	c.slot_ticks = RELAY_V3_SLOT_TICKS;
+	c.slot_ticks = RELAY_SLOT_TICKS;
 	c.tps_max = RELAY_HOST_TPS_MAX;
 	relay_control_set_next_repairs(&c, c.control_repeat_mode ? 2 + seed % 3U : seed % 6U);
 	relay_control_set_next2_repairs(&c, c.control_repeat_mode ? 2 + (seed / 6U) % 3U : (seed / 6U) % 6U);

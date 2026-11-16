@@ -590,7 +590,7 @@ static void runtime_settings_publication(void)
 	assert(tdma_active_mask == 7 && !tdma_staged.valid);
 	relay_settings = (struct relay_runtime_settings){2, 1, 16, 100, 120};
 	relay_settings_generation++;
-	relay_coord.v3_requested = true;
+	relay_coord.enabled = true;
 	relay_coord.auto_engaged = true; /* test-only forced profile request */
 	force_layout();
 	assert(tdma_staged.valid && !relay_profile && tdma_staged.p.profile == 1);
@@ -705,7 +705,7 @@ static void member_cap_owner_blocks(void)
 	assert(tdma_active_mask == 7 && !tdma_staged.valid);
 	relay_settings = (struct relay_runtime_settings){2, 1, 16, 100, 120, 0};
 	relay_settings_generation++;
-	relay_coord.v3_requested = true;
+	relay_coord.enabled = true;
 	relay_coord.auto_engaged = true; /* test-only forced profile request */
 	force_layout();
 	assert(tdma_staged.valid && tdma_staged.p.new_mask == 3);
@@ -727,7 +727,7 @@ static void member_cap_owner_blocks(void)
 		assert(tdma_active_mask == 3 && !tdma_membership_deadline_armed);
 		assert(tdma_membership_wait_ms(500) == 500);
 	}
-	relay_coord.v3_requested = false;
+	relay_coord.enabled = false;
 	puts("PASS member cap: owner sleeps while staged and with live members above max_trackers");
 }
 
@@ -736,9 +736,9 @@ static void automatic_profile_publication(void)
 	two_member_layout(2, true);
 	now_ms = 6000;
 	service();
-	relay_coord.v3_requested = true;
+	relay_coord.enabled = true;
 	force_layout();
-	assert(!relay_profile && !tdma_staged.valid && !relay_forward_published);
+	assert(!relay_profile && !tdma_staged.valid);
 	/* A pending cap must not impose the ladder's 15 s delay on a profile switch. */
 	tdma_cap_level = 3;
 	tdma_published_cap_level = 0;
@@ -750,7 +750,7 @@ static void automatic_profile_publication(void)
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1;
 	service();
 	assert(relay_profile == 1 && !tdma_staged.valid);
-	/* Admit a v3 join while engaged. Its staged publication retains cap 3. */
+	/* Admit a relay join while engaged. Its staged publication retains cap 3. */
 	stored_trackers = 3;
 	relay_coord_note_caps(&relay_coord, 2, RELAY_INFO_CAPS);
 	now_ms += TDMA_RECONFIG_MIN_MS;
@@ -766,7 +766,7 @@ static void automatic_profile_publication(void)
 	assert(tdma_staged.valid && !tdma_staged.p.profile && relay_profile == 1);
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1;
 	service();
-	assert(!relay_profile && !tdma_staged.valid && relay_coord.v3_requested);
+	assert(!relay_profile && !tdma_staged.valid && relay_coord.enabled);
 	assert(tdma_cap_level == 3 && tdma_published_cap_level == 3);
 	puts("PASS auto profile: permission stays direct, entry and recovery use staged activation");
 }
@@ -787,7 +787,7 @@ static void automatic_reentry_continues_frames(void)
 	two_member_layout(2, true);
 	now_ms = 6000;
 	service();
-	relay_coord.v3_requested = true;
+	relay_coord.enabled = true;
 	relay_timeline_clear(&relay_timeline_active); /* first engagement since boot */
 	relay_coord.auto_engaged = true;
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
@@ -814,11 +814,11 @@ static void automatic_reentry_continues_frames(void)
 	assert(relay_timeline_start(&relay_timeline_active, relay_timeline_active.frame, &start));
 	assert(start == tdma_staged.activation_ticks);
 	relay_coord.auto_engaged = false;
-	relay_coord.v3_requested = false;
+	relay_coord.enabled = false;
 	puts("PASS auto re-entry: control frames continue past the previous engagement");
 }
 
-/* Hardware run 8: `relay v3 off` cleared the permission that also gated control frame, so
+/* Hardware run 8: `relay off` cleared the permission that also gated control frame, so
  * control frame stopped while the applied profile 1 still ran for the 3.5 s staged exit.
  * Trackers' control frame-derived direct anchors expire ~25 ms after the last control frame, so the
  * fleet lost TX admission (Total TPS 0) until the exit activated. */
@@ -827,15 +827,15 @@ static void permission_off_keeps_control_through_exit(void)
 	two_member_layout(2, true);
 	now_ms = 6000;
 	service();
-	esb_relay_set_v3_enabled(true);
+	esb_relay_set_enabled(true);
 	relay_coord.auto_engaged = true;
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
 	assert(relay_profile == 1 && relay_control_eligible());
 	for (unsigned reenable = 0; reenable < 2; reenable++) {
-		esb_relay_set_v3_enabled(false);
-		assert(!relay_coord.v3_requested && !relay_coord.auto_engaged);
-		assert(!relay_coord_v3_ready(&relay_coord, (uint16_t)tdma_active_mask)); /* future entry stays gated */
+		esb_relay_set_enabled(false);
+		assert(!relay_coord.enabled && !relay_coord.auto_engaged);
+		assert(!relay_coord_ready(&relay_coord, (uint16_t)tdma_active_mask)); /* future entry stays gated */
 		assert(relay_control_eligible());
 		now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 		assert(tdma_staged.valid && !tdma_staged.p.profile && relay_profile == 1);
@@ -843,16 +843,16 @@ static void permission_off_keeps_control_through_exit(void)
 		for (unsigned step = 0; now_ms + 10 < activation; step++) {
 			/* Permission returning mid-exit is not an engagement: the exit stays staged. */
 			if (reenable && step == 100) {
-				esb_relay_set_v3_enabled(true);
+				esb_relay_set_enabled(true);
 			}
 			now_ms += 10; live(); service();
 			assert(tdma_staged.valid && relay_profile == 1 && relay_control_eligible());
 		}
 		now_ms = activation + 1; live(); service();
 		assert(!tdma_staged.valid && !relay_profile && !relay_control_eligible());
-		assert(relay_coord.v3_requested == (reenable != 0));
+		assert(relay_coord.enabled == (reenable != 0));
 		if (!reenable) {
-			esb_relay_set_v3_enabled(true);
+			esb_relay_set_enabled(true);
 			relay_coord.auto_engaged = true;
 			now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 			assert(tdma_staged.valid && tdma_staged.p.profile == 1 && !relay_control_eligible());
@@ -861,7 +861,7 @@ static void permission_off_keeps_control_through_exit(void)
 		}
 	}
 	relay_coord.auto_engaged = false;
-	relay_coord.v3_requested = false;
+	relay_coord.enabled = false;
 	puts("PASS permission off: control frame maintains applied profile 1 until the staged exit activates");
 }
 
@@ -872,7 +872,7 @@ static void relay_off_and_pairing_keep_b(void)
 	two_member_layout(2, true);
 	now_ms = 6000;
 	service();
-	esb_relay_set_v3_enabled(true);
+	esb_relay_set_enabled(true);
 	relay_coord.auto_engaged = true;
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
@@ -888,7 +888,7 @@ static void relay_off_and_pairing_keep_b(void)
 	tracker_slots[0].sequence_initialized = tracker_slots[1].sequence_initialized = true;
 	tracker_slots[0].last_packet_sequence = 10;
 	esb_relay_set_enabled(false);
-	assert(!relay_coord_v3_ready(&relay_coord, (uint16_t)tdma_active_mask));
+	assert(!relay_coord_ready(&relay_coord, (uint16_t)tdma_active_mask));
 	assert(relay_control_eligible());
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	assert(tdma_staged.valid && !tdma_staged.p.profile && relay_profile == 1);
@@ -905,7 +905,7 @@ static void relay_off_and_pairing_keep_b(void)
 	assert(check_packet_sequence(0, 5) == 0 && check_packet_sequence(0, 6) == 0);
 	esb_relay_set_enabled(true);
 	relay_coord.auto_engaged = false;
-	relay_coord.v3_requested = false;
+	relay_coord.enabled = false;
 	puts("PASS relay off and pairing: control frame maintains applied profile 1, exit re-anchors native sequence");
 }
 
@@ -917,7 +917,7 @@ static void query_info_holds_profile0(void)
 	two_member_layout(2, true);
 	now_ms = 6000;
 	service();
-	esb_relay_set_v3_enabled(true);
+	esb_relay_set_enabled(true);
 	relay_coord.auto_engaged = true;
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
@@ -944,7 +944,7 @@ static void query_info_holds_profile0(void)
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
 	assert(relay_profile == 1);
 	relay_coord.auto_engaged = false;
-	relay_coord.v3_requested = false;
+	relay_coord.enabled = false;
 	relay_query_until = 0;
 	puts("PASS query info: profile 0 held for the reply, then automatic entry resumes");
 }

@@ -2,7 +2,7 @@
 """HID parity: the receiver's actual RX path turns a relayed frame into the
 same HID packets as the same frame received directly, so an unmodified
 SlimeVR server sees nothing new. Runs the production functions extracted from
-esb.c (sequence check, normal/composite/bundle processing, capability strip)
+esb.c (sequence check, normal/composite/repair processing, capability strip)
 against a recording hid_write_packet_n()."""
 from pathlib import Path as _RelayPath
 import sys as _relay_sys
@@ -36,7 +36,7 @@ def block(pattern, semicolon=True):
 
 constants = "\n".join(re.findall(r"^#define ESB_(?:PING|PONG|COMPOSITE)\w*[^\n]*", esb_h, re.MULTILINE))
 relay_state = "\n".join(re.findall(r"^static uint(?:8|16|32)_t relay_block_(?:id|percent|mask|deadline)[^\n]*;", esb, re.MULTILINE))
-stats = re.search(r"^static struct \{\n\tuint32_t bundles;.*?\} relay_rx_stats;", esb, re.MULTILINE | re.DOTALL)
+stats = re.search(r"^static struct \{\n\tuint32_t arrivals;.*?\} relay_rx_stats;", esb, re.MULTILINE | re.DOTALL)
 if not stats:
     raise SystemExit("relay_rx_stats not found")
 relay_state += "\n" + stats.group(0) + "\n"
@@ -117,7 +117,7 @@ def main():
              function("packet_stats_refresh"), function("packet_stats_count"), function("check_packet_sequence"),
              function("relay_multi_blocked"), function("relay_block_drop"), function("relay_host_stats_publish"), function("relay_sequence_check"), function("relay_take_caps"),
              function("composite_body_length"),
-             block(r"^struct composite_result\s*\{"), function("composite_validate"), function("esb_execute_composite"), function("esb_receive_composite"), function("esb_receive_normal"), function("esb_receive_bundle"), function("esb_receive_repair"), function("esb_receive_peer_report"),
+             block(r"^struct composite_result\s*\{"), function("composite_validate"), function("esb_execute_composite"), function("esb_receive_composite"), function("esb_receive_normal"), function("esb_receive_repair"), function("esb_receive_peer_report"),
              (HERE / "hid_cases.c").read_text()]
     with tempfile.TemporaryDirectory() as tmp:
         source = Path(tmp) / "hid.c"

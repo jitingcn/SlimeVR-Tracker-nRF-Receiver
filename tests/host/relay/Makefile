@@ -45,10 +45,8 @@ check:
 	$(TMP)/test_split
 	$(CC) $(CFLAGS) -DRELAY_HOST_DIRECT_SLOTS=16 -DRELAY_HOST_REPAIR_SLOTS=3 test_split.c $(SRC)/relay_coord.c -o $(TMP)/test_split_full16
 	$(TMP)/test_split_full16
-	$(CC) $(CFLAGS) test_coord.c $(SRC)/relay_coord.c -o $(TMP)/test_coord
-	$(TMP)/test_coord
-	$(CC) $(CFLAGS) test_wire_v3.c -o $(TMP)/test_wire_v3
-	$(TMP)/test_wire_v3
+	$(CC) $(CFLAGS) test_wire.c -o $(TMP)/test_wire
+	$(TMP)/test_wire
 	$(CC) $(CFLAGS) test_fast_coord.c $(SRC)/relay_coord.c -o $(TMP)/test_fast_coord
 	$(TMP)/test_fast_coord
 	$(CC) $(CFLAGS) test_learn.c $(SRC)/relay_coord.c -o $(TMP)/test_learn

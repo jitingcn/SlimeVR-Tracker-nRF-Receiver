@@ -17,18 +17,18 @@ static struct relay_runtime_settings relay_settings = {.max_trackers = 16};
 '''
 cases = '''
 int main(void) {
- relay_coord_init(&relay_coord); relay_coord.v3_requested = true;
+ relay_coord_init(&relay_coord); relay_coord.enabled = true;
  for (unsigned id = 0; id < RC_MAX; id++)
-  relay_coord_note_caps(&relay_coord, id, (RELAY_V3_VERSION << RELAY_CAP_VERSION_SHIFT) | RELAY_CAP_HELPER);
+  relay_coord_note_caps(&relay_coord, id, (RELAY_PROTOCOL_VERSION << RELAY_CAP_VERSION_SHIFT) | RELAY_CAP_HELPER);
  assert(tdma_admissible_mask(0x3ff) == 0x3ff);
- assert(relay_coord_v3_ready(&relay_coord, 0x3ff));
+ assert(relay_coord_ready(&relay_coord, 0x3ff));
  for (unsigned id = 10; id < 16; id++) {
   unsigned desired = 3 | BIT(id);
   assert(tdma_admissible_mask(desired) == desired);
-  assert(relay_coord_v3_ready(&relay_coord, tdma_admissible_mask(desired)));
+  assert(relay_coord_ready(&relay_coord, tdma_admissible_mask(desired)));
  }
  assert(tdma_admissible_mask(0xffff) == 0xffff);
- assert(relay_coord_v3_ready(&relay_coord, 0xffff));
+ assert(relay_coord_ready(&relay_coord, 0xffff));
  return 0;
 }
 '''
@@ -40,4 +40,4 @@ with tempfile.TemporaryDirectory() as tmp:
         '-I'+str(here.parents[2]/'src/connection'), str(p/'test.c'),
         str(here.parents[2]/'src/connection/relay_coord.c'), '-o', str(p/'test')], check=True)
     subprocess.run([str(p/'test')], check=True)
-print('capacity: all 16 IDs retain service and can enter v3')
+print('capacity: all 16 IDs retain service and can enter relay')

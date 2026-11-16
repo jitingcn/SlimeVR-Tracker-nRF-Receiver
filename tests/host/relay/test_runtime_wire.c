@@ -43,7 +43,7 @@ int main(void)
 						relay_control_set_next2_repairs(&c, next2);
 						uint8_t wire[72];
 						struct relay_control decoded;
-						assert(relay_control_encode(wire, &c) == 72 && wire[1] == RELAY_V3_VERSION);
+						assert(relay_control_encode(wire, &c) == 72 && wire[1] == RELAY_PROTOCOL_VERSION);
 						assert(relay_control_decode(wire, 72, &decoded));
 						assert(decoded.direct_count == direct && decoded.slot_ticks == width && decoded.tps_max == 121);
 						assert(
@@ -58,13 +58,13 @@ int main(void)
 							relay_control_decode(wire, 72, &decoded) && relay_control_next_repairs(&decoded) == next
 							&& relay_control_next2_repairs(&decoded) == next2
 						);
-						wire[1] = RELAY_V3_VERSION + 1U;
+						wire[1] = RELAY_PROTOCOL_VERSION + 1U;
 						reseal(wire);
 						assert(!relay_control_decode(wire, 72, &decoded));
-						wire[1] = RELAY_V3_VERSION + 1U;
+						wire[1] = RELAY_PROTOCOL_VERSION + 1U;
 						reseal(wire);
 						assert(!relay_control_decode(wire, 72, &decoded));
-						wire[1] = RELAY_V3_VERSION + 1U;
+						wire[1] = RELAY_PROTOCOL_VERSION + 1U;
 						wire[68] = 14;
 						reseal(wire);
 						assert(!relay_control_decode(wire, 72, &decoded));

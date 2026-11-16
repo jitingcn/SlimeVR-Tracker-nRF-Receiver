@@ -446,8 +446,8 @@ static void test_maintenance(void)
 	const uint8_t id = 2;
 	relay_profile = RELAY_PROFILE_120HZ;
 	tdma_active_mask = 7;
-	relay_coord_note_caps(&relay_coord, id, RELAY_CAP_HELPER | (RELAY_V3_VERSION << RELAY_CAP_VERSION_SHIFT));
-	now_ticks = RELAY_V3_REPAIR_START + RELAY_V3_TX_OFFSET;
+	relay_coord_note_caps(&relay_coord, id, RELAY_CAP_HELPER | (RELAY_PROTOCOL_VERSION << RELAY_CAP_VERSION_SHIFT));
+	now_ticks = RELAY_REPAIR_START + RELAY_TX_OFFSET;
 	struct esb_payload p = packet(ESB_PING_TYPE, id, 3, 1, now_ticks, ESB_PONG_FLAG_NORMAL);
 	bool has_ack = false;
 	struct esb_payload ack = ack_for(&p, &has_ack);
@@ -456,7 +456,7 @@ static void test_maintenance(void)
 	assert(ack.length == ESB_PONG_LEN + RELAY_TRAILER_PENDING_LEN);
 	assert(relay_trailer_decode_len(&ack.data[ESB_PONG_LEN], ack.length - ESB_PONG_LEN, &trailer));
 	assert(trailer.pending && trailer.pending_total == relay_geometry_code(3, relay_applied_settings.max_repairs));
-	assert(trailer.pending_member_mask == 7 && trailer.pending_slot_ticks == RELAY_V3_SLOT_TICKS);
+	assert(trailer.pending_member_mask == 7 && trailer.pending_slot_ticks == RELAY_SLOT_TICKS);
 	tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
 	ack = ack_for(&p, &has_ack);
 	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);

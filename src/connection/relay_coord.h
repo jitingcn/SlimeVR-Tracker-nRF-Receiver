@@ -1,18 +1,3 @@
-/* Receiver-side relay coordinator: pure policy, no Zephyr dependencies.
- *
- * Inputs (from the ESB RX path, ISR context, caller serialises):
- *   per accepted/duplicate pose frame, whether it arrived directly or inside
- *   a head's bundle, with the sequence-check outcome and the gap count it
- *   revealed; capability bytes; bundle overflow flags; trailer deliveries.
- * Every RC_WINDOW_MS the owner thread calls relay_coord_tick(), which decides
- *   - which trackers are weak (children) and which healthy, capable trackers
- *     relay them (heads: at most RELAY_MAX_HEADS, pinned ones preferred),
- *   - when an assignment failed (pair banned, next head tried),
- *   - when a head needs a forwarding slot appended to the TDMA frame, and the
- *     two-phase withdrawal of that slot (revoke in the trailer, wait out the
- *     head lease, only then drop it from the layout).
- * Output: per-recipient PONG trailers and the forwarding mask the layout uses.
- */
 #ifndef SLIMENRF_RELAY_COORD_H
 #define SLIMENRF_RELAY_COORD_H
 
@@ -64,37 +49,12 @@
  * empty 500 ms window alone is normal for a still tracker, one throttled by
  * another tracker's OTA, or one rebooting, and must not force a relay. */
 #define RC_SILENT_MIN_MS 500U
-/* Release: direct share at or above this for RC_GOOD_WINDOWS judgements and
- * the assignment older than RC_MIN_HOLD_MS. Children keep transmitting
- * directly, so a relay only adds head RX cost: prefer direct and release
- * soon; the hold only damps flapping while a body keeps turning. */
+/* Stable recovery requires this pooled direct delivery share. */
 #define RC_GOOD_PERMILLE 900U
-#define RC_GOOD_WINDOWS 6U
-#define RC_MIN_HOLD_MS 5000U
-/* A head must itself be healthy. */
+/* Helpers must themselves meet the unchanged qualification threshold. */
 #define RC_HEAD_MIN_PERMILLE 950U
 _Static_assert(RC_HEAD_MIN_PERMILLE == 950U, "relay qualification threshold");
-#define RC_HEAD_DROP_PERMILLE 850U
-/* Assignment checks: delivery of the trailer, then relay effectiveness. */
-#define RC_DELIVERY_TIMEOUT_MS 3000U
-#define RC_EVAL_AFTER_MS 1000U
-#define RC_EVAL_MIN_LOST 10U
-#define RC_EVAL_FAIL_PERMILLE 250U
-#define RC_BAN_MS 20000U
-/* Children silent on every path this long are released (dormant), counted
- * from the later of their last frame and the assignment (or its delivery). */
-#define RC_CHILD_SILENT_MS 3000U
-/* Try other heads while an obstructed child can still hold its membership.
- * A silent radio and a disappeared tracker cannot be distinguished here. */
-#define RC_CHILD_RECOVERY_MS 15000U
-#define RC_SILENT_BAN_MS 2000U
 #define RC_OTA_DIRECT_FRESH_MS 1500U
-/* Forwarding slots. */
-#define RC_FWD_OVERFLOW_WINDOWS 2U
-#define RC_FWD_IDLE_WINDOWS 20U
-/* Lease (RELAY_HEAD_LEASE_MS on the tracker, 2500) + one PONG period + margin. */
-#define RC_FWD_REVOKE_WAIT_MS 4000U
-#define RC_MAX_TOTAL_SLOTS 16U
 
 enum rc_path { RC_DIRECT, RC_RELAYED };
 
@@ -107,7 +67,7 @@ struct rc_window {
 	uint16_t gaps;
 	uint16_t direct_dup;
 	uint16_t relayed_dup;
-	uint16_t overflow;
+
 	uint32_t rssi_sum;
 	uint16_t rssi_count;
 };
@@ -115,14 +75,10 @@ struct rc_window {
 struct rc_tracker {
 	bool capable;
 	uint8_t protocol_version;
-	uint8_t role;           /* RC_ROLE_* */
-	uint8_t head;           /* child: its head */
-	uint16_t children;      /* head: its children */
 	uint32_t last_any_ms;
 	uint32_t last_direct_ms;
 	bool seen;
 	bool direct_seen;
-	bool relay_needed;      /* survives head loss until direct recovery or dormancy */
 	uint16_t direct_permille; /* last judgement */
 	uint32_t quality_ms; /* freshness of that judgement */
 	uint16_t acc_direct;      /* frames carried towards the next judgement */
@@ -130,24 +86,8 @@ struct rc_tracker {
 	uint8_t acc_windows;
 	uint16_t rate_x16;        /* frames per window x16, from non-empty windows */
 	uint8_t rssi;             /* smoothed -dBm magnitude, 0 = unknown */
-	/* child assignment */
-	uint32_t assigned_ms;
-	uint32_t delivered_ms;
-	bool delivered;
-	uint16_t eval_relayed;
-	uint16_t eval_gaps;
-	uint8_t good_windows;
 	uint8_t weak_windows;   /* consecutive lossy judgements */
-	/* head forwarding slot */
-	uint8_t overflow_windows;
-	uint8_t fwd_idle_windows;
-	bool fwd_wanted;
-	bool fwd_requested;     /* info flag, also works when no bundle fits */
-	bool fwd_revoking;
-	uint32_t fwd_revoke_ms;
 };
-
-enum { RC_ROLE_NONE, RC_ROLE_HEAD, RC_ROLE_CHILD };
 
 struct rc_watch {
 	uint32_t frame, session;
@@ -181,8 +121,8 @@ struct rc_choice {
 
 /* Immutable policy snapshot for the bounded freeze step. */
 struct rc_grant_plan {
-	struct rc_watch watch[RELAY_V3_CACHE_FRAMES];
-	uint32_t children[RELAY_V3_CACHE_FRAMES][RC_MAX];
+	struct rc_watch watch[RELAY_CACHE_FRAMES];
+	uint32_t children[RELAY_CACHE_FRAMES][RC_MAX];
 	uint32_t candidates[3];
 	uint8_t helper[3][32];
 	uint32_t now_ms;
@@ -239,22 +179,11 @@ struct relay_coord {
 	uint32_t published_history[RC_MAX];
 	uint16_t published_valid;
 	bool enabled;
-	bool v3_requested;
-	uint16_t pinned;            /* manual head preference */
-	uint16_t relayed_mask;      /* children delivered by relay last window */
-	uint16_t forward_mask;      /* heads whose forwarding slot is in the layout */
 	struct rc_tracker t[RC_MAX];
 	struct rc_window w[RC_MAX];
-	uint32_t ban_until[RC_MAX][RC_MAX]; /* [child][head], 0 = none */
-	uint16_t pair_score[RC_MAX][RC_MAX]; /* relay share history, permille */
-	uint32_t assignments;
-	uint32_t rotations;
-	uint32_t releases;
 };
 
-
-/* Independent working storage for learning and control frame planning. No legacy role,
- * window, ban, publication or statistics state belongs in these snapshots. */
+/* Independent working storage for learning and control frame planning. Publication and statistics state do not belong in these snapshots. */
 struct rc_link_input {
 	uint16_t direct_permille;
 	uint8_t rssi;
@@ -276,7 +205,6 @@ void relay_learn_snapshot_tick(struct rc_learn_snapshot *rc, uint32_t now_ms);
 void relay_plan_snapshot_watch(struct rc_plan_snapshot *rc, struct relay_control *c);
 void relay_plan_snapshot_grants(struct rc_plan_snapshot *rc, struct relay_control *c,
 	struct rc_grant_plan *p, uint32_t now_ms);
-
 
 /* Background expiry; caller must serialize against report updates. */
 void relay_coord_expire_peer(struct relay_coord *rc, unsigned helper,
@@ -307,35 +235,20 @@ void relay_coord_forget(struct relay_coord *rc, uint8_t id, uint32_t now_ms);
 /* One pose frame through check_packet_sequence(); gaps = gaps it revealed. */
 void relay_coord_note_frame(struct relay_coord *rc, uint8_t id, enum rc_path path,
 	int seq_result, uint8_t gaps, uint8_t rssi, uint32_t now_ms);
-void relay_coord_note_bundle(struct relay_coord *rc, uint8_t head, bool overflow);
-/* A trailer naming children was sent to a head. */
-void relay_coord_note_trailer_sent(struct relay_coord *rc, uint8_t head, uint16_t children, uint32_t now_ms);
 
-/* member_mask: direct TDMA members. Returns the desired forwarding mask; the
- * owner re-lays-out when it differs from the published one and then calls
- * relay_coord_set_forward_layout(). */
-void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
-	uint32_t now, bool applied, bool eligible);
-uint16_t relay_coord_tick(struct relay_coord *rc, uint16_t member_mask, uint32_t now_ms);
-void relay_coord_set_forward_layout(struct relay_coord *rc, uint16_t forward_mask);
-/* Desired forwarding mask given members (bounded by RC_MAX_TOTAL_SLOTS). */
-uint16_t relay_coord_forward_wanted(const struct relay_coord *rc, uint16_t member_mask);
+void relay_coord_auto_update(struct relay_coord *rc, uint16_t members, uint32_t now, bool applied, bool eligible);
+void relay_coord_tick(struct relay_coord *rc, uint16_t members, uint32_t now);
 
 /* Trailer for a capable recipient under the published layout. */
 void relay_coord_trailer(const struct relay_coord *rc, uint8_t id, uint8_t epoch,
 	uint16_t member_mask, struct relay_pong_trailer *out);
-/* Forwarding slot index of head in the published layout, or RELAY_NO_SLOT. */
-uint8_t relay_coord_forward_slot(const struct relay_coord *rc, uint8_t head, uint16_t member_mask);
 
-bool relay_coord_is_relayed(const struct relay_coord *rc, uint8_t id);
-/* Role teardown during another OTA must not erase the direct-link gate. */
+/* OTA must use fresh direct-link evidence. */
 bool relay_coord_direct_ready(const struct relay_coord *rc, uint8_t id, uint32_t now_ms);
 bool relay_coord_is_capable(const struct relay_coord *rc, uint8_t id);
 void relay_coord_set_enabled(struct relay_coord *rc, bool enabled);
-bool relay_coord_v3_ready(const struct relay_coord *rc, uint16_t members);
-/* Every member runs v3 firmware, so an applied profile 1 can run. Neither the
- * relay switch nor automatic permission gates this; v3_ready adds both. */
-bool relay_coord_v3_capable(const struct relay_coord *rc, uint16_t members);
-void relay_coord_pin(struct relay_coord *rc, uint8_t id, bool pinned);
+bool relay_coord_ready(const struct relay_coord *rc, uint16_t members);
+/* Every member runs relay firmware, so an applied profile 1 can run. Permission does not gate an already applied profile; relay_coord_ready adds it. */
+bool relay_coord_capable(const struct relay_coord *rc, uint16_t members);
 
 #endif

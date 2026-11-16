@@ -45,12 +45,12 @@ have passed. The third whole missed control frame still fences direct
 transmission. Both copies missed while acquiring continue the existing bounded
 broad acquisition with poses fenced.
 
-Settings use NVS record v3, same ten bytes, with placement in the width byte's
+Settings use NVS record version 3, same ten bytes, with placement in the width byte's
 upper bits. v1 records infer static floor=ceiling; v2 preserves explicit floor.
 The exact old static default 11/5/16/100/120/floor5 in v1 or v2 migrates to
 16/5/16/120/120/floor5. Other valid settings survive. Since old records carry
 no intent bit, an explicit choice identical to that old default necessarily
-migrates too. New v3 records preserve that tuple as an explicit redundancy
+migrates too. New version-3 records preserve that tuple as an explicit redundancy
 choice. Invalid/absent records use the new defaults. No NVS rewrite happens
 at boot. Setting the ceiling while floor equals ceiling keeps static mode;
 a lower explicit floor is preserved or clamped down to a lowered ceiling.

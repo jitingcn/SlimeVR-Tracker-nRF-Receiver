@@ -702,9 +702,9 @@ static void decision_genuine_loss(void)
 static void auto_policy_ladder(void)
 {
 	relay_coord_init(&relay_coord);
-	relay_coord.v3_requested = true;
+	relay_coord.enabled = true;
 	relay_coord_note_caps(&relay_coord, 3,
-		(RELAY_V3_VERSION << RELAY_CAP_VERSION_SHIFT) | RELAY_CAP_HELPER);
+		(RELAY_PROTOCOL_VERSION << RELAY_CAP_VERSION_SHIFT) | RELAY_CAP_HELPER);
 	tdma_cap_level = tdma_published_cap_level = 0;
 	for (unsigned second = 0; second < 15; second++) {
 		now += 1000;
@@ -739,7 +739,7 @@ static void auto_policy_ladder(void)
 static void auto_outage_pending(void)
 {
 	relay_coord_init(&relay_coord);
-	relay_coord.v3_requested = true;
+	relay_coord.enabled = true;
 	relay_coord_note_caps(&relay_coord, 3, RELAY_INFO_CAPS);
 	/* Learn 10 Hz from four pooled windows, then go entirely silent. */
 	for (unsigned tick = 0; tick < 30; tick++) {
@@ -770,7 +770,7 @@ static void auto_outage_pending(void)
 static void auto_excluded_live(void)
 {
 	relay_coord_init(&relay_coord);
-	relay_coord.v3_requested = true;
+	relay_coord.enabled = true;
 	relay_coord_note_caps(&relay_coord, 3, RELAY_INFO_CAPS);
 	stored_trackers = 5;
 	relay_settings.max_trackers = 1;
@@ -795,7 +795,7 @@ static void auto_excluded_live(void)
 	assert(!evidence.relay_eligible); /* true pending joins still fence policy */
 }
 
-static void auto_nonv3_join(void)
+static void auto_nonrelay_join(void)
 {
 	auto_policy_ladder();
 	relay_coord.auto_engaged = true;
@@ -816,7 +816,7 @@ static const struct {
 	{"auto-policy-ladder", auto_policy_ladder},
 	{"auto-outage-pending", auto_outage_pending},
 	{"auto-excluded-live", auto_excluded_live},
-	{"auto-nonv3-join", auto_nonv3_join},
+	{"auto-nonrelay-join", auto_nonrelay_join},
 	{"fast-recovery", fast_recovery},
 	{"slow-probe", slow_probe},
 	{"sparse-recovery", sparse_recovery},

@@ -7,9 +7,9 @@ static struct relay_coord rc;
 static uint32_t now;
 static uint16_t roster;
 static void setup(void) {
-    relay_coord_init(&rc); rc.v3_requested = true; now = 100; roster = MEMBERS;
+    relay_coord_init(&rc); rc.enabled = true; now = 100; roster = MEMBERS;
     for (unsigned i=0;i<11;i++) relay_coord_note_caps(&rc,i,
-        (RELAY_V3_VERSION << RELAY_CAP_VERSION_SHIFT) | RELAY_CAP_HELPER);
+        (RELAY_PROTOCOL_VERSION << RELAY_CAP_VERSION_SHIFT) | RELAY_CAP_HELPER);
 }
 /* mode 0 good, 1 sustained 40% loss on one member, 2 repaired, 3 outage,
  * 10 outage with every frame delivered by relay. */
@@ -195,7 +195,7 @@ static void test_forget_rejoin(void) {
     setup(); run(24,1,false); assert(rc.auto_poor_members == (1U << 3));
     run(70,2,true); assert(rc.auto_engaged); /* hold met, member 3 still at 600 */
     relay_coord_forget(&rc,3,now);
-    relay_coord_note_caps(&rc,3,(RELAY_V3_VERSION << RELAY_CAP_VERSION_SHIFT) | RELAY_CAP_HELPER);
+    relay_coord_note_caps(&rc,3,(RELAY_PROTOCOL_VERSION << RELAY_CAP_VERSION_SHIFT) | RELAY_CAP_HELPER);
     assert(!(rc.auto_poor_members & (1U << 3)) && !rc.auto_balance[3] && !rc.auto_good_since);
     for (unsigned i=0;i<11;i++) d[i] = 57;
     d[3] = 53;
@@ -232,7 +232,7 @@ int main(void) {
     setup(); run(18,1,false); step(1,false,false);
     run(18,1,false); assert(!rc.auto_engaged); /* excluded mode breaks window */
     run(5,1,false); assert(rc.auto_engaged);
-    rc.v3_requested = false; step(1,true,true); assert(!rc.auto_engaged);
+    rc.enabled = false; step(1,true,true); assert(!rc.auto_engaged);
     /* Hardware fleet: untouched members at 85-93%, triggering member 90%.
      * 85% on a previously poor member must still refuse recovery. */
     setup(); run(24,1,false); assert(rc.auto_engaged);

@@ -75,7 +75,7 @@ validation refusals remained above the acceptance target.
 After flashing the final tracker code to both RevF devices and all nine Smols,
 Smol 5 repeatedly failed IMU discovery. Four reboots and a final console query
 still reported `IMU: None`; its capability became zero. The receiver correctly
-reported `v3 requested=on eligible=0`, holding the entire fleet in profile 0.
+reported `relay requested=on eligible=0`, holding the entire fleet in profile 0.
 Thus full-fleet profile-1 throughput, all-tracker control frame/maintenance statistics,
 learned helpers and forced-drop recovery have not passed acceptance. No forced
 drops remain configured. Restore Smol 5's sensor detection before resuming the

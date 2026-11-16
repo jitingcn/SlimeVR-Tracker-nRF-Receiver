@@ -21,7 +21,7 @@ code=r'''
 #include "relay_coord.h"
 struct esb_payload {uint8_t data[72];};
 static struct relay_coord relay_coord;
-static struct relay_runtime_settings relay_applied_settings={16,RELAY_V3_REPAIR_SLOTS,16,100,120,RELAY_V3_REPAIR_SLOTS,0};
+static struct relay_runtime_settings relay_applied_settings={16,RELAY_REPAIR_SLOTS,16,100,120,RELAY_REPAIR_SLOTS,0};
 static bool esb_initialized=true,esb_pairing,locked;
 static uint8_t relay_profile=1,relay_epoch=2;
 static uint16_t tdma_active_mask=0x7ff;
@@ -53,11 +53,11 @@ static void encode(uint8_t *wire,const struct relay_control *c){assert(!locked);
 #define relay_control_encode encode
 '''+learning+src[a:b].replace('#endif', '')+r'''
 int main(void){
- relay_coord_init(&relay_coord);relay_coord.v3_requested=true;
+ relay_coord_init(&relay_coord);relay_coord.enabled=true;
  for(unsigned i=0;i<11;i++)relay_coord_note_caps(&relay_coord,i,RELAY_INFO_CAPS);
  relay_coord.t[15].direct_permille=987;relay_coord.peer[15][14].heard=77;
  relay_coord.watch[0].frame=12;relay_coord.receipt[0].received=8;
- struct relay_control c={.profile=1,.session=42,.epoch=2,.members=0x7ff,.expected=0x7ff,.repair_count=RELAY_V3_REPAIR_SLOTS};
+ struct relay_control c={.profile=1,.session=42,.epoch=2,.members=0x7ff,.expected=0x7ff,.repair_count=RELAY_REPAIR_SLOTS};
  struct rc_grant_plan p;struct esb_payload wire;
  relay_control_plan(&c,&p,&wire);
  assert(plans==3 && !locked && locks==RC_MAX+RELAY_CACHE_MAX_FRAMES+1 + 2+RC_MAX*RC_MAX+RC_MAX);
@@ -69,7 +69,7 @@ int main(void){
  assert(!relay_control_context_current(&c,101));
  esb_pairing=true;assert(relay_control_context_current(&c,100));esb_pairing=false; /* pairing pauses decisions, not control frame */
  /* Permission off keeps control frame for the applied profile 1 until its staged exit activates. */
- relay_coord.v3_requested=false;assert(relay_control_context_current(&c,100));
+ relay_coord.enabled=false;assert(relay_control_context_current(&c,100));
  relay_profile=0;assert(!relay_control_context_current(&c,100));relay_profile=1;
  relay_coord.t[3].capable=false;assert(!relay_control_context_current(&c,100));relay_coord.t[3].capable=true;
  relay_coord.enabled=false;assert(relay_control_context_current(&c,100));relay_coord.enabled=true; /* relay off stages the exit */

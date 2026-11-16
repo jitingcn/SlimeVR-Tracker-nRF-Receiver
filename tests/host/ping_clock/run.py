@@ -67,7 +67,7 @@ clock = '#if defined(CONFIG_TDMA_DIAGNOSTICS)\n' + clock + '\n#endif\n'
 lengths = extract_block(source, r'^static int composite_body_length\s*\([^;{}]*\)\s*\{')
 lengths += '\n' + extract_block(source, r'^static bool relay_early_receipt_valid\s*\([^;{}]*\)\s*\{')
 packet_helpers = extract_block(source, r'^struct composite_result\s*\{', True) + '\n' + '\n'.join(function(name) for name in ('esb_receive_ping', 'composite_validate', 'esb_execute_composite', 'esb_receive_composite',
-                                                     'esb_receive_normal', 'esb_receive_bundle', 'esb_receive_repair', 'esb_receive_peer_report')
+                                                     'esb_receive_normal', 'esb_receive_repair', 'esb_receive_peer_report')
                            if re.search(rf'^static (?:void|bool) {name}\s*\(', source, re.M))
 fixture = (HERE / 'fixture.c').read_text()
 auto_channel = extract_block(auto_source, r'^bool auto_channel_is_beacon\s*\([^;{}]*\)\s*\{')

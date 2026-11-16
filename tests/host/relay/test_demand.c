@@ -96,7 +96,7 @@ static void wire(void)
 				&& decoded.maintenance_owner == c.maintenance_owner
 				&& !memcmp(decoded.missing, c.missing, sizeof(c.missing))
 			);
-			buf[1] = RELAY_V3_VERSION + 1U;
+			buf[1] = RELAY_PROTOCOL_VERSION + 1U;
 			buf[71] = relay_crc8(7, buf, 71);
 			assert(!relay_control_decode(buf, 72, &decoded));
 		}

@@ -58,7 +58,7 @@ event = extract_block(esb, r'^struct composite_result\s*\{', True) + '\n' + "\n\
     ("#if defined(CONFIG_TDMA_DIAGNOSTICS)\n" + function(esb, name) + "\n#endif\n")
     if name == "account_ping_clock" else function(esb, name)
     for name in ("relay_rx_metadata", "composite_body_length", "account_ping_clock", "esb_receive_ping",
-                 "composite_validate", "esb_execute_composite", "esb_receive_composite", "esb_receive_normal", "esb_receive_bundle", "esb_receive_repair", "esb_receive_peer_report",
+                 "composite_validate", "esb_execute_composite", "esb_receive_composite", "esb_receive_normal", "esb_receive_repair", "esb_receive_peer_report",
                  "event_handler"))
 common = function(auto, "auto_channel_is_beacon")
 receive_on = function(auto, "auto_channel_receive")

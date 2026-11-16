@@ -32,12 +32,12 @@ static void check_math(uint32_t origin, uint32_t frame, uint32_t tick)
 {
 	assert(
 		relay_frame_start(origin, frame)
-		== origin + (uint32_t)((uint64_t)frame * RELAY_V3_GRID_TICKS / RELAY_V3_GRID_FRAMES)
+		== origin + (uint32_t)((uint64_t)frame * RELAY_GRID_TICKS / RELAY_GRID_FRAMES)
 	);
 	assert(
 		relay_frame_at_tick(origin, tick)
-		== (uint32_t)(((uint64_t)(uint32_t)(tick - origin) * RELAY_V3_GRID_FRAMES + RELAY_V3_GRID_FRAMES - 1U)
-					  / RELAY_V3_GRID_TICKS)
+		== (uint32_t)(((uint64_t)(uint32_t)(tick - origin) * RELAY_GRID_FRAMES + RELAY_GRID_FRAMES - 1U)
+					  / RELAY_GRID_TICKS)
 	);
 }
 int main(void)
@@ -57,7 +57,7 @@ int main(void)
   relay_coord_init(&a);
   uint32_t now = 5000 + random_word() % 10000;
   struct relay_control c = {.members = random_word(), .frame = 10 + run,
-   .repair_count = RELAY_V3_REPAIR_SLOTS, .profile = 1};
+   .repair_count = RELAY_REPAIR_SLOTS, .profile = 1};
   c.expected = c.members;
   c.primary_valid = random_word() & c.members;
   c.backup_valid = random_word() & c.members;
@@ -76,8 +76,8 @@ int main(void)
 		   = (struct rc_peer){.expected = 100, .heard = random_word() % 101, .rssi_x8 = 100 + random_word() % 700};
    }
   }
-  for (unsigned age = 0; age < RELAY_V3_CACHE_FRAMES; age++) {
-   unsigned i = (c.frame - age) % RELAY_V3_CACHE_FRAMES;
+  for (unsigned age = 0; age < RELAY_CACHE_FRAMES; age++) {
+   unsigned i = (c.frame - age) % RELAY_CACHE_FRAMES;
    a.watch[i] = (struct rc_watch){.frame = c.frame - age,
     .members = c.members, .survey = random_word() & c.members,
     .primary_valid = random_word() & c.members, .backup_valid = random_word() & c.members};
@@ -102,13 +102,13 @@ int main(void)
   relay_control_encode(planned, &d);
   struct relay_control_crc_plan crc_plan = relay_control_plan_crc(planned);
   /* Missing evidence and receipts can arrive after planning. */
-  for (unsigned age = 0; age < RELAY_V3_CACHE_FRAMES; age++) {
+  for (unsigned age = 0; age < RELAY_CACHE_FRAMES; age++) {
    c.missing[age] = d.missing[age] = random_word() & c.members;
-   unsigned i = (c.frame - age) % RELAY_V3_CACHE_FRAMES;
+   unsigned i = (c.frame - age) % RELAY_CACHE_FRAMES;
    a.receipt[i].received = b.receipt[i].received = random_word();
   }
 #ifdef COMPARE_CEDEEA0
-  for (unsigned age = 0; age < RELAY_V3_CACHE_FRAMES; age++) {
+  for (unsigned age = 0; age < RELAY_CACHE_FRAMES; age++) {
 	  const struct rc_receipt *r = &a.receipt[old_plan.receipt_index[age]];
 	  if ((old_plan.valid & (1U << age)) && r->frame == old_plan.watch[age].frame) {
 		  c.missing[age] &= ~r->received;

@@ -56,9 +56,9 @@ int main(void)
 		struct relay_control c = {.repair_count = repairs};
 		struct rc_grant_plan p = {.urgent = true, .maintenance = 0, .reporter = -1};
 		uint8_t wire[RELAY_CONTROL_LEN] = {0};
-		memset(wire + RELAY_CONTROL_OFF_OWNERS, RELAY_OWNER_IDLE, RELAY_V3_REPAIR_MAX);
+		memset(wire + RELAY_CONTROL_OFF_OWNERS, RELAY_OWNER_IDLE, RELAY_REPAIR_MAX);
 		relay_coord_finish_frozen(&c, &p, wire);
-		for (unsigned slot = repairs; slot < RELAY_V3_REPAIR_MAX; slot++) {
+		for (unsigned slot = repairs; slot < RELAY_REPAIR_MAX; slot++) {
 			assert(wire[RELAY_CONTROL_OFF_OWNERS + slot] == RELAY_OWNER_IDLE);
 		}
 		assert(repairs || !(c.flags & RELAY_CONTROL_MAINTENANCE));
@@ -72,7 +72,7 @@ int main(void)
 		   .emergency_helper = 1,
 		   .emergency_coverage = 4};
 	uint8_t wire[RELAY_CONTROL_LEN] = {0};
-	memset(wire + RELAY_CONTROL_OFF_OWNERS, RELAY_OWNER_IDLE, RELAY_V3_REPAIR_MAX);
+	memset(wire + RELAY_CONTROL_OFF_OWNERS, RELAY_OWNER_IDLE, RELAY_REPAIR_MAX);
 	relay_coord_finish_frozen(&overlap, &maintenance, wire);
 	assert(
 		wire[RELAY_CONTROL_OFF_OWNERS] == RELAY_OWNER_MAINTENANCE

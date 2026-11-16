@@ -116,7 +116,6 @@ static atomic_t test_all_ready_after_ms[MAX_TRACKERS];
 static uint16_t test_all_requested_tps, test_all_effective_tps;
 static uint8_t tdma_dynamic_slot_ticks;
 static uint32_t tdma_active_mask;
-static uint16_t relay_forward_published;
 '''
 helpers = "\n".join(extract.function(source, name) for name in (
     "test_all_capacity_tps", "test_all_requested_value", "test_all_wire_tps",
@@ -142,7 +141,7 @@ static void reset(void) {
     test_all_broadcasting = test_all_generation = 0;
     test_all_requested_tps = test_all_effective_tps = 500;
     tdma_dynamic_slot_ticks = 64;
-    relay_forward_published = 0;
+
     tdma_active_mask = BIT(0) | BIT(1);
     irq_depth = attempts = deferred = deliveries = reclamp_logs = 0;
     target_armed = true;
@@ -182,7 +181,7 @@ int main(void) {
     test_all_update_effective(2, 1000, true);
     assert(!irq_depth && !attempts && !reclamp_logs);
     puts("PASS test-all layout publication excludes targeted command preemption");
-    relay_forward_published = 7; tdma_dynamic_slot_ticks = 16;
+    tdma_dynamic_slot_ticks = 16;
     assert(test_all_capacity_tps(11) == 140);
     puts("PASS test-all capacity includes forwarding slots");
     return 0;

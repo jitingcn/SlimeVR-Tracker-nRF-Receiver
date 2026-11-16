@@ -6,7 +6,7 @@ static inline void relay_coord_finish_grants(struct relay_coord *rc, struct rela
 	const struct rc_grant_plan *p)
 {
 	/* Receipts remain live until the freeze, including repaired old frames. */
-	for (unsigned age = 0; age < RELAY_V3_CACHE_FRAMES; age++) {
+	for (unsigned age = 0; age < RELAY_CACHE_FRAMES; age++) {
 		const struct rc_receipt *r = &rc->receipt[p->receipt_index[age]];
 		if ((p->valid & (1U << age)) && r->frame == p->watch[age].frame) {
 			c->missing[age] &= ~r->received;

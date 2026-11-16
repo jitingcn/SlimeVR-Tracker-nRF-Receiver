@@ -13,8 +13,6 @@
 #endif
 
 #define RC_BIT(i) ((uint16_t)(1U << (i)))
-#define RC_DEFAULT_PAIR_SCORE 500U
-#define RC_UNKNOWN_RSSI 70U
 
 static bool rc_after(uint32_t now, uint32_t then, uint32_t interval)
 {
@@ -26,12 +24,7 @@ static void rc_auto_restart(struct relay_coord *rc);
 void relay_coord_init(struct relay_coord *rc)
 {
 	memset(rc, 0, sizeof(*rc));
-	rc->enabled = true;
-	for (unsigned c = 0; c < RC_MAX; c++) {
-		for (unsigned h = 0; h < RC_MAX; h++) {
-			rc->pair_score[c][h] = RC_DEFAULT_PAIR_SCORE;
-		}
-	}
+
 }
 
 void relay_coord_note_caps(struct relay_coord *rc, uint8_t id, uint8_t caps)
@@ -40,65 +33,27 @@ void relay_coord_note_caps(struct relay_coord *rc, uint8_t id, uint8_t caps)
 		uint8_t version = caps >> RELAY_CAP_VERSION_SHIFT;
 		rc->t[id].protocol_version = version;
 		rc->t[id].capable = (caps & RELAY_CAP_HELPER) != 0
-			&& (version == RELAY_PROTOCOL_VERSION || version == RELAY_V3_VERSION);
-		rc->t[id].fwd_requested = rc->t[id].capable
-			&& (caps & RELAY_CAP_FORWARD_REQUEST) != 0;
+			&& version == RELAY_PROTOCOL_VERSION;
 	}
-}
-
-static void rc_release_child(struct relay_coord *rc, uint8_t child)
-{
-	struct rc_tracker *c = &rc->t[child];
-	if (c->role != RC_ROLE_CHILD) {
-		return;
-	}
-	struct rc_tracker *h = &rc->t[c->head];
-	h->children &= (uint16_t)~RC_BIT(child);
-	if (h->children == 0 && h->role == RC_ROLE_HEAD) {
-		h->role = RC_ROLE_NONE;
-	}
-	c->role = RC_ROLE_NONE;
-	rc->relayed_mask &= (uint16_t)~RC_BIT(child);
-}
-
-static void rc_release_head(struct relay_coord *rc, uint8_t head)
-{
-	uint16_t children = rc->t[head].children;
-	for (uint8_t c = 0; c < RC_MAX; c++) {
-		if (children & RC_BIT(c)) {
-			rc_release_child(rc, c);
-		}
-	}
-	rc->t[head].role = RC_ROLE_NONE;
-	rc->t[head].children = 0;
 }
 
 void relay_coord_forget(struct relay_coord *rc, uint8_t id, uint32_t now_ms)
 {
+	(void)now_ms;
 	if (id >= RC_MAX) {
 		return;
 	}
-	rc_release_child(rc, id);
-	rc_release_head(rc, id);
 	rc->published_valid &= ~(1U << id);
 	for (unsigned i = 0; i < RELAY_CACHE_MAX_FRAMES; i++) {
 		rc->receipt[i].received &= ~(1U << id);
 	}
-	bool fwd = rc->t[id].fwd_wanted || rc->t[id].fwd_revoking;
 	memset(&rc->t[id], 0, sizeof(rc->t[id]));
-	if (fwd) {
-		/* Keep the slot until the layout drops it; the tracker is gone. */
-		rc->t[id].fwd_revoking = true;
-		rc->t[id].fwd_revoke_ms = now_ms;
-	}
 	memset(&rc->w[id], 0, sizeof(rc->w[id]));
 	/* A new session owes nothing for the old one's poor direct link. */
 	rc->auto_poor_members &= (uint16_t)~RC_BIT(id);
 	rc->auto_weak_since[id] = 0;
 	rc_auto_restart(rc);
 	for (unsigned i = 0; i < RC_MAX; i++) {
-		rc->ban_until[id][i] = rc->ban_until[i][id] = 0;
-		rc->pair_score[id][i] = rc->pair_score[i][id] = RC_DEFAULT_PAIR_SCORE;
 		memset(&rc->peer[id][i], 0, sizeof(rc->peer[id][i]));
 		memset(&rc->peer[i][id], 0, sizeof(rc->peer[i][id]));
 	}
@@ -129,9 +84,6 @@ void relay_coord_note_frame(struct relay_coord *rc, uint8_t id, enum rc_path pat
 		}
 	} else if (accepted) {
 		w->relayed++;
-		if (t->role == RC_ROLE_CHILD) {
-			t->eval_relayed++;
-		}
 	} else if (seq_result == RC_SEQ_DUP) {
 		w->relayed_dup++;
 	}
@@ -139,47 +91,7 @@ void relay_coord_note_frame(struct relay_coord *rc, uint8_t id, enum rc_path pat
 		/* A gap is a frame lost on both paths: a relayed copy always arrives
 		 * before the child's next frame, so it would have filled the gap. */
 		w->gaps += gaps;
-		if (t->role == RC_ROLE_CHILD) {
-			t->eval_gaps += gaps;
-		}
 	}
-}
-
-void relay_coord_note_bundle(struct relay_coord *rc, uint8_t head, bool overflow)
-{
-	if (head < RC_MAX && overflow) {
-		rc->w[head].overflow++;
-	}
-}
-
-void relay_coord_note_trailer_sent(struct relay_coord *rc, uint8_t head, uint16_t children, uint32_t now_ms)
-{
-	if ((unsigned)head >= RC_MAX) {
-		return;
-	}
-	for (uint8_t c = 0; c < RC_MAX; c++) {
-		struct rc_tracker *t = &rc->t[c];
-		if ((children & RC_BIT(c)) && t->role == RC_ROLE_CHILD && t->head == head && !t->delivered) {
-			t->delivered = true;
-			t->delivered_ms = now_ms;
-			t->eval_relayed = 0;
-			t->eval_gaps = 0;
-		}
-	}
-}
-
-static uint8_t rc_count(uint16_t mask)
-{
-	return relay_mask_count(mask);
-}
-
-static uint8_t rc_head_count(const struct relay_coord *rc)
-{
-	uint8_t heads = 0;
-	for (unsigned i = 0; i < RC_MAX; i++) {
-		heads += rc->t[i].role == RC_ROLE_HEAD;
-	}
-	return heads;
 }
 
 struct rc_judgement {
@@ -280,7 +192,7 @@ static uint16_t rc_auto_sustained(struct relay_coord *rc, uint16_t weak, uint32_
 void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 	uint32_t now, bool applied, bool eligible)
 {
-	if (!relay_coord_v3_ready(rc, members)) {
+	if (!relay_coord_ready(rc, members)) {
 		rc->auto_engaged = false;
 		rc->auto_poor_since = 0;
 		rc_auto_restart(rc);
@@ -298,7 +210,7 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 		rc->auto_members = members;
 		return;
 	}
-	if (!relay_coord_v3_ready(rc, members)) {
+	if (!relay_coord_ready(rc, members)) {
 		rc->auto_poor_since = 0;
 		rc_auto_restart(rc);
 		(void)rc_auto_sustained(rc, 0U, now);
@@ -349,79 +261,10 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 	}
 }
 
-static bool rc_head_ok(const struct relay_coord *rc, uint8_t id, uint16_t members, uint32_t now)
-{
-	const struct rc_tracker *t = &rc->t[id];
-	const struct rc_window *w = &rc->w[id];
-	struct rc_judgement j = rc_judge(w);
-	if (!t->capable || !(members & RC_BIT(id)) || t->role == RC_ROLE_CHILD || !t->direct_seen
-	    || rc_after(now, t->last_direct_ms, 2U * RC_WINDOW_MS) || w->direct == 0) {
-		return false;
-	}
-	return j.expected < RC_MIN_EXPECTED || j.permille >= RC_HEAD_MIN_PERMILLE;
-}
-
-static int rc_pick_head(const struct relay_coord *rc, uint8_t child, uint16_t members, uint32_t now)
-{
-	int best = -1;
-	int32_t best_score = 0;
-	uint8_t heads = rc_head_count(rc);
-	for (uint8_t h = 0; h < RC_MAX; h++) {
-		const struct rc_tracker *t = &rc->t[h];
-		if (h == child || !rc_head_ok(rc, h, members, now)) {
-			continue;
-		}
-		if (t->role == RC_ROLE_HEAD ? rc_count(t->children) >= RELAY_MAX_CHILDREN : heads >= RELAY_MAX_HEADS) {
-			continue;
-		}
-		uint32_t ban = rc->ban_until[child][h];
-		if (ban && (int32_t)(ban - now) > 0) {
-			continue;
-		}
-		uint8_t rssi = t->rssi ? t->rssi : RC_UNKNOWN_RSSI;
-		int32_t score = (int32_t)rc->pair_score[child][h]
-			+ ((rc->pinned & RC_BIT(h)) ? 4000 : 0)
-			+ (t->role == RC_ROLE_HEAD ? 300 : 0)
-			- (int32_t)rssi * 5;
-		if (best < 0 || score > best_score) {
-			best = h;
-			best_score = score;
-		}
-	}
-	return best;
-}
-
-static void rc_ban(struct relay_coord *rc, uint8_t child, uint8_t head, uint32_t now, uint32_t ms)
-{
-	rc->ban_until[child][head] = (now + ms) | 1U; /* 0 means none */
-}
-
-uint16_t relay_coord_forward_wanted(const struct relay_coord *rc, uint16_t member_mask)
-{
-	uint8_t room = RC_MAX_TOTAL_SLOTS > rc_count(member_mask)
-		? (uint8_t)(RC_MAX_TOTAL_SLOTS - rc_count(member_mask)) : 0;
-	uint16_t mask = 0;
-	/* A slot being withdrawn stays until its wait elapses: never shrink a
-	 * slot a head may still transmit in. Then wanted slots, by id. */
-	for (uint8_t pass = 0; pass < 2; pass++) {
-		for (uint8_t h = 0; h < RC_MAX && room; h++) {
-			const struct rc_tracker *t = &rc->t[h];
-			bool take = pass == 0 ? t->fwd_revoking && (rc->forward_mask & RC_BIT(h))
-				: t->fwd_wanted && !t->fwd_revoking && (member_mask & RC_BIT(h));
-			if (take && !(mask & RC_BIT(h))) {
-				mask |= RC_BIT(h);
-				room--;
-			}
-		}
-	}
-	return mask;
-}
-
-uint16_t relay_coord_tick(struct relay_coord *rc, uint16_t member_mask, uint32_t now)
+void relay_coord_tick(struct relay_coord *rc, uint16_t member_mask, uint32_t now)
 {
 	struct rc_judgement j[RC_MAX];
 	struct rc_judgement jd[RC_MAX]; /* accumulated, see rc_accumulate() */
-	bool weak[RC_MAX] = {false};
 
 	for (uint8_t i = 0; i < RC_MAX; i++) {
 		struct rc_tracker *t = &rc->t[i];
@@ -437,7 +280,6 @@ uint16_t relay_coord_tick(struct relay_coord *rc, uint16_t member_mask, uint32_t
 			t->rate_x16 = (uint16_t)(rate > UINT16_MAX ? UINT16_MAX : rate);
 		}
 		jd[i] = rc_accumulate(t, w);
-		bool member = (member_mask & RC_BIT(i)) != 0;
 		if (jd[i].expected) {
 			t->direct_permille = jd[i].permille;
 			t->quality_ms = now;
@@ -449,205 +291,18 @@ uint16_t relay_coord_tick(struct relay_coord *rc, uint16_t member_mask, uint32_t
 			} else {
 				t->weak_windows = 0;
 			}
-			/* Direct recovery after a lost head, with no child role to
-			 * release, ends the relay need too. */
-			if (t->role == RC_ROLE_NONE && jd[i].permille >= RC_GOOD_PERMILLE) {
-				t->relay_needed = false;
-			}
-		}
-		bool loss = t->weak_windows >= RC_WEAK_WINDOWS;
-		/* Direct silence of a member that was sending directly: obstructed
-		 * (gaps are only counted once a later frame arrives). */
-		bool quiet = w->direct == 0 && rc_direct_quiet(t, now);
-		bool silent = quiet && !rc_after(now, t->last_direct_ms, RC_SILENT_WEAK_MS);
-		/* Losing the only working path reveals no sequence gap. Preserve
-		 * eligibility long enough to try a different head, including when
-		 * the old head disappears after minutes of successful relay. */
-		bool retry = t->relay_needed && quiet
-			&& !rc_after(now, t->last_any_ms, RC_CHILD_RECOVERY_MS);
-		weak[i] = member && t->seen && (loss || silent || retry);
-	}
 
-	/* 1. Heads must stay healthy members, or they lose their children. */
-	for (uint8_t h = 0; h < RC_MAX; h++) {
-		struct rc_tracker *t = &rc->t[h];
-		if (t->role != RC_ROLE_HEAD) {
-			continue;
-		}
-		bool member = (member_mask & RC_BIT(h)) != 0;
-		bool lossy = j[h].expected >= RC_MIN_EXPECTED && j[h].permille < RC_HEAD_DROP_PERMILLE;
-		if (!member || !rc->enabled || !t->capable || lossy || rc->w[h].direct == 0) {
-			rc_release_head(rc, h);
-			rc->rotations++;
 		}
 	}
-
-	/* 2. Children: release, rotate or keep. */
-	for (uint8_t c = 0; c < RC_MAX; c++) {
-		struct rc_tracker *t = &rc->t[c];
-		if (t->role != RC_ROLE_CHILD) {
-			continue;
-		}
-		if (!(member_mask & RC_BIT(c))) {
-			t->relay_needed = false;
-			rc_release_child(rc, c);
-			rc->releases++;
-			continue;
-		}
-		/* Count silence since this attempt began, rather than immediately
-		 * expiring each replacement against the same old last_any_ms. */
-		if (rc_after(now, t->last_any_ms, RC_CHILD_SILENT_MS)
-		    && rc_after(now, t->assigned_ms, RC_CHILD_SILENT_MS)) {
-			rc_ban(rc, c, t->head, now, RC_SILENT_BAN_MS);
-			rc_release_child(rc, c);
-			rc->releases++;
-			continue;
-		}
-		if (!t->delivered) {
-			if (rc_after(now, t->assigned_ms, RC_DELIVERY_TIMEOUT_MS)) {
-				rc_ban(rc, c, t->head, now, RC_BAN_MS / 4U);
-				rc_release_child(rc, c);
-				rc->rotations++;
-				continue;
-			}
-		} else if (rc_after(now, t->delivered_ms, RC_EVAL_AFTER_MS)) {
-			uint16_t lost = (uint16_t)(t->eval_relayed + t->eval_gaps);
-			if (lost >= RC_EVAL_MIN_LOST) {
-				uint16_t share = (uint16_t)((uint32_t)t->eval_relayed * 1000U / lost);
-				uint16_t *score = &rc->pair_score[c][t->head];
-				*score = (uint16_t)((3U * *score + share) / 4U);
-				t->eval_relayed = 0;
-				t->eval_gaps = 0;
-				if (share < RC_EVAL_FAIL_PERMILLE) {
-					rc_ban(rc, c, t->head, now, RC_BAN_MS);
-					rc_release_child(rc, c);
-					rc->rotations++;
-					continue;
-				}
-			}
-		}
-		if (jd[c].expected && jd[c].permille >= RC_GOOD_PERMILLE) {
-			if (t->good_windows < UINT8_MAX) {
-				t->good_windows++;
-			}
-		} else if (jd[c].expected) {
-			t->good_windows = 0;
-		}
-		if (t->good_windows >= RC_GOOD_WINDOWS && rc_after(now, t->assigned_ms, RC_MIN_HOLD_MS)) {
-			t->relay_needed = false;
-			rc_release_child(rc, c);
-			rc->releases++;
-		}
-	}
-
-	/* 3. Assign heads to weak trackers without one. */
-	for (uint8_t c = 0; rc->enabled && c < RC_MAX; c++) {
-		struct rc_tracker *t = &rc->t[c];
-		if (!weak[c] || t->role != RC_ROLE_NONE) {
-			continue;
-		}
-		int h = rc_pick_head(rc, c, member_mask, now);
-		if (h < 0) {
-			continue;
-		}
-		t->role = RC_ROLE_CHILD;
-		t->relay_needed = true;
-		t->head = (uint8_t)h;
-		t->assigned_ms = now;
-		t->delivered = false;
-		t->eval_relayed = 0;
-		t->eval_gaps = 0;
-		t->good_windows = 0;
-		rc->t[h].role = RC_ROLE_HEAD;
-		rc->t[h].children |= RC_BIT(c);
-		rc->assignments++;
-	}
-
-	/* 4. Delivery feedback for children (overheard in every extended PONG). */
-	rc->relayed_mask = 0;
-	for (uint8_t c = 0; c < RC_MAX; c++) {
-		if (rc->t[c].role == RC_ROLE_CHILD && rc->w[c].relayed) {
-			rc->relayed_mask |= RC_BIT(c);
-		}
-	}
-
-	/* 5. Forwarding slots: wanted when one bundle per frame cannot carry a
-	 * head's children; withdrawn in two phases. */
-	for (uint8_t h = 0; h < RC_MAX; h++) {
-		struct rc_tracker *t = &rc->t[h];
-		if (rc->w[h].overflow) {
-			if (t->overflow_windows < UINT8_MAX) {
-				t->overflow_windows++;
-			}
-		} else {
-			t->overflow_windows = 0;
-		}
-		bool needed = t->role == RC_ROLE_HEAD
-			&& (rc_count(t->children) >= 2 || t->fwd_requested
-			    || t->overflow_windows >= RC_FWD_OVERFLOW_WINDOWS);
-		if (needed) {
-			t->fwd_idle_windows = 0;
-			if (!t->fwd_wanted && !t->fwd_revoking) {
-				t->fwd_wanted = true;
-			}
-		} else if (t->fwd_wanted) {
-			bool idle = t->role != RC_ROLE_HEAD || ++t->fwd_idle_windows >= RC_FWD_IDLE_WINDOWS;
-			if (idle) {
-				t->fwd_wanted = false;
-				t->fwd_revoking = (rc->forward_mask & RC_BIT(h)) != 0;
-				t->fwd_revoke_ms = now;
-			}
-		}
-		if (t->fwd_revoking && rc_after(now, t->fwd_revoke_ms, RC_FWD_REVOKE_WAIT_MS)) {
-			t->fwd_revoking = false;
-		}
-	}
-
 	memset(rc->w, 0, sizeof(rc->w));
-	return relay_coord_forward_wanted(rc, member_mask);
-}
-
-void relay_coord_set_forward_layout(struct relay_coord *rc, uint16_t forward_mask)
-{
-	rc->forward_mask = forward_mask;
-	for (uint8_t h = 0; h < RC_MAX; h++) {
-		if (!(forward_mask & RC_BIT(h))) {
-			/* Not in the layout: nothing to withdraw any more. */
-			rc->t[h].fwd_revoking = false;
-		}
-	}
-}
-
-uint8_t relay_coord_forward_slot(const struct relay_coord *rc, uint8_t head, uint16_t member_mask)
-{
-	if (head >= RC_MAX || !(rc->forward_mask & RC_BIT(head))) {
-		return RELAY_NO_SLOT;
-	}
-	const struct rc_tracker *t = &rc->t[head];
-	if (!rc->enabled || t->role != RC_ROLE_HEAD || !t->fwd_wanted || t->fwd_revoking) {
-		return RELAY_NO_SLOT;
-	}
-	uint8_t index = rc_count(member_mask);
-	for (uint8_t i = 0; i < head; i++) {
-		index += (rc->forward_mask >> i) & 1U;
-	}
-	return index < RC_MAX_TOTAL_SLOTS ? index : RELAY_NO_SLOT;
+	(void)member_mask;
 }
 
 void relay_coord_trailer(const struct relay_coord *rc, uint8_t id, uint8_t epoch,
 	uint16_t member_mask, struct relay_pong_trailer *out)
 {
-	const struct rc_tracker *t = id < RC_MAX ? &rc->t[id] : NULL;
-	out->epoch = epoch;
-	out->children_mask = t && rc->enabled && t->role == RC_ROLE_HEAD ? t->children : 0;
-	out->forward_slot = t ? relay_coord_forward_slot(rc, id, member_mask) : RELAY_NO_SLOT;
-	out->member_mask = member_mask;
-	out->relayed_mask = rc->relayed_mask;
-}
-
-bool relay_coord_is_relayed(const struct relay_coord *rc, uint8_t id)
-{
-	return id < RC_MAX && rc->t[id].role == RC_ROLE_CHILD;
+	(void)rc; (void)id;
+	*out = (struct relay_pong_trailer){.epoch = epoch, .member_mask = member_mask};
 }
 
 bool relay_coord_direct_ready(const struct relay_coord *rc, uint8_t id, uint32_t now_ms)
@@ -657,7 +312,7 @@ bool relay_coord_direct_ready(const struct relay_coord *rc, uint8_t id, uint32_t
 	 * 500 ms window holds a handful of frames and one loss refuses OTA. */
 	return id < RC_MAX && rc->t[id].direct_seen
 		&& !rc_after(now_ms, rc->t[id].last_direct_ms, RC_OTA_DIRECT_FRESH_MS)
-		&& rc->t[id].weak_windows < RC_WEAK_WINDOWS && !rc->t[id].relay_needed;
+		&& rc->t[id].weak_windows < RC_WEAK_WINDOWS;
 }
 
 bool relay_coord_is_capable(const struct relay_coord *rc, uint8_t id)
@@ -669,44 +324,31 @@ void relay_coord_set_enabled(struct relay_coord *rc, bool enabled)
 {
 	rc->enabled = enabled;
 	if (!enabled) {
-		for (uint8_t i = 0; i < RC_MAX; i++) {
-			rc_release_head(rc, i);
-		}
-		rc->relayed_mask = 0;
+		rc->auto_engaged = false;
+		rc->auto_poor_since = rc->auto_good_since = 0;
 	}
 }
 
-void relay_coord_pin(struct relay_coord *rc, uint8_t id, bool pinned)
+bool relay_coord_ready(const struct relay_coord *rc, uint16_t members)
 {
-	if (id < RC_MAX) {
-		if (pinned) {
-			rc->pinned |= RC_BIT(id);
-		} else {
-			rc->pinned &= (uint16_t)~RC_BIT(id);
-		}
-	}
+	return rc->enabled && relay_coord_capable(rc, members);
 }
 
-bool relay_coord_v3_ready(const struct relay_coord *rc, uint16_t members)
-{
-	return rc->enabled && rc->v3_requested && relay_coord_v3_capable(rc, members);
-}
-
-bool relay_coord_v3_capable(const struct relay_coord *rc, uint16_t members)
+bool relay_coord_capable(const struct relay_coord *rc, uint16_t members)
 {
 	if (!members) {
 		return false;
 	}
 	for (uint8_t id = 0; id < RC_MAX; id++) {
 		if ((members & RC_BIT(id))
-		    && (!rc->t[id].capable || rc->t[id].protocol_version != RELAY_V3_VERSION)) {
+		    && (!rc->t[id].capable || rc->t[id].protocol_version != RELAY_PROTOCOL_VERSION)) {
 			return false;
 		}
 	}
 	return true;
 }
 
-/* Frame order, rather than the wrapping native sequence, governs HID in v3. */
+/* Frame order, rather than the wrapping native sequence, governs HID in relay. */
 void relay_coord_fast_reset(struct relay_coord *rc)
 {
 	memset(rc->watch, 0, sizeof(rc->watch));
@@ -1221,7 +863,7 @@ static void rc_finish_demand(struct relay_control *c, const struct rc_grant_plan
 void relay_plan_snapshot_grants(struct rc_plan_snapshot *rc, struct relay_control *c,
 	struct rc_grant_plan *p, uint32_t now_ms)
 {
-	for (unsigned i = 0; i < RELAY_V3_REPAIR_MAX; i++) {
+	for (unsigned i = 0; i < RELAY_REPAIR_MAX; i++) {
 		c->grants[i] = (struct relay_grant){.owner = RELAY_OWNER_IDLE};
 	}
 	c->maintenance_owner = RELAY_OWNER_IDLE;
@@ -1498,7 +1140,7 @@ static RELAY_RAMFUNC void rc_finish_full(struct relay_control *c, const struct r
 	}
 	c->survey = p->survey;
 	uint16_t failed = c->missing[0] & p->fresh_survey;
-	for (unsigned age = 1; age < RELAY_V3_CACHE_FRAMES; age++) {
+	for (unsigned age = 1; age < RELAY_CACHE_FRAMES; age++) {
 		failed |= c->missing[age];
 	}
 	failed &= c->members;
@@ -1608,7 +1250,7 @@ static RELAY_RAMFUNC void rc_finish_narrow(struct relay_control *c, const struct
 	}
 	c->survey = p->survey;
 	uint16_t failed = c->missing[0] & p->fresh_survey;
-	for (unsigned age = 1; age < RELAY_V3_CACHE_FRAMES; age++) {
+	for (unsigned age = 1; age < RELAY_CACHE_FRAMES; age++) {
 		failed |= c->missing[age];
 	}
 	failed &= c->members;
@@ -1812,8 +1454,6 @@ void relay_coord_read_grants(struct relay_control *c, const uint8_t *wire)
 		c->grants[i].children = relay_get_be16(wire + RELAY_CONTROL_OFF_CHILDREN + 2U * i);
 	}
 }
-
-
 
 void relay_coord_commit_grants(struct relay_coord *rc, const struct relay_control *c,
 	const struct rc_grant_plan *p)

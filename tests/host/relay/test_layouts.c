@@ -47,7 +47,7 @@ int main(void)
 		   .repair_count = g->repairs,
 		   .maintenance_owner = RELAY_OWNER_IDLE},
 		decoded;
-	for (unsigned i = 0; i < RELAY_V3_REPAIR_MAX; i++) {
+	for (unsigned i = 0; i < RELAY_REPAIR_MAX; i++) {
 		c.grants[i].owner = RELAY_OWNER_IDLE;
 	}
 	uint8_t control[RELAY_CONTROL_LEN];
@@ -58,7 +58,7 @@ int main(void)
 	relay_coord_init(&rc);
 	c.members = c.expected = (uint16_t)((1U << g->direct) - 1U);
 	relay_coord_plan_grants(&rc, &c, &plan, 5000);
-	for (unsigned i = g->repairs; i < RELAY_V3_REPAIR_MAX; i++) {
+	for (unsigned i = g->repairs; i < RELAY_REPAIR_MAX; i++) {
 		assert(c.grants[i].owner == RELAY_OWNER_IDLE);
 	}
 	relay_control_encode(control, &c);

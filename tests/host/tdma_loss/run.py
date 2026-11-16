@@ -21,7 +21,7 @@ from relay_support import relay_section, staging_helpers  # noqa: E402
 
 
 CASES = (
-    'auto-policy-ladder', 'auto-outage-pending', 'auto-excluded-live', 'auto-nonv3-join',
+    'auto-policy-ladder', 'auto-outage-pending', 'auto-excluded-live', 'auto-nonrelay-join',
     'fast-recovery',
     'slow-probe',
     'sparse-recovery',
