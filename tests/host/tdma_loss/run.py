@@ -17,7 +17,7 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'harness'))
 from c_extract import extract_block
-from relay_support import relay_section, staging_helpers  # noqa: E402
+from relay_support import relay_section, relay_query_helpers, staging_helpers  # noqa: E402
 
 
 CASES = (
@@ -104,6 +104,7 @@ def membership_declarations(source):
     start = source.index('#define PING_TIMEOUT_MS')
     end = source.index('static void tdma_shadow_observe', start)
     return '\n'.join((
+        '#include "relay_coord.h"',
         declaration(source, 'tdma_last_reconfig_time'),
         declaration(source, 'tdma_last_reconfig_valid'),
         source[start:end],
@@ -210,6 +211,7 @@ static void restart_ping(uint8_t tracker_id) {
         constants,
         "static bool relay_auto_ladder_paused(void);",
         "static uint32_t tdma_admissible_mask(uint32_t desired);",
+        ('static bool relay_query_can_resume(void);\nstatic void relay_query_update_locked(void);\nstatic void relay_query_begin(void);' if relay else ''),
         ping_constants,
         membership_declarations(source),
         declarations,
@@ -229,7 +231,8 @@ static void restart_ping(uint8_t tracker_id) {
         # esb_receive_ping uses relay state that relay_section() declares below.
         'static int64_t relay_query_until;' if relay else '',
         function(source, 'esb_receive_ping'),
-        relay_section(source, stats=False) if relay else '',
+        relay_section(source, stats=False, member_diagnostics=False) if relay else '',
+        relay_query_helpers(source, membership=True) if relay else '',
         function(source, 'relay_auto_ladder_paused'),
         extract_block(source, r'^struct composite_result\s*\{', True),
         function(source, 'composite_validate'),

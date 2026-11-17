@@ -267,6 +267,7 @@ static void print_help(void)
 		"\n"
 		"Peer relay:\n"
 		"  relay                      Relay coordinator status\n"
+		"  relay diag                 Timing errors and live member leases\n"
 		"  relay on|off               Enable/disable relaying\n"
 		"  relay layout [field value]  Show or persist runtime limits\n"
 		"  relay blockmask <mask> <s> Test: block up to 3 children for at most 60 s\n"
@@ -1042,6 +1043,8 @@ static void console_thread(void)
 			uint8_t id = 0, pct = 0;
 			if (argc == 2 && strcmp(arg, "layout") == 0) {
 				esb_relay_layout_print();
+			} else if (argc == 2 && strcmp(arg, "diag") == 0) {
+				esb_relay_print_diagnostics();
 			} else if (argc == 4 && strcmp(arg, "layout") == 0) {
 				long value;
 				if (!parse_long_bounded(argv[3], 0, 32768, &value) || esb_relay_layout_set(arg2, value)) {

@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 SOURCE = ROOT / "src/connection"
 sys.path.insert(0, str(HERE.parent / "harness"))
 from c_extract import extract_block
-from relay_support import relay_section, staging_helpers
+from relay_support import relay_section, relay_query_helpers, staging_helpers
 
 
 def function(source, name, occurrence=0):
@@ -86,7 +86,7 @@ fixture = '#include "rssi_scan_fem.h"\n' + fixture
 fixture = fixture.replace("/* ACTUAL_COMMON */", common)
 fixture = fixture.replace("/* ACTUAL_RECEIVE_ON */", receive_on)
 fixture = fixture.replace("/* ACTUAL_RECEIVE_OFF */", receive_off)
-fixture = fixture.replace("/* ACTUAL_ACK */", relay_section(esb) + staging_helpers(esb) + ack)
+fixture = fixture.replace("/* ACTUAL_ACK */", relay_section(esb) + relay_query_helpers(esb) + staging_helpers(esb) + ack)
 fixture = fixture.replace("/* ACTUAL_EVENT */", event)
 fixture = fixture.replace("/* ACTUAL_LIFECYCLE */", lifecycle)
 fixture = fixture.replace("/* ACTUAL_RESTORE */", restore)

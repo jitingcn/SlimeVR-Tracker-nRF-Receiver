@@ -23,7 +23,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE.parent / 'harness'))
 from c_extract import extract_block
-from relay_support import relay_section, staging_helpers
+from relay_support import relay_section, relay_query_helpers, staging_helpers
 
 CASES = ('maintenance', 'wrong-type', 'bad-crc', 'wrong-pipe', 'out-of-range', 'interleaved-pipe',
          'ota-status', 'ota-info', 'valid', 'valid-dirty', 'reacquire',
@@ -78,7 +78,7 @@ fixture = fixture.replace('/* ACTUAL AUTO CHANNEL */', auto_channel)
 fixture = fixture.replace('/* PROTOCOL CONSTANTS */', constants)
 fixture = fixture.replace('/* PRODUCTION STATE */', shape)
 fixture = fixture.replace('/* ACTUAL PRODUCTION FUNCTIONS */',
-                          '\n\n'.join((relay_section(source), staging_helpers(source), lengths, clock, ack, packet_helpers, event)))
+                          '\n\n'.join((relay_section(source), relay_query_helpers(source), staging_helpers(source), lengths, clock, ack, packet_helpers, event)))
 
 with tempfile.TemporaryDirectory(prefix='receiver-ping-clock-') as directory:
     directory = Path(directory)

@@ -287,6 +287,7 @@ bool esb_relay_blocks_ota(uint8_t id);
 void esb_relay_layout_print(void);
 int esb_relay_layout_set(const char *name, uint16_t value);
 void esb_relay_print_status(void);
+void esb_relay_print_diagnostics(void);
 void esb_relay_print_pool(void);
 
 #endif

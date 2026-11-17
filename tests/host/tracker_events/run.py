@@ -38,7 +38,12 @@ CASES = ('golden', 'decoder', 'timeout', 'storage', 'nonce', 'sequence',
          'rest-long-sequence', 'rest-delivery-retry', 'json-rest', 'composite',
          'power-timeout', 'power-cancel', 'power-reanchor', 'power-expiry',
          'power-activity', 'power-new-operation', 'power-boot', 'power-clear',
-         'power-reset', 'json-power', 'power-long-sequence', 'power-long-reanchor')
+         'power-reset', 'json-power', 'power-long-sequence', 'power-long-reanchor',
+         'relay-power-basic', 'relay-power-ordering', 'relay-power-activity',
+         'relay-power-identity', 'relay-power-expiry', 'relay-power-wrap',
+         'relay-power-ingress-time', 'relay-power-reanchor', 'relay-power-validation', 'relay-policy-wom',
+         'relay-policy-outage', 'relay-policy-partial', 'relay-policy-cancel',
+         'relay-policy-query', 'relay-policy-repair')
 
 KERNEL = r'''
 #ifndef HOST_KERNEL_H
@@ -199,13 +204,16 @@ def main():
             extract.membership_declarations(esb),
         ] + [extract.declaration(esb, name) for name in layout_names])
         declarations += '\n' + extract.diagnostic_loss_declarations(esb)
-        declarations += '\n' + relay_declarations(esb)
+        declarations += '\n' + relay_declarations(esb, member_diagnostics=False)
         (path/'esb_membership_declarations.inc').write_text(declarations)
         membership = '\n'.join(function(esb, name) for name in (
-            'tdma_loss_reset_windows', 'tdma_pack_config', 'tdma_shadow_observe',
+            'tdma_loss_reset_windows', 'tdma_pack_config', 'relay_query_can_resume', 'relay_query_update_locked', 'tdma_shadow_observe',
             'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked',
             'tdma_slot_ticks_for', 'tdma_staging_supported_locked', 'tdma_apply_locked',
             'tdma_apply_finish', 'relay_auto_ladder_paused', 'tdma_recalculate'))
+        membership += ('\n#if defined(CONFIG_RELAY)\n' +
+                       function(esb, 'relay_auto_policy_update') +
+                       function(esb, 'relay_query_begin') + '\n#endif\n')
         lengths = function(esb, 'composite_body_length')
         composite = extract_block(esb, r'^struct composite_result\s*\{', True) + '\n' + '\n'.join(function(esb, n) for n in ('composite_validate', 'esb_execute_composite', 'esb_receive_composite'))
         clear = function(esb, 'esb_clear')
@@ -219,15 +227,16 @@ static void tracked_tdma_shadow_observe(uint8_t tracker, enum tdma_shadow_eviden
 #define tdma_shadow_observe tracked_tdma_shadow_observe
 ''' + composite + '\n#undef tdma_shadow_observe\n' + clear)
         binary = path/'test'
+        off_binary = path/'test-relay-off'
         command = shlex.split(os.environ.get('CC','cc')) + [
             '-std=c11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
             '-Wno-unused-parameter','-Wno-unused-variable','-I'+str(path),'-I'+str(root/'src'),'-I'+str(root/'src/connection'),
             str(root/'src/tracker_events.c'), str(Path(__file__).with_name('fixture.c')),
-            '-o',str(binary),
         ]
         if args.diagnostics == 'on':
             command.append('-DCONFIG_TDMA_DIAGNOSTICS=1')
-        subprocess.run(command,check=True)
+        subprocess.run(command+['-DCONFIG_RELAY=1','-o',str(binary)],check=True)
+        subprocess.run(command+['-o',str(off_binary)],check=True)
         if args.wire_input is not None:
             completed = subprocess.run([str(binary),'replay'],input=args.wire_input.read_text(),
                                        text=True,capture_output=True,check=True)
@@ -248,6 +257,12 @@ static void tracked_tdma_shadow_observe(uint8_t tracker, enum tdma_shadow_eviden
             if completed.returncode:
                 sys.stderr.write(completed.stderr)
                 raise subprocess.CalledProcessError(completed.returncode, [str(binary),case])
+            if not case.startswith('relay-'):
+                off = subprocess.run([str(off_binary),case],text=True,capture_output=True)
+                if off.returncode:
+                    sys.stderr.write(off.stderr)
+                    raise subprocess.CalledProcessError(off.returncode, [str(off_binary),case])
+                assert off.stdout == completed.stdout, f'relay-off changed event output: {case}'
             if case=='golden':
                 parser_cases(client,bytes.fromhex(completed.stdout.strip()))
             if case=='json-rest':

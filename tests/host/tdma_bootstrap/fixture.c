@@ -173,6 +173,8 @@ static void reset_fixture(uint8_t count, uint64_t time)
     tdma_cap_level = tdma_published_cap_level = 0;
     tdma_loss_reset_windows(); atomic_set(&test_all_enabled, 0);
     atomic_set(&tdma_shadow_desired_changed_at_ms, 0);
+    relay_query_until = 0; relay_query_protected_mask = 0;
+    relay_query_recovery_started_ms = 0; relay_query_recovering = relay_query_suspending = false;
     tdma_membership_wake.count = wake_signals = 0;
     sync_hook = NULL; mutex_hook = NULL;
     loss_invalidations = membership_notifications = effective_updates = 0;
@@ -966,6 +968,415 @@ static void query_info_holds_profile0(void)
 	puts("PASS query info: profile 0 held for the reply, then automatic entry resumes");
 }
 
+/* These cases run the production PING, membership merge and staged layout
+ * functions with logical time. They do not model radio delivery. */
+static void query_case_ping(uint8_t id, uint8_t flag)
+{
+	memset(&rx_payload, 0, sizeof(rx_payload));
+	rx_payload.length = ESB_PING_LEN;
+	rx_payload.data[0] = ESB_PING_TYPE;
+	rx_payload.data[1] = id;
+	rx_payload.data[2] = (uint8_t)(tracker_slots[id].last_ping_counter + 1);
+	rx_payload.data[7] = flag;
+	rx_payload.pipe = 1 + id % 7;
+	rx_payload.data[ESB_PING_LEN - 1] = crc8_ccitt(0x07, rx_payload.data, ESB_PING_LEN - 1);
+	assert(host_validated_ping());
+}
+
+static void query_case_live_until(uint64_t end)
+{
+	assert(end >= now_ms);
+	while (now_ms < end) {
+		now_ms = MIN(now_ms + 100, end);
+		query_case_ping(0, ESB_PONG_FLAG_NORMAL);
+		query_case_ping(1, ESB_PONG_FLAG_NORMAL);
+		service();
+	}
+}
+
+static void query_case_setup(uint64_t base, bool engage)
+{
+	relay_profile = 0;
+	tdma_staged.valid = false;
+	relay_coord_init(&relay_coord);
+	relay_settings = (struct relay_runtime_settings){16, 5, 16, 120, 120, 5, 0};
+	relay_settings_generation++;
+	reset_fixture(5, base);
+	assert(tracker_store_restore() == 0);
+	for (uint8_t id = 0; id < 4; ++id) {
+		relay_coord_note_caps(&relay_coord, id, RELAY_INFO_CAPS);
+		if (id < 3) {
+			query_case_ping(id, ESB_PONG_FLAG_NORMAL);
+		}
+	}
+	service();
+	now_ms = base + 101; service();
+	assert(tdma_active_mask == 7);
+	esb_relay_set_enabled(true);
+	if (engage) {
+		relay_coord.auto_engaged = true;
+		now_ms = base + 2000;
+		for (uint8_t id = 0; id < 3; ++id) query_case_ping(id, ESB_PONG_FLAG_NORMAL);
+		service();
+		assert(tdma_staged.valid && tdma_staged.p.profile == 1);
+		now_ms = base + 5501;
+		for (uint8_t id = 0; id < 3; ++id) query_case_ping(id, ESB_PONG_FLAG_NORMAL);
+		service();
+		assert(relay_profile == 1 && !tdma_staged.valid && tdma_active_mask == 7);
+	} else {
+		now_ms = base + 5501;
+		for (uint8_t id = 0; id < 3; ++id) query_case_ping(id, ESB_PONG_FLAG_NORMAL);
+		service();
+		assert(!relay_profile && !tdma_staged.valid);
+	}
+}
+
+static void query_case_begin(uint64_t base)
+{
+	now_ms = base + 6000;
+	query_case_ping(0, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	service();
+	assert(tdma_staged.valid && !tdma_staged.p.profile && relay_profile == 1);
+	/* Accepted repair just before the staged native activation: this invokes
+	 * the production membership side effect, not a simulated RF decoder. */
+	now_ms = base + 9490;
+	assert(relay_profile && !tdma_staged_due_locked((uint32_t)k_uptime_ticks()));
+	tdma_shadow_observe(2, TDMA_SHADOW_EVIDENCE_DATA);
+	now_ms = base + 9501;
+	query_case_ping(0, ESB_PONG_FLAG_NORMAL);
+	query_case_ping(1, ESB_PONG_FLAG_NORMAL);
+	service();
+	assert(!relay_profile && tdma_active_mask == 7);
+}
+
+static void query_membership_recovery(uint64_t base, bool repeated)
+{
+	query_case_setup(base, true);
+	query_case_begin(base);
+	if (repeated) {
+		query_case_live_until(base + 12000);
+		query_case_ping(1, ESB_PONG_FLAG_OTA_QUERY_INFO);
+		service();
+		assert(relay_query_until == (int64_t)(base + 27000));
+	}
+	/* A newcomer was not in the query roster and must still expire normally. */
+	query_case_live_until(base + 13000);
+	query_case_ping(3, ESB_PONG_FLAG_NORMAL);
+	service();
+	uint32_t child_seen = (uint32_t)(base + 9490);
+	if (!repeated) {
+		/* An intermittent genuine direct observation during the pause does
+		 * not consume the opportunity to recover after relay resumes. */
+		query_case_live_until(base + 17000);
+		query_case_ping(2, ESB_PONG_FLAG_NORMAL);
+		service();
+		child_seen = (uint32_t)now_ms;
+	}
+	query_case_live_until(base + 25100);
+	assert(((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)) != 0);
+	assert((uint32_t)atomic_get(&tdma_shadow_last_seen_ms[2]) == child_seen);
+	assert(!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(4)));
+	if (repeated) {
+		assert(!relay_profile && now_ms < (uint64_t)relay_query_until);
+	}
+	query_case_live_until(base + 32500);
+	assert(relay_profile == 1);
+	assert(((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)) != 0);
+	assert(!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(3)));
+	assert((uint32_t)atomic_get(&tdma_shadow_last_seen_ms[2]) == child_seen);
+
+	/* A real direct PING after activation ends the special lease for this
+	 * member; its unchanged 15 s inactivity rule is measured from this PING. */
+	query_case_ping(2, ESB_PONG_FLAG_NORMAL);
+	service();
+	uint64_t resumed_observation = now_ms;
+	assert((uint32_t)atomic_get(&tdma_shadow_last_seen_ms[2]) == (uint32_t)now_ms);
+	query_case_live_until(resumed_observation + TDMA_SHADOW_LEAVE_GRACE_MS - 1);
+	assert(((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)) != 0);
+	assert(!(tdma_active_mask & BIT(3)));
+	query_case_live_until(resumed_observation + TDMA_SHADOW_LEAVE_GRACE_MS);
+	assert(!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)));
+}
+
+static void query_serialized_entry(void)
+{
+	query_case_setup(0, true);
+	query_case_begin(0);
+	query_case_live_until(21000);
+	assert(tdma_staged.valid && tdma_staged.p.profile && !relay_profile);
+	query_case_live_until(24000);
+	query_case_ping(1, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	service();
+	assert(relay_query_until == 39000);
+	/* This immutable pre-query entry still activates, then stages another
+	 * exit. It is not the post-hold re-entry. */
+	query_case_live_until(24501);
+	assert(relay_profile && tdma_staged.valid && !tdma_staged.p.profile);
+	query_case_live_until(28002);
+	assert(!relay_profile);
+	query_case_live_until(40000);
+	assert(((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)) != 0);
+	assert(!relay_profile && tdma_staged.valid && tdma_staged.p.profile);
+	query_case_live_until(42600);
+	assert(relay_profile && ((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)));
+}
+
+static void query_forget_and_inability(void)
+{
+	query_case_setup(0, true);
+	now_ms = 6000;
+	query_case_ping(0, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	service();
+	host_forget_id(2);
+	now_ms++;
+	query_case_ping(1, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	service();
+	assert(!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)));
+	query_case_live_until(15000);
+	assert(!(tdma_active_mask & BIT(2)));
+
+	/* Reuse a forgotten slot while the old published layout still contains
+	 * its bit. A repeated query cannot grant the new session the old lease. */
+	query_case_setup(0, true);
+	now_ms = 6000;
+	query_case_ping(0, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	service();
+	host_forget_id(2);
+	now_ms = 6001;
+	query_case_ping(2, ESB_PONG_FLAG_NORMAL);
+	service();
+	assert(((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)) != 0);
+	now_ms = 6002;
+	query_case_ping(1, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	service();
+	query_case_live_until(21001);
+	assert(!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)));
+	assert(now_ms < (uint64_t)relay_query_until);
+
+	for (unsigned reason = 0; reason < 3; ++reason) {
+		query_case_setup(0, true);
+		query_case_begin(0);
+		query_case_live_until(12000);
+		query_case_ping(1, ESB_PONG_FLAG_OTA_QUERY_INFO);
+		service();
+		query_case_live_until(13000);
+		if (reason == 0) {
+			esb_relay_set_enabled(false);
+		} else if (reason == 1) {
+			relay_coord.auto_engaged = false;
+		} else {
+			unsigned key = irq_lock();
+			relay_coord_forget(&relay_coord, 1, (uint32_t)now_ms);
+			irq_unlock(key);
+		}
+		service();
+		query_case_live_until(24489);
+		assert(((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)) != 0);
+		query_case_live_until(24490);
+		assert(!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)));
+		assert(now_ms < (uint64_t)relay_query_until);
+	}
+}
+
+static void query_does_not_revive_expired_or_native_members(void)
+{
+	query_case_setup(0, true);
+	/* The published layout is stale because its owner has not yet merged the
+	 * timeout. A query must not revive that already-expired member. */
+	now_ms = 5501 + TDMA_SHADOW_LEAVE_GRACE_MS;
+	query_case_ping(0, ESB_PONG_FLAG_NORMAL);
+	query_case_ping(1, ESB_PONG_FLAG_NORMAL);
+	assert(tdma_active_mask & BIT(2));
+	query_case_ping(0, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	service();
+	assert(!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)));
+	assert(!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(3)));
+
+	query_case_setup(0, false);
+	now_ms = 6000;
+	query_case_ping(0, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	service();
+	query_case_live_until(12000);
+	query_case_ping(1, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	service();
+	query_case_live_until(5501 + TDMA_SHADOW_LEAVE_GRACE_MS);
+	assert(!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)));
+	assert(!relay_profile && now_ms < (uint64_t)relay_query_until);
+}
+
+static void query_dead_after_resume(void)
+{
+	query_case_setup(0, true);
+	query_case_begin(0);
+	query_case_live_until(21000);
+	assert(tdma_staged.valid && tdma_staged.p.profile);
+	query_case_live_until(24500);
+	assert(relay_profile);
+	uint64_t resumed = now_ms;
+	query_case_live_until(resumed + TDMA_SHADOW_LEAVE_GRACE_MS - 1);
+	assert(((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)) != 0);
+	query_case_live_until(resumed + TDMA_SHADOW_LEAVE_GRACE_MS);
+	assert(!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)));
+
+	/* A new echo at the expiry boundary precedes the owner's merge; it must
+	 * not revive an already-expired recovery lease. */
+	query_case_setup(0, true);
+	query_case_begin(0);
+	query_case_live_until(21000);
+	query_case_live_until(24500);
+	assert(relay_profile);
+	query_case_live_until(24500 + TDMA_SHADOW_LEAVE_GRACE_MS - 1);
+	now_ms++;
+	query_case_ping(0, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	service();
+	assert(!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)));
+}
+
+/* Reproduce the observed applied profile with only ID 6, without assuming
+ * why automatic relay was engaged. All later owner passes use its real
+ * coordinator with the selected eligibility, followed by the real merge and
+ * layout publication. */
+static void query_single_setup(uint64_t base)
+{
+	relay_profile = 0;
+	tdma_staged.valid = false;
+	relay_coord_init(&relay_coord);
+	relay_settings = (struct relay_runtime_settings){16, 5, 16, 120, 120, 5, 0};
+	relay_settings_generation++;
+	reset_fixture(7, base);
+	assert(tracker_store_restore() == 0);
+	relay_coord_note_caps(&relay_coord, 6, RELAY_INFO_CAPS);
+	query_case_ping(6, ESB_PONG_FLAG_NORMAL);
+	service();
+	now_ms = base + 101;
+	service();
+	assert(tdma_active_mask == BIT(6) && !relay_profile);
+	esb_relay_set_enabled(true);
+	relay_coord.auto_engaged = true;
+	now_ms = base + 2000;
+	query_case_ping(6, ESB_PONG_FLAG_NORMAL);
+	service();
+	assert(tdma_staged.valid && tdma_staged.p.profile == 1);
+	now_ms = base + 5501;
+	query_case_ping(6, ESB_PONG_FLAG_NORMAL);
+	service();
+	assert(tdma_active_mask == BIT(6) && relay_profile == 1 && !tdma_staged.valid);
+}
+
+static void query_single_owner(bool eligible)
+{
+	unsigned key = irq_lock();
+	relay_coord_tick(&relay_coord, (uint16_t)tdma_active_mask, (uint32_t)now_ms);
+	relay_coord_auto_update(&relay_coord, (uint16_t)tdma_active_mask,
+				(uint32_t)now_ms, relay_profile != 0, eligible);
+	irq_unlock(key);
+	service();
+}
+
+static uint64_t query_single_missed_hold(uint64_t base, bool eligible)
+{
+	query_single_setup(base);
+	now_ms = base + 6000;
+	query_case_ping(6, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	assert(relay_query_suspending && relay_query_protected_mask == BIT(6));
+	assert(!relay_query_recovering && !tdma_staged.valid);
+	/* No owner pass occurs during the entire hold, so no native exit is staged. */
+	now_ms = base + 6000 + TDMA_SHADOW_LEAVE_GRACE_MS + 501;
+	query_single_owner(eligible);
+	assert(relay_coord.auto_engaged && relay_profile == 1 && !tdma_staged.valid);
+	assert(tdma_active_mask == BIT(6) && relay_query_protected_mask == BIT(6));
+	assert(!relay_query_suspending && relay_query_recovering);
+	assert(relay_query_recovery_started_ms == (uint32_t)now_ms);
+	assert((uint32_t)atomic_get(&tdma_shadow_last_seen_ms[6]) == (uint32_t)(base + 6000));
+	return now_ms;
+}
+
+static void query_single_bounded_recovery(uint64_t base, bool eligible)
+{
+	uint64_t resumed = query_single_missed_hold(base, eligible);
+	/* Repeated owner passes cannot renew the single recovery window. */
+	for (now_ms = resumed + 500; now_ms < resumed + TDMA_SHADOW_LEAVE_GRACE_MS; now_ms += 500) {
+		query_single_owner(eligible);
+		assert(relay_coord.auto_engaged && relay_profile == 1 && tdma_active_mask == BIT(6));
+		assert(relay_query_recovering && !relay_query_suspending);
+		assert(relay_query_recovery_started_ms == (uint32_t)resumed);
+		assert((uint32_t)atomic_get(&tdma_shadow_last_seen_ms[6]) == (uint32_t)(base + 6000));
+	}
+	now_ms = resumed + TDMA_SHADOW_LEAVE_GRACE_MS - 1;
+	query_single_owner(eligible);
+	assert(relay_query_recovering && tdma_active_mask == BIT(6));
+	now_ms++;
+	query_single_owner(eligible);
+	assert(!(atomic_get(&tdma_shadow_desired_mask) & BIT(6)));
+	assert(!tdma_active_mask && !relay_profile && !tdma_staged.valid);
+	assert(!relay_query_protected_mask && !relay_query_recovering && !relay_query_suspending);
+	now_ms += 500;
+	query_single_owner(eligible);
+	assert(!tdma_active_mask && !relay_profile && !relay_query_recovering);
+}
+
+static void query_single_no_query_control(uint64_t base, bool eligible)
+{
+	query_single_setup(base);
+	now_ms = base + 6000;
+	query_case_ping(6, ESB_PONG_FLAG_NORMAL);
+	/* Same outage and owner gap, but no echo and therefore no special lease. */
+	now_ms = base + 6000 + TDMA_SHADOW_LEAVE_GRACE_MS + 501;
+	query_single_owner(eligible);
+	assert(!(atomic_get(&tdma_shadow_desired_mask) & BIT(6)));
+	assert(!tdma_active_mask && !relay_profile && !tdma_staged.valid);
+	assert(!relay_query_protected_mask && !relay_query_recovering && !relay_query_suspending);
+}
+
+static void query_single_pending_native_exit(uint64_t base, bool eligible)
+{
+	query_single_setup(base);
+	now_ms = base + 6000;
+	query_case_ping(6, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	query_single_owner(eligible);
+	assert(relay_profile && tdma_staged.valid && !tdma_staged.p.profile);
+	assert(relay_query_suspending && !relay_query_recovering);
+
+	/* The owner returns after the hold, with the old native exit still
+	 * pending. Its first merge must not mistake profile 1 for a re-entry. */
+	now_ms = base + 6000 + TDMA_SHADOW_LEAVE_GRACE_MS + 1;
+	query_single_owner(eligible);
+	assert(!relay_profile && tdma_staged.valid && tdma_staged.p.profile);
+	assert(relay_query_suspending && !relay_query_recovering);
+	assert(tdma_active_mask == BIT(6) && relay_query_protected_mask == BIT(6));
+	uint64_t exit_applied = now_ms;
+	now_ms = exit_applied + RELAY_LAYOUT_ACTIVATION_MS - 1;
+	query_single_owner(eligible);
+	assert(!relay_profile && tdma_staged.valid && !relay_query_recovering);
+	now_ms = exit_applied + RELAY_LAYOUT_ACTIVATION_MS + 1;
+	query_single_owner(eligible);
+	assert(relay_profile && !tdma_staged.valid && relay_query_recovering);
+	assert(!relay_query_suspending && relay_query_recovery_started_ms == (uint32_t)now_ms);
+	uint64_t reentry = now_ms;
+	now_ms = reentry + TDMA_SHADOW_LEAVE_GRACE_MS - 1;
+	query_single_owner(eligible);
+	assert(tdma_active_mask == BIT(6) && relay_query_recovering);
+	now_ms++;
+	query_single_owner(eligible);
+	assert(!tdma_active_mask && !relay_profile && !relay_query_recovering);
+}
+
+static void query_single_late_echo(uint64_t base, bool eligible)
+{
+	uint64_t resumed = query_single_missed_hold(base, eligible);
+	now_ms = resumed + TDMA_SHADOW_LEAVE_GRACE_MS;
+	/* Another stored tracker sends a real query before the owner's expiry
+	 * merge. Its new receipt is legitimate, but must not revive silent ID 6. */
+	query_case_ping(0, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	assert(!(relay_query_protected_mask & BIT(6)));
+	query_single_owner(eligible);
+	assert(!(atomic_get(&tdma_shadow_desired_mask) & BIT(6)));
+	/* The legitimate new join has its own batching deadline. */
+	now_ms += TDMA_MEMBERSHIP_COHORT_MS;
+	query_single_owner(eligible);
+	assert(!(tdma_active_mask & BIT(6)));
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2) {
@@ -993,6 +1404,23 @@ int main(int argc, char **argv)
 	runtime_settings_publication();
 	member_cap_owner_blocks();
 	member_cap_relay_off();
+	query_membership_recovery(0, false);
+	query_membership_recovery(0, true);
+	query_membership_recovery((uint64_t)UINT32_MAX - 20000U, true);
+	query_serialized_entry();
+	query_forget_and_inability();
+	query_does_not_revive_expired_or_native_members();
+	query_dead_after_resume();
+	const uint64_t query_bases[] = {0, (uint64_t)UINT32_MAX - 10000U};
+	for (unsigned b = 0; b < ARRAY_SIZE(query_bases); ++b) {
+		for (unsigned eligible = 0; eligible < 2; ++eligible) {
+			query_single_no_query_control(query_bases[b], eligible != 0);
+			query_single_bounded_recovery(query_bases[b], eligible != 0);
+			query_single_pending_native_exit(query_bases[b], eligible != 0);
+			query_single_late_echo(query_bases[b], eligible != 0);
+		}
+	}
+	puts("PASS query membership: suspension, serialized re-entry, recovery and expiry");
 	puts("PASS staged layout publication: announce, serialize, activate, legacy and forced");
 	puts("Receiver membership admission cases passed");
 	return 0;

@@ -68,7 +68,8 @@ variables = '''tdma_cap_ladder tdma_config_epoch
     tdma_shadow_last_seen_ms tdma_shadow_ever_ping_mask tdma_shadow_ever_data_mask
     tdma_shadow_live_evidence_mask tdma_shadow_desired_mask
     tdma_shadow_pending_join_mask tdma_shadow_pending_leave_mask tdma_shadow_desired_changed_at_ms
-    tdma_membership_deadline_ms tdma_membership_deadline_armed'''.split()
+    tdma_membership_deadline_ms tdma_membership_deadline_armed
+    relay_query_protected_mask relay_query_recovery_started_ms relay_query_recovering relay_query_suspending'''.split()
 declarations = [
     constants,
     extract_block(source, r'^struct packet_stats\s*\{', True),
@@ -78,11 +79,15 @@ declarations = [
 ]
 declarations.extend(declaration(name) for name in variables)
 declarations.append(extract.diagnostic_loss_declarations(source))
-declarations.append(relay_declarations(source))
+declarations.append('#include "relay_coord.h"')
+declarations.append(extract_block(source, r'^struct relay_member_diagnostics\s*\{', True))
+declarations.append(declaration('relay_member_diag'))
+declarations.append(relay_declarations(source, member_diagnostics=False))
 declarations.append('static bool relay_auto_ladder_paused(void);')
 declarations.append('static bool esb_initialized = true, esb_pairing;')
 functions = [function(name) for name in (
-    'tdma_loss_reset_windows', 'tdma_pack_config', 'tdma_shadow_observe',
+    'tdma_loss_reset_windows', 'tdma_pack_config', 'relay_query_can_resume',
+    'relay_query_update_locked', 'relay_query_begin', 'tdma_shadow_observe',
     'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
     'tdma_membership_wait_ms', 'tdma_slot_ticks_for', 'tdma_staging_supported_locked',
     'tdma_apply_locked', 'tdma_apply_finish', 'tdma_advertised_config', 'tdma_recalculate',

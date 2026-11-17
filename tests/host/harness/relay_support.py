@@ -19,7 +19,7 @@ def _function(esb, name):
     return extract_block(esb, r"^static [\w \t*]+\b" + re.escape(name) + r"\s*\([^;{}]*\)\s*\{")
 
 
-def relay_declarations(esb):
+def relay_declarations(esb, member_diagnostics=True):
     """Coordinator, published layout, test-hook state and RX statistics."""
     esb = select_relay(esb)
     state = re.findall(r"^static (?:struct relay_coord relay_coord|bool relay_user_enabled|"
@@ -48,7 +48,12 @@ def relay_declarations(esb):
     defaults = "\n".join(("#define CONFIG_RELAY_MAX_TRACKERS 16", "#define CONFIG_RELAY_MAX_REPAIRS 1", "#define CONFIG_RELAY_REPAIR_FLOOR 0",
                           "#define CONFIG_RELAY_SLOT_TICKS 16", "#define CONFIG_RELAY_TPS_MIN 100",
                           "#define CONFIG_RELAY_TPS_MAX 120"))
-    return "\n".join(['#include "relay_coord.c"', '#include "relay_demand.h"', defaults, runtime, *state, stats.group(0), diag.group(0),
+    diagnostics = []
+    if member_diagnostics:
+        diagnostics.append(extract_block(esb, r"^struct relay_member_diagnostics\s*\{", semicolon=True))
+        diagnostics.append(re.search(r"^static struct relay_member_diagnostics relay_member_diag;", esb, re.M).group())
+    # The publication-to-tdma_staged slice already contains control diagnostics.
+    return "\n".join(['#include "relay_coord.c"', '#include "relay_demand.h"', defaults, runtime, *state, *diagnostics, stats.group(0), diag.group(0),
                       publication.group(0),
                       "#if defined(CONFIG_TDMA_DIAGNOSTICS)\nstatic uint32_t tdma_stats_generation[MAX_TRACKERS];\n#endif",
                       "#define relay_hid_packet hid_write_packet_n\n#define relay_defer_capture relay_coord_capture\n#define relay_defer_report relay_coord_report",
@@ -57,7 +62,27 @@ def relay_declarations(esb):
                       "static inline void relay_rx_measure(uint32_t start) { (void)start; }",
                       _function(esb, "tdma_staged_due_locked"),
                       "__attribute__((constructor)) static void relay_fixture_init(void)"
-                      " { relay_coord_init(&relay_coord); }", ""])
+                      " { relay_coord_init(&relay_coord);"
+                      " (void)relay_control_diag; (void)relay_member_diag; }", ""])
+
+def relay_query_helpers(esb, membership=False):
+    """Production query capture; isolated PING fixtures need its real state."""
+    esb = select_relay(esb)
+    state = []
+    if not membership:
+        names = ("tdma_shadow_last_seen_ms", "tdma_shadow_live_evidence_mask",
+                 "tdma_shadow_desired_mask", "relay_query_protected_mask",
+                 "relay_query_recovery_started_ms", "relay_query_recovering",
+                 "relay_query_suspending")
+        state.append(re.search(r"^#define TDMA_SHADOW_LEAVE_GRACE_MS\b[^\n]*", esb, re.M).group())
+        for name in names:
+            declaration = re.search(r"^static (?:atomic_t|uint32_t|bool) " + name
+                                    + r"\b[^;]*;", esb, re.M).group()
+            state.append(declaration.replace("ATOMIC_INIT(0)", "0"))
+    return "\n".join((*state, _function(esb, "relay_query_can_resume"),
+                      _function(esb, "relay_query_update_locked"),
+                      _function(esb, "relay_query_begin"), ""))
+
 
 
 STAGING_RECALC = ("tdma_staging_supported_locked", "tdma_apply_locked", "tdma_apply_finish")
@@ -88,5 +113,5 @@ def relay_helpers(esb, stats=True):
                         "esb_receive_relay_diag")) + "\n#pragma GCC diagnostic pop\n"
 
 
-def relay_section(esb, stats=True):
-    return relay_declarations(esb) + relay_helpers(esb, stats)
+def relay_section(esb, stats=True, member_diagnostics=True):
+    return relay_declarations(esb, member_diagnostics) + relay_helpers(esb, stats)

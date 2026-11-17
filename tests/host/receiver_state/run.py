@@ -60,7 +60,8 @@ test_all_state_valid test_all_enabled test_all_requested_tps test_all_effective_
 test_all_generation metadata_next_token wom_next_token tdma_loss_trigger_streak_ticks
 tdma_loss_recover_streak_ticks tdma_loss_probe_streak_ticks tdma_loss_pool_received
 tdma_loss_pool_gaps tdma_loss_pool_ticks auto_loss_reset_epoch decision_ready_mask
-decision_fence_mask tdma_rx_discontinuity_pending'''.split()
+decision_fence_mask tdma_rx_discontinuity_pending relay_query_protected_mask
+relay_query_recovery_started_ms relay_query_recovering relay_query_suspending'''.split()
 
 
 def declaration(name):
@@ -96,7 +97,7 @@ declarations += '\n#endif\n'
 if 'pairing' in cases:
     declarations += '\n' + extract_block(live, r'^struct pairing_event\s*\{', semicolon=True)
 
-names = ['esb_auto_loss_invalidate',
+names = ['esb_auto_loss_invalidate', 'relay_query_can_resume', 'relay_query_update_locked',
          'tdma_shadow_observe', 'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
          'esb_send_remote_command_sens', 'esb_send_remote_command_sens_auto',
          'esb_send_remote_command_sens_auto_all', 'esb_send_remote_command_arg']

@@ -103,10 +103,11 @@ prelude = "\n".join(defines) + "\n" + prelude
 # The PONG queueing body uses relay state declared later by relay_section().
 prelude += "\nstatic int64_t relay_query_until;\n"
 sys.path.insert(0, str(HERE.parent / "harness"))
-from relay_support import relay_section, staging_helpers  # noqa: E402
+from relay_support import relay_section, relay_query_helpers, staging_helpers  # noqa: E402
 if "tdma_active_mask" not in prelude + production:
     production += "\n".join(re.findall(r"^static uint32_t tdma_active_mask;", source, re.MULTILINE)) + "\n"
 production += "\n" + relay_section(source, stats=False)
+production += "\n" + relay_query_helpers(source)
 production += "\n" + staging_helpers(source)
 production += '\n#include "tracker_event_protocol.h"\n'
 production += "\n".join(extract.function(source, name) for name in

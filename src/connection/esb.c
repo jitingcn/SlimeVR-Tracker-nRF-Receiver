@@ -240,6 +240,8 @@ static void tdma_recalculate(bool forced);
 /* Peer relay coordinator (see the relay section below). */
 static struct relay_coord relay_coord;
 static bool relay_auto_ladder_paused(void);
+static bool relay_query_can_resume(void);
+static void relay_query_update_locked(void);
 /* Profile 0 is held until this uptime after a tracker confirms QUERY_INFO:
  * the staged exit lead plus time for its reliable 66-byte reply. */
 static int64_t relay_query_until;
@@ -306,6 +308,21 @@ static atomic_t tdma_shadow_pending_join_mask = ATOMIC_INIT(0);
 static atomic_t tdma_shadow_pending_leave_mask = ATOMIC_INIT(0);
 static atomic_t tdma_shadow_desired_changed_at_ms = ATOMIC_INIT(0);
 
+#if defined(CONFIG_RELAY)
+/* Query suspension protects only the active, unexpired roster captured at
+ * delivery. It never changes last_seen or records reception evidence. */
+static uint32_t relay_query_protected_mask;
+static uint32_t relay_query_recovery_started_ms;
+static bool relay_query_recovering;
+static bool relay_query_suspending;
+struct relay_member_diagnostics {
+	uint32_t merge_ms, recalc_ms, merges, recalculations;
+	uint32_t planned_power_down_mask;
+	uint32_t ping_rx[RC_MAX], ping_ms[RC_MAX];
+};
+static struct relay_member_diagnostics relay_member_diag;
+#endif
+
 /* Protected by irq_lock; the semaphore is only a coalesced notification. */
 static K_SEM_DEFINE(tdma_membership_wake, 0, 1);
 static uint32_t tdma_membership_deadline_ms;
@@ -322,10 +339,24 @@ static void tdma_shadow_observe(uint8_t tracker_id, enum tdma_shadow_evidence ev
 		atomic_set(&tdma_shadow_last_seen_ms[tracker_id], (atomic_val_t)now_ms);
 		if (evidence == TDMA_SHADOW_EVIDENCE_PING) {
 			atomic_or(&tdma_shadow_ever_ping_mask, bit);
+#if defined(CONFIG_RELAY)
+			relay_member_diag.ping_rx[tracker_id]++;
+			relay_member_diag.ping_ms[tracker_id] = now_ms;
+#endif
 		} else {
 			atomic_or(&tdma_shadow_ever_data_mask, bit);
 		}
 		atomic_or(&tdma_shadow_live_evidence_mask, bit);
+#if defined(CONFIG_RELAY)
+		/* Once relay has actually resumed, real evidence returns this member
+		 * to its ordinary inactivity lease. Evidence during the pause does not. */
+		if (relay_query_recovering) {
+			relay_query_protected_mask &= ~bit;
+			if (!relay_query_protected_mask) {
+				relay_query_recovering = false;
+			}
+		}
+#endif
 		if (!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & bit)) {
 			uint32_t queued = (uint32_t)atomic_get(&tdma_shadow_pending_join_mask);
 			atomic_or(&tdma_shadow_pending_join_mask, bit);
@@ -362,6 +393,13 @@ static void tdma_shadow_forget_tracker(uint8_t tracker_id)
 	atomic_and(&tdma_shadow_pending_join_mask, (atomic_val_t)~bit);
 	atomic_and(&tdma_shadow_pending_leave_mask, (atomic_val_t)~bit);
 #if defined(CONFIG_RELAY)
+	relay_member_diag.ping_rx[tracker_id] = 0;
+	relay_member_diag.ping_ms[tracker_id] = 0;
+	relay_member_diag.planned_power_down_mask &= ~bit;
+	relay_query_protected_mask &= ~bit;
+	if (!relay_query_protected_mask) {
+		relay_query_recovering = false;
+	}
 	if (tdma_admissible_mask((uint32_t)atomic_get(&tdma_shadow_desired_mask)) == tdma_active_mask
 		&& !atomic_get(&tdma_shadow_pending_join_mask)) {
 #else
@@ -383,6 +421,11 @@ static uint32_t tdma_shadow_merge_locked(uint32_t now_ms)
 	uint32_t pending_leave_mask = 0;
 	uint32_t evicted_mask = 0;
 
+#if defined(CONFIG_RELAY)
+	relay_query_protected_mask &= desired_mask & evidence_mask & tdma_active_mask;
+	relay_query_update_locked();
+#endif
+
 	for (uint8_t i = 0; i < tracker_count; i++) {
 		uint32_t bit = BIT(i);
 		uint32_t last_seen_ms = (uint32_t)atomic_get(&tdma_shadow_last_seen_ms[i]);
@@ -396,7 +439,11 @@ static uint32_t tdma_shadow_merge_locked(uint32_t now_ms)
 				desired_mask &= ~bit;
 				atomic_and(&tdma_shadow_live_evidence_mask, (atomic_val_t)~bit);
 				atomic_set(&tdma_shadow_last_seen_ms[i], 0);
-			} else if (has_evidence && age_ms >= TDMA_SHADOW_LEAVE_GRACE_MS) {
+			} else if (has_evidence && age_ms >= TDMA_SHADOW_LEAVE_GRACE_MS
+#if defined(CONFIG_RELAY)
+				   && !(relay_query_protected_mask & bit)
+#endif
+			) {
 				evicted_mask |= bit;
 				desired_mask &= ~bit;
 				atomic_and(&tdma_shadow_live_evidence_mask, (atomic_val_t)~bit);
@@ -431,6 +478,10 @@ static uint32_t tdma_shadow_merge_locked(uint32_t now_ms)
 		tdma_membership_deadline_ms = now_ms;
 		tdma_membership_deadline_armed = true;
 	}
+#if defined(CONFIG_RELAY)
+	relay_member_diag.merge_ms = now_ms;
+	relay_member_diag.merges++;
+#endif
 	return evicted_mask;
 }
 
@@ -799,6 +850,19 @@ static uint32_t irq_probe_tick_max, irq_probe_tick_count;
 static uint32_t relay_control_repeat_sent, relay_control_repeat_failed;
 static int relay_control_repeat_err;
 static uint32_t relay_control_sent, relay_control_failed;
+struct relay_control_diagnostics {
+	uint32_t prepare_failed, preparation_late, stale_cancel;
+	uint32_t launch_failed, callback_failed, freeze_timeout;
+	uint32_t begin_failed, arm_failed, wait_failed;
+	int launch_err, callback_err, begin_err, arm_err, wait_err;
+	uint32_t frame, prepare_ticks;
+	int32_t admission_lead, callback_margin;
+	uint32_t failed_arm_frame, failed_arm_entry_lag;
+	int32_t failed_arm_before, failed_arm_after;
+	int failed_arm_err;
+	bool repeat, seen, failed_arm_repeat, failed_arm_seen;
+};
+static struct relay_control_diagnostics relay_control_diag;
 /* The control frame timing, ticks: launch past preamble - TX_OFFSET (count, max), plan and grant work (max). */
 static uint32_t relay_control_late, relay_control_late_max, relay_control_plan_max, relay_control_grant_max;
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
@@ -819,6 +883,81 @@ static struct {
 	uint32_t activation_ticks;
 	bool valid;
 } tdma_staged;
+
+/* All query lease state is serialized with membership and layout publication. */
+static bool relay_query_can_resume(void)
+{
+	return relay_coord.auto_engaged && relay_coord_ready(&relay_coord, (uint16_t)tdma_active_mask);
+}
+
+/* Caller holds irq_lock. A missed native hold must not pin its roster. */
+static void relay_query_update_locked(void)
+{
+	if (!relay_query_protected_mask && !relay_query_suspending && !relay_query_recovering) {
+		return;
+	}
+	if (!relay_query_can_resume()) {
+		relay_query_protected_mask = 0;
+		relay_query_recovering = false;
+		relay_query_suspending = false;
+		return;
+	}
+	int64_t now = k_uptime_get();
+	bool native_exit_pending = tdma_staged.valid && !tdma_staged.p.profile;
+	if (relay_query_suspending && now >= relay_query_until && relay_profile && !native_exit_pending) {
+		relay_query_suspending = false;
+		relay_query_recovering = relay_query_protected_mask != 0;
+		relay_query_recovery_started_ms = (uint32_t)now;
+	}
+	if (relay_query_recovering
+	    && (!relay_query_protected_mask
+		|| (int32_t)((uint32_t)now - relay_query_recovery_started_ms) >= TDMA_SHADOW_LEAVE_GRACE_MS)) {
+		relay_query_protected_mask = 0;
+		relay_query_recovering = false;
+	}
+}
+
+static void relay_query_begin(void)
+{
+	unsigned int key = irq_lock();
+	relay_query_protected_mask &= ~relay_member_diag.planned_power_down_mask;
+	relay_query_update_locked();
+	int64_t now = k_uptime_get();
+	uint8_t count = MIN(stored_trackers, MAX_TRACKERS);
+	uint32_t stored_mask = count ? BIT(count) - 1U : 0;
+	uint32_t roster = tdma_active_mask & stored_mask
+		& (uint32_t)atomic_get(&tdma_shadow_desired_mask)
+		& (uint32_t)atomic_get(&tdma_shadow_live_evidence_mask)
+		& ~relay_member_diag.planned_power_down_mask;
+
+
+	if (!relay_query_can_resume()) {
+		relay_query_protected_mask = 0;
+		relay_query_recovering = false;
+		relay_query_suspending = false;
+	} else {
+		relay_query_protected_mask &= roster;
+		/* Capture the roster only at the start of a suspension. In particular,
+		 * a forgotten/reused slot cannot inherit an old published active bit. */
+		if (!relay_query_suspending
+		    && (relay_profile || (tdma_staged.valid && tdma_staged.p.profile))) {
+			relay_query_suspending = true;
+			for (uint8_t i = 0; i < count; i++) {
+				uint32_t bit = BIT(i);
+				int32_t age = (int32_t)((uint32_t)now
+					- (uint32_t)atomic_get(&tdma_shadow_last_seen_ms[i]));
+				if ((roster & bit) && age < TDMA_SHADOW_LEAVE_GRACE_MS) {
+					relay_query_protected_mask |= bit;
+				}
+			}
+		}
+		/* Repeated queries extend the same suspension, including when the
+		 * receiver is already in native mode or recovering after re-entry. */
+		relay_query_recovering = false;
+	}
+	relay_query_until = now + 15000;
+	irq_unlock(key);
+}
 
 static bool tdma_staged_due_locked(uint32_t now_ticks)
 {
@@ -933,6 +1072,18 @@ static void tdma_apply_locked(const struct tdma_publication *p, int64_t now)
 		}
 	}
 	relay_applied_generation = p->settings_generation;
+	relay_query_protected_mask &= p->new_mask;
+	if (relay_query_suspending && !relay_profile && p->profile
+	    && now >= relay_query_until && relay_query_can_resume()) {
+		relay_query_suspending = false;
+		if (relay_query_protected_mask) {
+			/* Start the bounded recovery interval only at actual re-entry. */
+			relay_query_recovery_started_ms = (uint32_t)now;
+			relay_query_recovering = true;
+		}
+	} else if (!relay_query_protected_mask) {
+		relay_query_recovering = false;
+	}
 	relay_profile = p->profile;
 	relay_layout_generation++;
 	relay_epoch = p->epoch;
@@ -2207,6 +2358,23 @@ static void print_tracker_stats_batch(void)
 }
 
 #if defined(CONFIG_RELAY)
+/* Caller holds irq_lock. Intent only changes auto evidence and query
+ * protection; ordinary membership expiry still owns roster removal. */
+static void relay_auto_policy_update(uint16_t members, uint32_t planned_power_down, uint32_t now_ms, bool eligible)
+{
+	relay_member_diag.planned_power_down_mask = planned_power_down & members;
+	relay_query_protected_mask &= ~relay_member_diag.planned_power_down_mask;
+	if (!relay_query_protected_mask) {
+		relay_query_recovering = false;
+	}
+	relay_coord_auto_update(&relay_coord, members & ~planned_power_down, now_ms, relay_profile != 0, eligible);
+	if ((relay_query_protected_mask || relay_query_suspending) && !relay_query_can_resume()) {
+		relay_query_protected_mask = 0;
+		relay_query_recovering = false;
+		relay_query_suspending = false;
+	}
+}
+
 /* Only the statistics thread calls this. Policy may use a slightly older
  * observation, but must never publish across a membership/session change. */
 static void relay_learn_update(uint32_t now)
@@ -2268,6 +2436,12 @@ static void esb_stats_thread(void)
 			k_mutex_lock(&tracker_store_lock, K_FOREVER);
 			tdma_shadow_update(k_uptime_get_32());
 			tdma_recalculate(false);
+#if defined(CONFIG_RELAY)
+			unsigned int progress_key = irq_lock();
+			relay_member_diag.recalc_ms = k_uptime_get_32();
+			relay_member_diag.recalculations++;
+			irq_unlock(progress_key);
+#endif
 			k_mutex_unlock(&tracker_store_lock);
 			continue;
 		}
@@ -2279,6 +2453,10 @@ static void esb_stats_thread(void)
 		 * so the coordinator pauses (and releases every role) meanwhile. */
 		{
 			bool relay_enabled = relay_user_enabled && !esb_ota_relay_is_active();
+			uint32_t planned_power_down = tracker_events_power_down_mask(
+				k_uptime_get_32(), TDMA_SHADOW_LEAVE_GRACE_MS + 2U * RELAY_LAYOUT_ACTIVATION_MS
+					+ TDMA_RECONFIG_MIN_MS + 2U * TPS_MONITOR_INTERVAL_MS
+			);
 			unsigned int relay_key = irq_lock();
 			IRQ_PROBE_BEGIN(tick);
 			if (relay_enabled != relay_coord.enabled) {
@@ -2288,8 +2466,8 @@ static void esb_stats_thread(void)
 			struct esb_auto_loss_snapshot auto_evidence;
 			esb_get_auto_loss_snapshot(&auto_evidence);
 			bool was_engaged = relay_coord.auto_engaged;
-			relay_coord_auto_update(&relay_coord, (uint16_t)tdma_active_mask,
-				k_uptime_get_32(), relay_profile != 0, auto_evidence.relay_eligible);
+			relay_auto_policy_update((uint16_t)tdma_active_mask, planned_power_down,
+				k_uptime_get_32(), auto_evidence.relay_eligible);
 			bool engaged = relay_coord.auto_engaged;
 			IRQ_PROBE_END(tick);
 			irq_unlock(relay_key);
@@ -2335,12 +2513,24 @@ static void esb_stats_thread(void)
 			tdma_shadow_update((uint32_t)policy_now);
 			tdma_loss_controller_tick(policy_now);
 			tdma_recalculate(false);
+#if defined(CONFIG_RELAY)
+			unsigned int progress_key = irq_lock();
+			relay_member_diag.recalc_ms = k_uptime_get_32();
+			relay_member_diag.recalculations++;
+			irq_unlock(progress_key);
+#endif
 			test_all_reconcile(policy_now);
 			k_mutex_unlock(&tracker_store_lock);
 		} else {
 			k_mutex_lock(&tracker_store_lock, K_FOREVER);
 			tdma_shadow_update(k_uptime_get_32());
 			tdma_recalculate(false);
+#if defined(CONFIG_RELAY)
+			unsigned int progress_key = irq_lock();
+			relay_member_diag.recalc_ms = k_uptime_get_32();
+			relay_member_diag.recalculations++;
+			irq_unlock(progress_key);
+#endif
 			k_mutex_unlock(&tracker_store_lock);
 		}
 
@@ -3453,7 +3643,7 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 	 * queued (single or all) and in either profile; its 66-byte reply needs
 	 * profile 0, so hold that from delivery, not from queuing. */
 	if (ping_ack_flag == ESB_PONG_FLAG_OTA_QUERY_INFO) {
-		relay_query_until = k_uptime_get() + 15000;
+		relay_query_begin();
 	}
 #endif
 	if (ping_ack_flag == ESB_PONG_FLAG_METADATA_REQUEST) {
@@ -4601,6 +4791,11 @@ static void tracker_slot_reset(uint8_t id)
 	tdma_shadow_forget_tracker(id);
 #if defined(CONFIG_RELAY)
 	relay_coord_forget(&relay_coord, id, k_uptime_get_32());
+	if ((relay_query_protected_mask || relay_query_suspending) && !relay_query_can_resume()) {
+		relay_query_protected_mask = 0;
+		relay_query_recovering = false;
+		relay_query_suspending = false;
+	}
 #endif
 	esb_auto_loss_invalidate();
 	hid_reset_rssi_smooth(id);
@@ -6048,6 +6243,11 @@ void esb_relay_set_enabled(bool enabled)
 	unsigned int key = irq_lock();
 	relay_user_enabled = enabled;
 	relay_coord_set_enabled(&relay_coord, enabled && !esb_ota_relay_is_active());
+	if (!relay_query_can_resume()) {
+		relay_query_protected_mask = 0;
+		relay_query_recovering = false;
+		relay_query_suspending = false;
+	}
 	irq_unlock(key);
 }
 
@@ -6373,6 +6573,73 @@ void esb_relay_print_status(void)
 			c[RELAY_DIAG_PRESENCE_RX], c[RELAY_DIAG_PRESENCE], c[RELAY_DIAG_LEASE_EXPIRED]);
 		printk("       start_late_max=%u ticks lengths(fail/cap)=%u/%u\n",
 			c[RELAY_DIAG_START_LATE], c[RELAY_DIAG_LENGTHS] >> 8, c[RELAY_DIAG_LENGTHS] & 0xFFU);
+	}
+}
+
+/* Focused output keeps live diagnostics out of the larger cached DIAG dump. */
+void esb_relay_print_diagnostics(void)
+{
+	unsigned int key = irq_lock();
+	struct relay_control_diagnostics control = relay_control_diag;
+	uint32_t merge_ms = relay_member_diag.merge_ms;
+	uint32_t recalc_ms = relay_member_diag.recalc_ms;
+	uint32_t merges = relay_member_diag.merges;
+	uint32_t recalculations = relay_member_diag.recalculations;
+	uint32_t planned_power_down = relay_member_diag.planned_power_down_mask;
+	uint32_t protected = relay_query_protected_mask;
+	bool suspending = relay_query_suspending, recovering = relay_query_recovering;
+	int64_t now = k_uptime_get();
+	int64_t hold_left = MAX(relay_query_until - now, 0);
+	int32_t recovery_age = (int32_t)((uint32_t)now - relay_query_recovery_started_ms);
+	int32_t recovery_left = recovering ? MAX(TDMA_SHADOW_LEAVE_GRACE_MS - MAX(recovery_age, 0), 0) : 0;
+	uint16_t members = (uint16_t)tdma_active_mask;
+	uint8_t profile = relay_profile, count = MIN(stored_trackers, MAX_TRACKERS);
+	bool staged = tdma_staged.valid;
+	uint8_t next_profile = staged ? tdma_staged.p.profile : 0;
+	int32_t stage_ticks = (int32_t)(tdma_staged.activation_ticks - (uint32_t)k_uptime_ticks());
+	uint32_t stage_left = staged && stage_ticks > 0 ? k_ticks_to_ms_ceil32((uint32_t)stage_ticks) : 0;
+	irq_unlock(key);
+
+	printk("relay diag: protocol=%u profile=%u members=0x%04x power_down_intent=0x%04x now_ms=%u\n",
+	       RELAY_PROTOCOL_VERSION, profile, members, planned_power_down, (uint32_t)now);
+	printk("relay diag: query_mask=0x%04x suspending=%u recovering=%u hold_left_ms=%lld recovery_left_ms=%d\n",
+	       protected, suspending, recovering, (long long)hold_left, recovery_left);
+	printk("relay diag: staged=%u next_profile=%u activation_left_ms=%u owner_merge_age_ms=%u owner_recalc_age_ms=%u merges=%u recalcs=%u\n",
+	       staged, next_profile, stage_left, (uint32_t)now - merge_ms, (uint32_t)now - recalc_ms,
+	       merges, recalculations);
+	printk("relay diag: errors prepare=%u prepare_late=%u stale_cancel=%u launch_set=%u callback_set=%u freeze_timeout=%u begin=%u arm=%u wait=%u\n",
+	       control.prepare_failed, control.preparation_late, control.stale_cancel, control.launch_failed,
+	       control.callback_failed, control.freeze_timeout, control.begin_failed, control.arm_failed,
+	       control.wait_failed);
+	printk("relay diag: last_errors launch_set=%d callback_set=%d begin=%d arm=%d wait=%d\n",
+	       control.launch_err, control.callback_err, control.begin_err, control.arm_err, control.wait_err);
+	if (control.seen) {
+		printk("relay diag: last_attempt frame=%u repeat=%u lead=%d prepare=%u callback_margin=%d ticks\n",
+		       control.frame, control.repeat, control.admission_lead, control.prepare_ticks,
+		       control.callback_margin);
+	}
+	if (control.failed_arm_seen) {
+		printk("relay diag: last_failed_arm frame=%u repeat=%u freeze_entry_lag=%u before=%d after=%d err=%d ticks\n",
+		       control.failed_arm_frame, control.failed_arm_repeat, control.failed_arm_entry_lag,
+		       control.failed_arm_before, control.failed_arm_after, control.failed_arm_err);
+	}
+	for (uint8_t i = 0; i < count; i++) {
+		key = irq_lock();
+		uint32_t bit = BIT(i);
+		bool active = (tdma_active_mask & bit) != 0;
+		bool valid = ((uint32_t)atomic_get(&tdma_shadow_live_evidence_mask) & bit) != 0;
+		uint32_t seen = (uint32_t)atomic_get(&tdma_shadow_last_seen_ms[i]);
+		uint32_t pings = relay_member_diag.ping_rx[i], ping_ms = relay_member_diag.ping_ms[i];
+		bool held = (relay_query_protected_mask & bit) != 0;
+		uint32_t at = k_uptime_get_32();
+		irq_unlock(key);
+		if (!active && !valid && !held) {
+			continue;
+		}
+		int32_t lease_age = valid ? MAX((int32_t)(at - seen), 0) : -1;
+		int32_t ping_age = pings ? MAX((int32_t)(at - ping_ms), 0) : -1;
+		printk("  lease trk=%u active=%u protected=%u lease_age_ms=%d ping_age_ms=%d ping_rx=%u\n",
+		       i, active, held, lease_age, ping_age, pings);
 	}
 }
 
