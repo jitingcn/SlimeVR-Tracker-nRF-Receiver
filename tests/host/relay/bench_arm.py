@@ -5,6 +5,7 @@ Run after west build, with unicorn==2.1.2 and pyelftools. This is an instruction
 and peripheral-latency estimate, not a substitute for on-device DWT measurements.
 """
 import argparse
+import shlex
 import os
 from pathlib import Path
 import re
@@ -239,7 +240,7 @@ int main(int argc, char **argv) {
 }
 '''.replace('#include <stdio.h>', '#include <stdio.h>\n#include <stdlib.h>'))
     golden_exe = temporary / 'golden'
-    subprocess.run([os.environ.get('CC', 'cc'), '-O2', *fixture_flags, '-Wno-unknown-attributes', '-I', str(here), '-I', str(root / 'src/connection'), str(golden_c), str(root / 'src/connection/relay_coord.c'), '-o', str(golden_exe)], check=True)
+    subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [ '-O2', *fixture_flags, '-Wno-unknown-attributes', '-I', str(here), '-I', str(root / 'src/connection'), str(golden_c), str(root / 'src/connection/relay_coord.c'), '-o', str(golden_exe)], check=True)
     golden = subprocess.check_output([str(golden_exe), str(args.seeds)])
     maximum, worst_seed, worst_phases = 0, 0, {}
     repeat_arm_max=repeat_encode_max=repeat_post_end_max=0

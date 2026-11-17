@@ -21,6 +21,7 @@ static void evidence(struct relay_coord *rc, unsigned h, unsigned child,
 	assert(!relay_coord_report(rc, &c, 2, &r, now));
 	r.session--; r.epoch++;
 	assert(!relay_coord_report(rc, &c, 2, &r, now));
+	r.epoch--;
 	assert(!relay_coord_report(rc, &c, 5, &r, now));
 }
 

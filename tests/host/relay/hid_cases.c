@@ -60,6 +60,12 @@ static void test_normal_stats(void)
 
 static void test_fast_repair(void)
 {
+	reset_state(); relay_profile = 0;
+	struct esb_payload baseline;
+	make_normal(&baseline, 1, 2, 255, 60);
+	esb_receive_normal(&baseline, 0, false);
+	CHECK(hid_count == 1);
+	struct hid_record direct = hid_out[0];
 	reset_state();
 	relay_profile = RELAY_PROFILE_120HZ;
 	relay_origin = 1000; relay_frame_anchor=0; relay_start_anchor=relay_origin;
@@ -101,6 +107,8 @@ static void test_fast_repair(void)
 	packet.length = relay_repair_encode(packet.data, &r);
 	esb_receive_repair(&packet, at);
 	CHECK(hid_count == 1);
+	CHECK(!memcmp(hid_out[0].pkt, direct.pkt, sizeof(direct.pkt)));
+	CHECK(direct.rssi == 60 && hid_out[0].rssi == 60);
 	CHECK(shadow_seen == (1U << 2)); /* valid repairs renew membership */
 	/* A published repair counts once in the host totals. */
 	CHECK(tracker_slots[2].stats.total_received == 1 && tracker_slots[2].stats.status_received == 1);

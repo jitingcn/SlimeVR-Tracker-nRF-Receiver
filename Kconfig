@@ -208,6 +208,10 @@ config RELAY_RAMFUNC
     default n if SOC_NRF52833
     default y
 
+config RELAY_FRAME_LEDGER
+    bool "Relay frame ledger"
+    default n
+
 config RELAY_RESCUE_DIAGNOSTICS
     bool "Rescue candidate eligibility ledger"
     default n
@@ -239,7 +243,7 @@ config RELAY_MAX_TRACKERS
 
 config RELAY_MAX_REPAIRS
     int "Maximum ordinary repair slots"
-    range 0 5
+    range 1 5
     default 5
 
 config RELAY_REPAIR_FLOOR

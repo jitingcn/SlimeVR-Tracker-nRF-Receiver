@@ -2,7 +2,7 @@
 """Compare receiver ACK and FIFO dispatch with diagnostics undefined and enabled.
 
 Both variants assert protocol behavior and compare their wire/output traces.
-SDK, scheduler and output leaves are modeled. --source accepts a baseline esb.c.
+SDK, scheduler and output leaves are modeled. --source requires a relay-capable esb.c.
 """
 
 from pathlib import Path as _RelayPath

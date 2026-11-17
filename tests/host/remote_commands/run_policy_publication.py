@@ -182,8 +182,8 @@ int main(void) {
     assert(!irq_depth && !attempts && !reclamp_logs);
     puts("PASS test-all layout publication excludes targeted command preemption");
     tdma_dynamic_slot_ticks = 16;
-    assert(test_all_capacity_tps(11) == 140);
-    puts("PASS test-all capacity includes forwarding slots");
+    assert(test_all_capacity_tps(11) == 180);
+    puts("PASS test-all direct-slot capacity is 180 TPS");
     return 0;
 }
 '''

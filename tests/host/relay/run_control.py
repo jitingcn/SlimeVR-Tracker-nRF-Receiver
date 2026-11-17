@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parents[3] / 'tracker/tests/host/harness/python'))
+sys.path.insert(0, str(HERE.parent / 'harness'))
 from c_extract import extract_block
 SDK = Path(os.environ.get('NCS_ROOT', HERE.parents[3])) / 'nrf/subsys/esb/esb.c'
 s = SDK.read_text()

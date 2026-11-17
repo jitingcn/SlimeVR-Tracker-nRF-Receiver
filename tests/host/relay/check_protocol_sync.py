@@ -1,8 +1,10 @@
 """Tracker and receiver must carry byte-identical relay wire headers."""
+import os
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[3]
 peer = root.parent / ("pr-tracker" if root.name == "pr-receiver" else "tracker")
+peer = Path(os.environ.get("RELAY_TRACKER_ROOT", peer))
 header = Path("src/connection/relay_protocol.h")
 if not (peer / header).is_file():
     print("Relay protocol parity: tracker checkout absent; local tests still run")
