@@ -10,12 +10,16 @@ int main(void)
 			uint32_t last = 0;
 			for (unsigned t = 1; t <= 16; t++) {
 				struct relay_runtime_settings p = relay_runtime_for_members(settings, t);
-				unsigned nominal = (target == 120 ? 17 : 20) - t - 1;
-				nominal = nominal < 1 ? 1 : nominal > 5 ? 5 : nominal;
-				unsigned budget = (target == 120 ? 17 : 20) > t + 1 ? (target == 120 ? 17 : 20) - t - 1 : 1;
-				unsigned m = nominal >= 3 && (mode != 1 || budget >= 4) ? mode : 0, r = nominal - (m != 0);
-				if (m && r > budget - relay_control_repeat_slots(m)) {
-					r = budget - relay_control_repeat_slots(m);
+				unsigned slots = (32768U / target - 4U) / 16U;
+				unsigned budget = slots > t + 1U ? slots - t - 1U : 1U;
+				unsigned nominal = budget > 5U ? 5U : budget;
+				unsigned repeat_slots = (32768U / target - 8U) / 16U;
+				unsigned repeat_budget = repeat_slots > t + 1U ? repeat_slots - t - 1U : 0U;
+				unsigned extra = mode == 1U ? 2U : mode == 2U ? 1U : 0U;
+				unsigned m = nominal >= 3U && repeat_budget >= extra + 2U ? mode : 0U;
+				unsigned r = nominal - (m != 0U);
+				if (m && r > repeat_budget - extra) {
+					r = repeat_budget - extra;
 				}
 				assert(p.max_repairs == r && p.repair_floor == r && p.control_repeat_mode == m);
 				struct relay_geometry g;
@@ -23,20 +27,15 @@ int main(void)
 				uint32_t sum = 0;
 				for (unsigned f = 0; f < 120; f++) {
 					unsigned actual = relay_demand_slots(f, r);
-					unsigned period = relay_runtime_period(f, t, actual + relay_control_repeat_slots(m), 16, 120);
-					assert(period >= (t + 1 + actual + relay_control_repeat_slots(m)) * 16);
+					unsigned occupied = (t + 1U + actual + extra * (m != 0U)) * 16U
+						+ 4U * (1U + (m != 0U));
+					unsigned padded = (f + 1U) * 32768U / 120U - f * 32768U / 120U;
+					unsigned period = relay_runtime_period(f, t, actual, 16, 120, m);
+					assert(period == (occupied > padded ? occupied : padded));
 					sum += period;
 				}
-				if (r >= 2) {
-					assert(
-						sum
-						== (t + 1 + r + relay_control_repeat_slots(m) <= 17
-								? 32768
-								: 120 * (t + 1 + r + relay_control_repeat_slots(m)) * 16)
-					);
-				}
 				if (t == 16 && target == 120) {
-					assert(sum == 34800); /* 15 R2 maintenance frames, 105 R1 frames. */
+					assert(sum == 35280); /* 15 R2 maintenance frames, 105 R1 frames. */
 				}
 				printf(
 					"target=%u T=%u mode=%u R=%u ticks/120=%u TPS=%.6f\n",
@@ -94,21 +93,20 @@ int main(void)
 				assert(!memcmp(&a, &b, sizeof(a))); /* padding zeroed below by compiler? */
 				assert(a.control_repeat_mode == mode && a.repair_count == 4 && a.preamble_ticks == c.preamble_ticks);
 				struct relay_runtime_anchor anchor;
-				relay_runtime_anchor_set(&anchor, c.frame, c.preamble_ticks, 11, 4, 3, 2, width, 120);
-				relay_runtime_anchor_control_repeat(&anchor, 4, 3, 2, 120, mode);
+				relay_runtime_anchor_set(&anchor, c.frame, c.preamble_ticks, 11, 4, 3, 2, width, 120, mode);
 				assert(
 					anchor.next_start
-					== anchor.start + relay_runtime_period(c.frame, 11, 4 + relay_control_repeat_slots(mode), width, 120)
+					== anchor.start + relay_runtime_period(c.frame, 11, 4, width, 120, mode)
 				);
 				assert(
 					anchor.following_start
 					== anchor.next_start
-						   + relay_runtime_period(c.frame + 1, 11, 3 + relay_control_repeat_slots(mode), width, 120)
+						   + relay_runtime_period(c.frame + 1, 11, 3, width, 120, mode)
 				);
 				assert(
 					anchor.third_start
 					== anchor.following_start
-						   + relay_runtime_period(c.frame + 2, 11, 2 + relay_control_repeat_slots(mode), width, 120)
+						   + relay_runtime_period(c.frame + 2, 11, 2, width, 120, mode)
 				);
 			}
 		}

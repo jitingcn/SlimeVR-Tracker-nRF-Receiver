@@ -22,11 +22,11 @@ int main(void)
 		for (unsigned r = 0; r <= 5; r++) {
 			uint32_t total = 0;
 			for (unsigned f = 0; f < 120; f++) {
-				unsigned period = relay_runtime_period(f, direct, r, 16, 120);
-				assert(period >= (direct + 1U + r) * 16U);
+				unsigned period = relay_runtime_period(f, direct, r, 16, 120, 0);
+				assert(period >= (direct + 1U + r) * 16U + RELAY_CONTROL_ARM_GUARD_TICKS);
 				total += period;
 			}
-			if ((direct + 1U + r) * 16U <= 273U) {
+			if ((direct + 1U + r) * 16U + RELAY_CONTROL_ARM_GUARD_TICKS <= 273U) {
 				assert(total == 32768U);
 			}
 		}
@@ -37,13 +37,13 @@ int main(void)
 				struct relay_runtime_anchor a = {0};
 				uint32_t start;
 				assert(!relay_runtime_start(&a, 0, &start));
-				relay_runtime_anchor_set(&a, 119, 0xfffffff0U, 16, current, next, next2, 16, 120);
+				relay_runtime_anchor_set(&a, 119, 0xfffffff0U, 16, current, next, next2, 16, 120, 0);
 				assert(relay_runtime_start(&a, 120, &start));
-				assert(start == a.start + relay_runtime_period(119, 16, current, 16, 120));
+				assert(start == a.start + relay_runtime_period(119, 16, current, 16, 120, 0));
 				assert(relay_runtime_start(&a, 121, &start));
-				assert(start == a.next_start + relay_runtime_period(120, 16, next, 16, 120));
+				assert(start == a.next_start + relay_runtime_period(120, 16, next, 16, 120, 0));
 				assert(relay_runtime_start(&a, 122, &start));
-				assert(start == a.following_start + relay_runtime_period(121, 16, next2, 16, 120));
+				assert(start == a.following_start + relay_runtime_period(121, 16, next2, 16, 120, 0));
 				assert(!relay_runtime_start(&a, 123, &start));
 				uint32_t cutoff = a.third_start + 16U * 16U;
 				assert(relay_runtime_direct_granted(&a, cutoff - 1U));

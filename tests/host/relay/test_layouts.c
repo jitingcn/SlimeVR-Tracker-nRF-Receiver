@@ -11,7 +11,7 @@ int main(void)
 	assert(relay_geometry_valid(1, 1, 1, g->slot_ticks, 0, g));
 	struct relay_geometry decoded_geometry;
 	assert(!relay_geometry_from_bootstrap(relay_geometry_code(11, 6), 16, &decoded_geometry));
-	const struct relay_geometry cases[] = {{11, 5, 16, 120, 4096, 15, 0}, {11, 3, 15, 120, 4096, 15, 0}};
+	const struct relay_geometry cases[] = {{11, 5, 16, 120, 276, 1, 0}, {11, 3, 15, 120, 4096, 15, 0}};
 	for (unsigned row = 0; row < sizeof(cases) / sizeof(cases[0]); row++) {
 		const struct relay_geometry *other = &cases[row];
 		struct relay_layout_descriptor source

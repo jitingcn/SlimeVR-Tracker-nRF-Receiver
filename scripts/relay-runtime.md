@@ -27,16 +27,18 @@ Repetition trades one nominal repair for the repeat control frame only when
 the layout with a single control frame has at least R3, leaving at least R2.
 Otherwise it is suspended for that membership, preserving the desired setting.
 Demand mode's effective floor is at least R2 while two control frames are active.
-The adjacent repeat control frame shifts repairs one slot later; the trailing
-repeat control frame follows the last repair. Helpers retain the same direct
-capture windows, and the extra control frame never owns an R slot.
+Placement 1 puts the repair area after both control transmissions. Placement 2
+puts the repeat control after the last repair. Each control transmission has
+its own four-tick arming guard. Helpers retain the same direct capture windows;
+neither a guard nor a control transmission owns a repair slot.
 
 Both copies carry the first freeze's identical grants and announcements.
 The repeat control frame changes only type, preamble timestamp and CRC. Its
 type is 0xEC; the primary control frame remains 0xE8. Byte 68's upper two bits
 encode placement 0/1/2, its lower bits retain static width or demand owner/width.
-The version remains local 7 or upstream consolidated 4. Trackers normalize the
-repeat control frame back to the primary control frame anchor.
+Both firmware repositories use wire version 5 and the same guarded geometry.
+Trackers normalize the repeat control frame back to the primary control anchor,
+including the repeat transmission's guard. Update trackers and receiver together.
 A valid primary control frame allows repair service immediately. If it is
 absent or rejected, the window stays/reopens through the repeat control frame;
 only failure of both counts one missed frame. A late trailing repeat control

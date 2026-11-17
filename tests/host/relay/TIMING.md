@@ -1,7 +1,54 @@
 # Relay control frame timing verification
 
-The frame constants, RX lead, admission reserves, mask freeze at preamble minus
-3 ticks and RTC launch at preamble minus 2 ticks are unchanged.
+## Guarded timing
+
+Protocol version 5 adds four RTC ticks before each primary or repeat control
+transmission. The preceding direct or repair area's receipt freeze remains one
+tick before its end. Launch follows the four-tick guard, giving five ticks
+between the intended freeze and launch instead of one. Direct receive windows
+are not shortened.
+
+The freeze callback is scheduled seven ticks before launch, two ticks before
+the intended freeze. Exact compare setup requires at least twelve ticks of
+preamble lead. Arming precedes receipt-mask encoding while IRQ and radio
+ownership remain held. The shared geometry includes guards in frame periods,
+repeat offsets, acquisition windows and repair admission. Native profile 0 is
+unchanged.
+
+`arm_late` counts SDK `-ETIME` returns; `prepare_late` counts rejected compare
+setup lead. `freeze_entry_lag_max` measures callback entry lateness. The retained
+`last_failed_arm` row reports the failing frame, repeat flag, entry lag and
+signed launch margins before and after arming. Positive margins mean ticks
+remaining. Later success does not erase this failure snapshot.
+
+Host timing checks and linked-firmware emulation do not establish physical
+interrupt latency, radio turnaround, DMA readiness or a hardware WCET bound.
+Those require new measurements with the matching guarded firmware.
+
+Run the linked model with Unicorn 2.1.2. Its `--pa-settle-us` input must match
+the board's `ctx-settle-time-us`: 2 for Ria R1 and 23 for Cheesecake33. The
+model checks the resulting PA compare against that input; these are not
+firmware timing overrides.
+
+The static source/repair/age/phase model uses 16-tick slots, no repeat control
+and a 120 TPS ceiling. Its scoped budgets are:
+
+| Geometry | Worst modeled source-to-repair latency | Model budget |
+|---|---:|---:|
+| 11 direct, 5 repairs | 25.252 ms | 26 ms |
+| 8 direct, 5 repairs | 23.634 ms | 25 ms |
+
+For the 11-direct example, the guard adds nine ticks across the worst frame and
+repair offsets, raising the former 24.977 ms result by about 0.275 ms. R5 is
+valid there with a 100 TPS minimum; a 120 TPS minimum selects R4 under the
+existing geometry policy. The eight-direct example still permits R5 at a
+120 TPS minimum. These bounds cover the stated sweeps, not every configurable
+rate, cache age or repeat placement, and not physical RF latency.
+
+## Historical pre-guard measurements
+
+The measurements below predate wire version 5. Their one-tick arm interval and
+cycle results are not acceptance evidence for the guarded timing.
 
 Hardware testing on 2026-11-02 disproved the previous full-path cycle estimate.
 With all 11 trackers present, the original implementation sent 562 relay control frames
@@ -65,6 +112,9 @@ hardware load should verify that overflow remains zero and worker critical
 sections do not delay freeze entry.
 
 ## Hardware acceptance status
+
+This section records the earlier pre-guard firmware, not acceptance of the
+current guarded protocol.
 
 The mixed-image diagnostic fleet sent 3,123 relay control frames with 15 failures and 12
 late arms. Smol 2 subsequently received 8,977 control frames and missed 375 in a

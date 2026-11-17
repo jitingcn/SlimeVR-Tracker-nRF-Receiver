@@ -2,7 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include "relay_protocol.h"
-static struct relay_geometry geometry = {16, 1, 16, 120, 288, 1, 0};
+static struct relay_geometry geometry = {16, 1, 16, 120, 292, 1, 0};
 const struct relay_geometry *relay_geometry_active = &geometry;
 struct relay_timeline relay_timeline_active;
 struct relay_runtime_anchor relay_direct_anchor;
@@ -10,6 +10,52 @@ static void reseal(uint8_t *wire)
 {
 	wire[71] = relay_crc8(7, wire, 71);
 }
+
+static void guarded_geometry(void)
+{
+	const uint32_t frames[] = {0U, 1U, 14U, 119U, UINT32_MAX};
+	for (unsigned width = 15; width <= 16; ++width) {
+		for (unsigned direct = 1; direct <= 16; ++direct) {
+			for (unsigned mode = 0; mode <= 2; ++mode) {
+				for (unsigned repairs = mode ? 2U : 0U; repairs <= (mode ? 4U : 5U); ++repairs) {
+					assert(relay_geometry_make_control(&geometry, direct, repairs, width, 120, mode));
+					unsigned control = direct * width + 4U;
+					unsigned repair = control + width + (mode == 1U ? 2U * width + 4U : 0U);
+					unsigned occupied = (direct + 1U + repairs + relay_control_repeat_slots(mode)) * width
+						+ 4U * (1U + (mode != 0U));
+					assert(RELAY_CONTROL_START == control && RELAY_REPAIR_START == repair);
+					for (unsigned i = 0; i < direct; ++i) assert(relay_slot_offset(i) == i * width);
+					for (unsigned i = 0; i < repairs; ++i)
+						assert(relay_slot_offset(RELAY_REPAIR_FIRST_SLOT + i) == repair + i * width);
+					assert(control + RELAY_TX_OFFSET + RELAY_CONTROL_AIR_TICKS <= repair);
+					if (mode) {
+						unsigned repeat = control + relay_control_repeat_offset(direct, repairs, width, mode);
+						assert(repeat - 5U == (mode == 1U ? control + 2U * width - 1U
+										       : repair + repairs * width - 1U));
+						assert(repeat + RELAY_TX_OFFSET + RELAY_CONTROL_AIR_TICKS
+						       <= (mode == 1U ? repair : occupied));
+					}
+					assert(control - 5U == direct * width - 1U);
+					assert(repair + repairs * width <= occupied);
+					for (unsigned f = 0; f < sizeof(frames) / sizeof(frames[0]); ++f) {
+						uint32_t frame = frames[f], start = 0xfffffff0U;
+						struct relay_runtime_anchor a;
+						relay_runtime_anchor_set(&a, frame, start + control + RELAY_TX_OFFSET,
+									 direct, repairs, repairs, repairs, width, 120, mode);
+						assert(a.start == start);
+						assert(a.next_start - start == relay_runtime_period(frame, direct, repairs, width, 120, mode));
+						assert(a.following_start - a.next_start
+						       == relay_runtime_period(frame + 1U, direct, repairs, width, 120, mode));
+						assert(a.third_start - a.following_start
+						       == relay_runtime_period(frame + 2U, direct, repairs, width, 120, mode));
+						assert(a.next_start - start >= occupied);
+					}
+				}
+			}
+		}
+	}
+}
+
 int main(void)
 {
 	for (unsigned direct = 1; direct <= 16; direct++) {
@@ -58,13 +104,13 @@ int main(void)
 							relay_control_decode(wire, 72, &decoded) && relay_control_next_repairs(&decoded) == next
 							&& relay_control_next2_repairs(&decoded) == next2
 						);
-						wire[1] = RELAY_PROTOCOL_VERSION + 1U;
+						wire[1] = RELAY_PROTOCOL_VERSION - 1U;
 						reseal(wire);
 						assert(!relay_control_decode(wire, 72, &decoded));
 						wire[1] = RELAY_PROTOCOL_VERSION + 1U;
 						reseal(wire);
 						assert(!relay_control_decode(wire, 72, &decoded));
-						wire[1] = RELAY_PROTOCOL_VERSION + 1U;
+						wire[1] = RELAY_PROTOCOL_VERSION;
 						wire[68] = 14;
 						reseal(wire);
 						assert(!relay_control_decode(wire, 72, &decoded));
@@ -96,13 +142,15 @@ int main(void)
 			}
 		}
 	}
+	guarded_geometry();
+	assert(relay_geometry_make(&geometry, 16, 1, 16, 120));
 	for (uint32_t cap = 1; cap <= 32768; cap++) {
 		uint32_t frame = cap * 123457U;
 		uint32_t exact = ((uint64_t)frame + 1U) * 32768U / cap - (uint64_t)frame * 32768U / cap;
-		if (exact < 16U) {
-			exact = 16U;
+		if (exact < 20U) {
+			exact = 20U;
 		}
-		assert(relay_runtime_period(frame, 0, 0, 16, cap) == exact);
+		assert(relay_runtime_period(frame, 0, 0, 16, cap, 0) == exact);
 	}
 	uint32_t start = 0xfffffff0U;
 	for (uint32_t frame = 0; frame < 10000; frame++) {
@@ -111,13 +159,13 @@ int main(void)
 		relay_runtime_anchor_set(
 			&relay_direct_anchor,
 			frame,
-			start + 16U * 16U + 2U,
+			start + 16U * 16U + RELAY_CONTROL_ARM_GUARD_TICKS + RELAY_TX_OFFSET,
 			16,
 			repairs,
 			next,
 			(frame + 2U) % 6U,
 			16,
-			120
+			120, 0
 		);
 		relay_timeline_announce(&relay_timeline_active, &relay_direct_anchor);
 		assert(relay_frame_start(0, frame) == start);
@@ -127,14 +175,14 @@ int main(void)
 		assert(relay_runtime_start(&relay_direct_anchor, frame + 3U, &next_start));
 		assert(
 			next_start
-			== relay_direct_anchor.following_start + relay_runtime_period(frame + 2U, 16, (frame + 2U) % 6U, 16, 120)
+			== relay_direct_anchor.following_start + relay_runtime_period(frame + 2U, 16, (frame + 2U) % 6U, 16, 120, 0)
 		);
 		assert(relay_frame_near(frame, start, relay_direct_anchor.third_start + 1U) == frame + 3U);
 		assert(relay_frame_at_tick(0, relay_direct_anchor.third_start + 1U) == frame + 3U);
 		assert(relay_frame_at_tick64(0, relay_direct_anchor.third_start + 1U) == frame + 3U);
 		assert(relay_runtime_direct_granted(&relay_direct_anchor, relay_direct_anchor.third_start + 255U));
 		assert(!relay_runtime_direct_granted(&relay_direct_anchor, relay_direct_anchor.third_start + 256U));
-		start += relay_runtime_period(frame, 16, repairs, 16, 120);
+		start += relay_runtime_period(frame, 16, repairs, 16, 120, 0);
 	}
-	puts("Wire v6 runtime geometry, every current/next/next2 R, frozen CRC, descriptors and timeline passed");
+	puts("Wire runtime geometry, every current/next/next2 R, frozen CRC, descriptors and timeline passed");
 }

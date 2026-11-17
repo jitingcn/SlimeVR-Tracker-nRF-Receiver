@@ -1,12 +1,18 @@
 """Run actual SDK FIFO push/pop with per-entry metadata and delayed drains."""
 from pathlib import Path
 import sys, os, subprocess, tempfile, shlex
+import re
 here=Path(__file__).resolve().parent
 sys.path.insert(0,str(here.parent/'harness'))
 from c_extract import extract_block
 sdk=here.parents[3]/'nrf'
 s=(sdk/'subsys/esb/esb.c').read_text()
-body='\n'.join(extract_block(s,rf'^(?:static bool|int) {n}\([^;{{]*\)\s*\{{') for n in ('rx_fifo_push_rfbuf','esb_read_rx_payload'))
+push = re.search(r'^static bool rx_fifo_push_rfbuf\([^\n]*uint32_t end_ticks\)$', s, re.MULTILINE)
+if push is None:
+ raise ValueError('Missing metadata-enabled FIFO push signature')
+opening = s.index('{', push.end())
+body = push.group() + '\n' + extract_block(s[opening:], r'\A\{')
+body += '\n' + extract_block(s, r'^int esb_read_rx_payload\([^;{]*\)\s*\{')
 h=(sdk/'include/esb.h').read_text(); payload=h[h.index('struct esb_payload {'):h.index('/** @brief Enhanced ShockBurst event.')]
 prefix=r'''
 #include <stdint.h>
@@ -15,6 +21,7 @@ prefix=r'''
 #include <errno.h>
 #include <assert.h>
 #define CONFIG_ESB_MAX_PAYLOAD_LENGTH 72
+#define CONFIG_ESB_RX_METADATA 1
 #define CONFIG_ESB_RX_FIFO_SIZE 3
 #define ESB_PROTOCOL_ESB_DPL 1
 #define ESB_MODE_PTX 2

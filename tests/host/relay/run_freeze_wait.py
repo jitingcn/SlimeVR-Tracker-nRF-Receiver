@@ -1,11 +1,19 @@
 """Execute the production callback's RTC wait with a stopped clock."""
 from pathlib import Path
+import re
 import subprocess,tempfile
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness'))
+from c_extract import extract_block
 s=(Path(__file__).resolve().parents[3]/'src/connection/esb.c').read_text()
+diag=extract_block(s, r'^struct relay_control_diagnostics\s*\{', semicolon=True)
+state=re.search(r'^static struct relay_control_diagnostics relay_control_diag;', s, re.M).group()
 a=s.index('\tunsigned polls = 65536;');b=s.index('\tunsigned key = irq_lock();',a)
 code='''#include <stdint.h>
+#include <stdbool.h>
 #include <errno.h>
 #include <assert.h>
+'''+diag+'\n'+state+'''
 struct work {unsigned freeze_rtc;int result;};
 static struct {volatile unsigned COUNTER;} rtc;
 #define NRF_RTC1 (&rtc)
@@ -14,8 +22,8 @@ static void k_sem_give(int *p){++*p;}
 static void wait(struct work *w){
 '''+s[a:b]+'''}
 int main(void){struct work w={.freeze_rtc=100};rtc.COUNTER=97;wait(&w);
-assert(w.result==-ETIMEDOUT && relay_freeze_done==1);
-rtc.COUNTER=100;w.result=0;wait(&w);assert(w.result==0 && relay_freeze_done==1);}
+assert(w.result==-ETIMEDOUT && relay_freeze_done==1 && relay_control_diag.freeze_timeout==1);
+rtc.COUNTER=100;w.result=0;wait(&w);assert(w.result==0 && relay_freeze_done==1 && relay_control_diag.freeze_timeout==1);}
 '''
 with tempfile.TemporaryDirectory() as t:
  p=Path(t);(p/'t.c').write_text(code);subprocess.run(['cc','-Wall','-Werror',str(p/'t.c'),'-o',str(p/'t')],check=True);subprocess.run([str(p/'t')],check=True)

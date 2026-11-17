@@ -724,7 +724,7 @@ static struct relay_runtime_settings relay_settings = {
 };
 static struct relay_runtime_settings relay_applied_settings;
 static uint32_t relay_settings_generation = 1, relay_applied_generation;
-static struct relay_geometry relay_receiver_geometry = {16, 1, 16, 120, 288, 1, 0};
+static struct relay_geometry relay_receiver_geometry = {16, 1, 16, 120, 292, 1, 0};
 const struct relay_geometry *relay_geometry_active = &relay_receiver_geometry;
 struct relay_timeline relay_timeline_active;
 
@@ -753,13 +753,6 @@ static void relay_frame_announce(uint32_t frame, uint32_t start)
 		relay_frame_repairs(frame + 1U),
 		relay_frame_repairs(frame + 2U),
 		RELAY_SLOT_TICKS,
-		relay_geometry_current()->tps
-	);
-	relay_runtime_anchor_control_repeat(
-		&a,
-		relay_frame_repairs(frame),
-		relay_frame_repairs(frame + 1U),
-		relay_frame_repairs(frame + 2U),
 		relay_geometry_current()->tps,
 		relay_applied_settings.control_repeat_mode
 	);
@@ -863,8 +856,8 @@ struct relay_control_diagnostics {
 	bool repeat, seen, failed_arm_repeat, failed_arm_seen;
 };
 static struct relay_control_diagnostics relay_control_diag;
-/* The control frame timing, ticks: launch past preamble - TX_OFFSET (count, max), plan and grant work (max). */
-static uint32_t relay_control_late, relay_control_late_max, relay_control_plan_max, relay_control_grant_max;
+/* Arm deadline misses, preparation work, and freeze-to-finish work. */
+static uint32_t relay_control_late, relay_control_plan_max, relay_control_grant_max;
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
 static uint32_t relay_control_arm_cycles_max;
 static uint32_t relay_control_encode_cycles_max;
@@ -6447,8 +6440,8 @@ void esb_relay_print_status(void)
 	printk("relay: profile=%u control_sent=%u control_failed=%u last_err=%d\n", relay_profile, relay_control_sent,
 		relay_control_failed, relay_control_err);
 	printk("relay: control_repeat_sent=%u control_repeat_failed=%u last_err=%d\n", relay_control_repeat_sent, relay_control_repeat_failed, relay_control_repeat_err);
-	printk("relay: control late=%u late_max=%u plan_max=%u grant_max=%u ticks\n", relay_control_late,
-		relay_control_late_max, relay_control_plan_max, relay_control_grant_max);
+	printk("relay: control arm_late=%u freeze_entry_lag_max=%u plan_max=%u grant_max=%u ticks\n", relay_control_late,
+		relay_control_entry_max, relay_control_plan_max, relay_control_grant_max);
 	printk("relay: learning irq_max=%u ticks\n", relay_learn_lock_max);
 	printk("relay: HID enqueued=%u refused_attempts=%u dropped_output=%u overflow=%u\n",
 		relay_hid_enqueued, relay_hid_refused, relay_hid_dropped_output, relay_hid_overflow);
@@ -6652,9 +6645,29 @@ struct relay_control_work {
 	struct relay_control_crc_plan crc;
 	uint32_t start_event;
 	volatile int result;
-	uint32_t freeze_rtc;
+	uint32_t freeze_rtc, launch_rtc, entry_lag;
 	uint32_t generation;
+	bool repeat;
 };
+
+/* RTC1 is 24 bit. Distances are bounded to a small part of one wrap. */
+static int32_t relay_launch_margin(uint32_t launch, uint32_t now)
+{
+	uint32_t delta = (launch - now) & 0x00ffffffU;
+	return (int32_t)(delta ^ 0x00800000U) - 0x00800000;
+}
+
+static void relay_arm_failure(const struct relay_control_work *w, int32_t before, int err)
+{
+	relay_control_diag.failed_arm_frame = w->control->frame;
+	relay_control_diag.failed_arm_repeat = w->repeat;
+	relay_control_diag.failed_arm_entry_lag = w->entry_lag;
+	relay_control_diag.failed_arm_before = before;
+	relay_control_diag.failed_arm_after = relay_launch_margin(w->launch_rtc, NRF_RTC1->COUNTER);
+	relay_control_diag.failed_arm_err = err;
+	relay_control_diag.failed_arm_seen = true;
+	relay_control_late += err == -ETIME;
+}
 
 /* Keep the five-age work out of the static encoder's register lifetime. */
 __attribute__((noipa, optimize("O3"))) static RELAY_RAMFUNC void
@@ -6684,25 +6697,45 @@ static RELAY_RAMFUNC int relay_freeze_arm(struct relay_coord *rc, const struct r
 	uint32_t cycles = DWT->CYCCNT;
 #endif
 	struct relay_control *c = w->control;
-	if (!relay_profile || relay_epoch != c->epoch || relay_session != c->session) return -ESTALE;
-	if (!atomic_cas(&radio_operation_busy, 0, 1)) return -EBUSY;
+	if (!relay_profile || relay_epoch != c->epoch || relay_session != c->session
+	    || w->generation != relay_layout_generation) {
+		relay_control_diag.stale_cancel++;
+		return -ESTALE;
+	}
+	if (!atomic_cas(&radio_operation_busy, 0, 1)) {
+		relay_control_diag.begin_failed++;
+		relay_control_diag.begin_err = -EBUSY;
+		return -EBUSY;
+	}
 	int err = esb_prx_tx_begin();
-	if (err) goto failed;
-	for (unsigned age = 0; age < RELAY_CACHE_FRAMES; age++) {
-		const struct rc_receipt *r = &rc->receipt[w->plan->receipt_index[age]];
-		relay_control_missing(c, age) = c->expected & ~(r->frame == c->frame - age ? r->received : 0);
+	if (err) {
+		relay_control_diag.begin_failed++;
+		relay_control_diag.begin_err = err;
+		goto failed;
 	}
 	/* Arm the immutable radio schedule before encoding the frozen masks.
 	 * TIMER delays TXEN by 21 us after the launch edge, then RADIO ramps
 	 * for 40 us before START consumes the DMA payload. */
+	int32_t before = relay_launch_margin(w->launch_rtc, NRF_RTC1->COUNTER);
 	err = esb_prx_tx_arm_event(k_ticks_to_us_floor32(RELAY_TX_OFFSET) - 40U, w->start_event);
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
 	uint32_t armed = DWT->CYCCNT;
 #endif
-	if (err) goto failed;
+	if (err) {
+		relay_control_diag.arm_failed++;
+		relay_control_diag.arm_err = err;
+		relay_arm_failure(w, before, err);
+		goto failed;
+	}
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
 	relay_control_arm_cycles_max = MAX(relay_control_arm_cycles_max, armed - cycles);
 #endif
+	/* IRQs remain locked from the freeze through the arm, and the radio is
+	 * claimed by this callback. Receipt state cannot change in between. */
+	for (unsigned age = 0; age < RELAY_CACHE_FRAMES; age++) {
+		const struct rc_receipt *r = &rc->receipt[w->plan->receipt_index[age]];
+		relay_control_missing(c, age) = c->expected & ~(r->frame == c->frame - age ? r->received : 0);
+	}
 	if (c->on_demand) {
 		relay_freeze_demand(rc, w);
 	} else {
@@ -6783,17 +6816,29 @@ relay_repeat_encode(uint8_t *out, const uint8_t *first, uint32_t preamble)
 	out[71] = v;
 }
 
-__attribute__((noipa, optimize("O3"))) static RELAY_RAMFUNC int relay_repeat_arm(uint32_t event, uint32_t generation)
+__attribute__((noipa, optimize("O3"))) static RELAY_RAMFUNC int relay_repeat_arm(const struct relay_control_work *w)
 {
-	if (generation != relay_layout_generation) {
+	if (w->generation != relay_layout_generation) {
+		relay_control_diag.stale_cancel++;
 		return -ESTALE;
 	}
 	if (!atomic_cas(&radio_operation_busy, 0, 1)) {
+		relay_control_diag.begin_failed++;
+		relay_control_diag.begin_err = -EBUSY;
 		return -EBUSY;
 	}
 	int err = esb_prx_tx_begin();
-	if (!err) {
-		err = esb_prx_tx_arm_event(k_ticks_to_us_floor32(RELAY_TX_OFFSET) - 40U, event);
+	if (err) {
+		relay_control_diag.begin_failed++;
+		relay_control_diag.begin_err = err;
+	} else {
+		int32_t before = relay_launch_margin(w->launch_rtc, NRF_RTC1->COUNTER);
+		err = esb_prx_tx_arm_event(k_ticks_to_us_floor32(RELAY_TX_OFFSET) - 40U, w->start_event);
+		if (err) {
+			relay_control_diag.arm_failed++;
+			relay_control_diag.arm_err = err;
+			relay_arm_failure(w, before, err);
+		}
 	}
 	if (err) {
 		atomic_set(&radio_operation_busy, 0);
@@ -6811,6 +6856,7 @@ static void relay_freeze_callback(int32_t channel, uint64_t expires, void *conte
 	unsigned polls = 65536;
 	while ((int32_t)((NRF_RTC1->COUNTER - w->freeze_rtc) << 8) < 0) {
 		if (!--polls) {
+			relay_control_diag.freeze_timeout++;
 			w->result = -ETIMEDOUT;
 			k_sem_give(&relay_freeze_done);
 			return;
@@ -6818,13 +6864,12 @@ static void relay_freeze_callback(int32_t channel, uint64_t expires, void *conte
 	}
 	unsigned key = irq_lock();
 	uint32_t lag = (NRF_RTC1->COUNTER - w->freeze_rtc) & 0x00ffffffU;
+	w->entry_lag = lag;
 	int err = relay_freeze_arm(&relay_coord, w);
 	if (!err) relay_control_grant_max = MAX(relay_control_grant_max,
 		(NRF_RTC1->COUNTER - w->freeze_rtc) & 0x00ffffffU);
 	relay_control_entry_late += lag > 0;
 	relay_control_entry_max = MAX(relay_control_entry_max, lag);
-	relay_control_late += err == -ETIME;
-	relay_control_late_max = MAX(relay_control_late_max, lag);
 	if (!err) {
 		relay_coord_read_grants(w->control, w->wire);
 		relay_grants = *w->control;
@@ -6848,15 +6893,105 @@ static void relay_repeat_callback(int32_t channel, uint64_t expires, void *conte
 	unsigned polls = 65536;
 	while ((int32_t)((NRF_RTC1->COUNTER - w->freeze_rtc) << 8) < 0) {
 		if (!--polls) {
+			relay_control_diag.freeze_timeout++;
 			w->result = -ETIMEDOUT;
 			k_sem_give(&relay_freeze_done);
 			return;
 		}
 	}
 	unsigned key = irq_lock();
-	w->result = relay_repeat_arm(w->start_event, w->generation);
+	uint32_t lag = (NRF_RTC1->COUNTER - w->freeze_rtc) & 0x00ffffffU;
+	w->entry_lag = lag;
+	relay_control_entry_late += lag > 0;
+	relay_control_entry_max = MAX(relay_control_entry_max, lag);
+	w->result = relay_repeat_arm(w);
 	irq_unlock(key);
 	k_sem_give(&relay_freeze_done);
+}
+
+/* Callback dispatches two ticks before the preserved RX freeze. */
+#define RELAY_CONTROL_CALLBACK_LEAD_TICKS (RELAY_CONTROL_ARM_GUARD_TICKS + 3U)
+#define RELAY_RTC_MIN_LEAD_TICKS 3U
+
+/* Select a target without moving the receive/demand timeline into the future. */
+static bool relay_control_target(uint32_t now, uint32_t sent, bool sent_valid,
+				 uint32_t *frame, uint32_t *preamble)
+{
+	uint32_t current = relay_timeline_active.frame;
+	uint32_t candidate = current;
+	if (sent_valid && (int32_t)(sent - current) >= 0) {
+		if (sent != current) {
+			return false;
+		}
+		candidate++;
+	}
+	for (; (uint32_t)(candidate - current) <= 1U; candidate++) {
+		uint32_t start;
+		if (!relay_timeline_start(&relay_timeline_active, candidate, &start)) {
+			return false;
+		}
+		uint32_t at = start + RELAY_CONTROL_PREAMBLE;
+		if ((int32_t)(at - now) >=
+		    (int32_t)(RELAY_TX_OFFSET + RELAY_CONTROL_CALLBACK_LEAD_TICKS + RELAY_RTC_MIN_LEAD_TICKS)) {
+			*frame = candidate;
+			*preamble = at;
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool relay_control_compare_ready(uint64_t target, uint64_t now)
+{
+	return target > now && target - now >= RELAY_RTC_MIN_LEAD_TICKS;
+}
+
+static void relay_control_cancel(int32_t launch_channel, int32_t freeze_channel)
+{
+	z_nrf_rtc_timer_abort(launch_channel);
+	z_nrf_rtc_timer_abort(freeze_channel);
+}
+
+/* Caller holds irq_lock. No failed setup may retain a stack callback. */
+static int relay_control_schedule(int32_t launch_channel, int32_t freeze_channel, uint64_t launch_rtc,
+				 z_nrf_rtc_timer_compare_handler_t callback, struct relay_control_work *work)
+{
+	int err;
+	if (launch_rtc < RELAY_CONTROL_CALLBACK_LEAD_TICKS) {
+		goto late;
+	}
+	uint64_t callback_rtc = launch_rtc - RELAY_CONTROL_CALLBACK_LEAD_TICKS;
+	uint64_t now = z_nrf_rtc_timer_read();
+	relay_control_diag.callback_margin = (int32_t)(callback_rtc - now);
+	if (!relay_control_compare_ready(callback_rtc, now)) {
+		goto late;
+	}
+	work->launch_rtc = (uint32_t)launch_rtc;
+	work->freeze_rtc = (uint32_t)(launch_rtc - RELAY_CONTROL_ARM_GUARD_TICKS - 1U);
+	err = z_nrf_rtc_timer_exact_set(launch_channel, launch_rtc, NULL, NULL);
+	if (err) {
+		relay_control_diag.launch_failed++;
+		relay_control_diag.launch_err = err;
+		goto failed;
+	}
+	now = z_nrf_rtc_timer_read();
+	relay_control_diag.callback_margin = (int32_t)(callback_rtc - now);
+	if (!relay_control_compare_ready(callback_rtc, now)) {
+		goto late;
+	}
+	err = z_nrf_rtc_timer_exact_set(freeze_channel, callback_rtc, callback, work);
+	if (err) {
+		relay_control_diag.callback_failed++;
+		relay_control_diag.callback_err = err;
+		goto failed;
+	}
+	return 0;
+late:
+	relay_control_diag.preparation_late++;
+	err = -ETIME;
+failed:
+	relay_control_cancel(launch_channel, freeze_channel);
+	return err;
 }
 
 static bool relay_control_context_current(const struct relay_control *control, uint32_t origin);
@@ -6940,13 +7075,17 @@ static void relay_control_thread(void)
 	 * ran before freeze. The channel is owned for this thread's lifetime. */
 	(void)z_nrf_rtc_timer_compare_int_lock(rtc_channel);
 	uint32_t launch_event = z_nrf_rtc_timer_compare_evt_address_get(rtc_channel);
-	uint32_t sent = UINT32_MAX;
-	uint8_t epoch = 0;
+	uint32_t sent = 0, sent_generation = 0, sent_session = 0;
+	bool sent_valid = false;
 	for (;;) {
 		unsigned key = irq_lock();
 		IRQ_PROBE_BEGIN(plan);
 		bool active = relay_control_eligible();
 		uint32_t origin = relay_origin;
+		uint32_t generation = relay_layout_generation;
+		if (sent_generation != generation || sent_session != relay_session) {
+			sent_valid = false;
+		}
 		uint32_t now = (uint32_t)k_uptime_ticks();
 		uint32_t frame = relay_timeline_active.frame, start;
 		unsigned advances = 0;
@@ -6955,26 +7094,26 @@ static void relay_control_thread(void)
 			frame++;
 			relay_frame_announce(frame, start);
 		}
-		uint32_t preamble = relay_frame_start(origin, frame) + RELAY_CONTROL_PREAMBLE;
 		relay_frame_anchor = frame;
-		relay_start_anchor = preamble - RELAY_CONTROL_PREAMBLE;
-		if (!active || (sent == frame && epoch == relay_epoch)) {
+		relay_start_anchor = relay_frame_start(origin, frame);
+		uint32_t preamble;
+		if (!active || !relay_control_target(now, sent, sent_valid, &frame, &preamble)) {
 			IRQ_PROBE_END(plan);
 			irq_unlock(key);
 			k_usleep(200);
 			continue;
 		}
-		/* Plan the watch map early in the frame; only the masks wait for
-		 * the freeze. With 11 members planning takes up to ~0.4 ms. */
+		/* Small layouts can prepare in the preceding frame's vacant tail.
+		 * Only the receipt masks and final grants wait for the freeze. */
 		int32_t lead = preamble - now;
 		uint32_t plan_lead = relay_plan_lead((uint16_t)tdma_active_mask);
 #if defined(CONFIG_RELAY_FORCE_FULL_FLEET_PLAN)
 		plan_lead = relay_plan_lead(UINT16_MAX);
 #endif
-		if (lead < 8 || lead > (int32_t)plan_lead) {
+		if (lead > (int32_t)plan_lead) {
 			IRQ_PROBE_END(plan);
 			irq_unlock(key);
-			k_usleep(lead > (int32_t)plan_lead ? k_ticks_to_us_floor32(lead - plan_lead) : 100);
+			k_usleep(k_ticks_to_us_floor32(lead - plan_lead));
 			continue;
 		}
 		struct relay_control control = {
@@ -6994,8 +7133,8 @@ static void relay_control_thread(void)
 		};
 		relay_control_set_next_repairs(&control, relay_frame_repairs(frame + 1U));
 		relay_control_set_next2_repairs(&control, relay_frame_repairs(frame + 2U));
-		uint32_t t_plan = (uint32_t)k_uptime_ticks();
-		/* Sole broadcast-thread ownership; the callback finishes before reuse.
+		uint32_t t_plan = now;
+		/* Sole control-thread ownership; the callback finishes before reuse.
 		 * Keep the five-age snapshot off the unchanged 1536-byte stack. */
 		static struct rc_grant_plan plan;
 		IRQ_PROBE_END(plan);
@@ -7005,7 +7144,8 @@ static void relay_control_thread(void)
 		struct relay_control_crc_plan crc_plan = relay_control_plan_crc(payload.data);
 		key = irq_lock();
 		IRQ_PROBE_RESTART(plan);
-		if (!relay_control_context_current(&control, origin)) {
+		if (!relay_control_context_current(&control, origin) || generation != relay_layout_generation) {
+			relay_control_diag.stale_cancel++;
 			IRQ_PROBE_END(plan);
 			irq_unlock(key);
 			continue;
@@ -7022,21 +7162,31 @@ static void relay_control_thread(void)
 			.crc = crc_plan,
 			.start_event = launch_event,
 			.result = -ETIMEDOUT,
-			.generation = relay_layout_generation,
+			.generation = generation,
 		};
-		relay_control_plan_max = MAX(relay_control_plan_max, (uint32_t)k_uptime_ticks() - t_plan);
+		relay_control_diag.seen = true;
+		relay_control_diag.repeat = false;
+		relay_control_diag.frame = frame;
+		relay_control_diag.admission_lead = lead;
+		relay_control_diag.prepare_ticks = (uint32_t)k_uptime_ticks() - t_plan;
+		relay_control_plan_max = MAX(relay_control_plan_max, relay_control_diag.prepare_ticks);
 		uint32_t launch_tick = preamble - RELAY_TX_OFFSET;
 		uint64_t plan_ticks = k_uptime_ticks();
 		uint64_t launch_rtc = z_nrf_rtc_timer_get_ticks(K_TIMEOUT_ABS_TICKS(
 			plan_ticks + (int32_t)(launch_tick - (uint32_t)plan_ticks)));
-		int schedule_err = z_nrf_rtc_timer_exact_set(rtc_channel, launch_rtc, NULL, NULL);
-		work.freeze_rtc = (uint32_t)(launch_rtc - 1U);
-		if (!schedule_err && wire) {
-			schedule_err = z_nrf_rtc_timer_exact_set(freeze_channel, launch_rtc - 3U,
-				relay_freeze_callback, &work);
+		int schedule_err;
+		if (!wire) {
+			relay_control_diag.prepare_failed++;
+			relay_control_cancel(rtc_channel, freeze_channel);
+			schedule_err = -EBUSY;
+		} else {
+			schedule_err = relay_control_schedule(rtc_channel, freeze_channel, launch_rtc,
+							      relay_freeze_callback, &work);
 		}
 		sent = frame;
-		epoch = control.epoch;
+		sent_valid = true;
+		sent_generation = generation;
+		sent_session = control.session;
 		IRQ_PROBE_END(plan);
 		irq_unlock(key);
 		if (schedule_err || !wire) {
@@ -7050,7 +7200,18 @@ static void relay_control_thread(void)
 		int err = work.result;
 		if (!err) {
 			err = esb_prx_tx_wait(k_ticks_to_us_ceil32(RELAY_CONTROL_PREP_LEAD_TICKS));
+			if (err) {
+				unsigned int failure_key = irq_lock();
+				relay_control_diag.wait_failed++;
+				relay_control_diag.wait_err = err;
+				irq_unlock(failure_key);
+			}
 			atomic_set(&radio_operation_busy, 0);
+		}
+		if (err) {
+			key = irq_lock();
+			relay_control_cancel(rtc_channel, freeze_channel);
+			irq_unlock(key);
 		}
 		/* Re-encode only the timestamp/type/CRC outside the frozen path. The
 		 * grants and current/next/next2 plan are the first copy's immutable bytes. */
@@ -7062,19 +7223,31 @@ static void relay_control_thread(void)
 								  control.slot_ticks,
 								  control.control_repeat_mode
 							);
+			uint32_t repeat_prepare_started = (uint32_t)k_uptime_ticks();
 			relay_repeat_encode(payload.data, work.wire, repeat);
 			key = irq_lock();
-			bool current = relay_control_context_current(&control, origin);
+			bool current = relay_control_context_current(&control, origin)
+				&& work.generation == relay_layout_generation;
 			wire = current ? esb_prx_tx_prepare(&payload) : NULL;
 			uint64_t ticks = k_uptime_ticks();
 			uint64_t repeat_rtc = z_nrf_rtc_timer_get_ticks(
 				K_TIMEOUT_ABS_TICKS(ticks + (int32_t)(repeat - RELAY_TX_OFFSET - (uint32_t)ticks))
 			);
-			work.freeze_rtc = (uint32_t)(repeat_rtc - 1U);
 			work.result = -ETIMEDOUT;
-			int schedule = !wire ? -ESTALE : z_nrf_rtc_timer_exact_set(rtc_channel, repeat_rtc, NULL, NULL);
-			if (!schedule) {
-				schedule = z_nrf_rtc_timer_exact_set(freeze_channel, repeat_rtc - 3U, relay_repeat_callback, &work);
+			work.repeat = true;
+			relay_control_diag.repeat = true;
+			relay_control_diag.admission_lead = (int32_t)(repeat - repeat_prepare_started);
+			relay_control_diag.prepare_ticks = (uint32_t)ticks - repeat_prepare_started;
+			int schedule;
+			if (!current) {
+				relay_control_diag.stale_cancel++;
+				schedule = -ESTALE;
+			} else if (!wire) {
+				relay_control_diag.prepare_failed++;
+				schedule = -EBUSY;
+			} else {
+				schedule = relay_control_schedule(rtc_channel, freeze_channel, repeat_rtc,
+								 relay_repeat_callback, &work);
 			}
 			irq_unlock(key);
 			if (!schedule) {
@@ -7082,8 +7255,19 @@ static void relay_control_thread(void)
 				schedule = work.result;
 				if (!schedule) {
 					schedule = esb_prx_tx_wait(k_ticks_to_us_ceil32(RELAY_CONTROL_PREP_LEAD_TICKS));
+					if (schedule) {
+						unsigned int failure_key = irq_lock();
+						relay_control_diag.wait_failed++;
+						relay_control_diag.wait_err = schedule;
+						irq_unlock(failure_key);
+					}
 					atomic_set(&radio_operation_busy, 0);
 				}
+			}
+			if (schedule) {
+				key = irq_lock();
+				relay_control_cancel(rtc_channel, freeze_channel);
+				irq_unlock(key);
 			}
 			relay_control_repeat_sent += schedule == 0;
 			relay_control_repeat_failed += schedule != 0;

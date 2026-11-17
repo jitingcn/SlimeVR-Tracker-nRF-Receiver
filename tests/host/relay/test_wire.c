@@ -126,13 +126,13 @@ static void cadence(void)
 			for (uint32_t f = 0; f < 120; f++) {
 				uint32_t start = relay_frame_start(origin, f);
 				uint32_t end = relay_frame_start(origin, f + 1);
-				assert(end - start == 273 || end - start == 274);
+				assert(end - start == RELAY_FRAME_TICKS_MAX);
 				for (uint32_t t = 0; t < end - start; t++) {
 					assert(relay_frame_at_tick(origin, start + t) == f);
 				}
 				assert(relay_frame_at_tick(origin, end) == f + 1);
 			}
-			assert(relay_frame_start(origin, 120) - origin == 32768);
+			assert(relay_frame_start(origin, 120) - origin == 120U * RELAY_FRAME_TICKS_MAX);
 		}
 	}
 	assert(relay_direct_payload_max(1, 10) == 32 && relay_direct_payload_max(1, 9) == 60);
@@ -160,7 +160,8 @@ static void frame_epochs(void)
 		uint32_t f=relay_frame_at_tick64(0,t);
 		uint32_t start=relay_frame_start((uint32_t)origin,f);
 		for (int d=-4; d<=550; d++) {
-			uint64_t absolute=origin+(uint64_t)(f/15)*4096+(f%15)*4096/15+d;
+			uint64_t absolute=origin+(uint64_t)(f/RELAY_GRID_FRAMES)*RELAY_GRID_TICKS
+				+(f%RELAY_GRID_FRAMES)*RELAY_GRID_TICKS/RELAY_GRID_FRAMES+d;
 			if (absolute<origin) continue;
 			assert(relay_frame_near(f,start,(uint32_t)absolute)==relay_frame_at_tick64(origin,absolute));
 		}

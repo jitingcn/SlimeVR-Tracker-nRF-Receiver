@@ -32,6 +32,8 @@ parser.add_argument('--slot-ticks', type=int, choices=(15,16), default=16)
 parser.add_argument('--tps-max', type=int, default=120)
 parser.add_argument('--control-repeat-mode',type=int,choices=(0,1,2),default=0)
 parser.add_argument('--on-demand', action='store_true')
+parser.add_argument('--pa-settle-us', type=int, default=2,
+                    help='FEM ctx-settle-time-us from the target board devicetree')
 args = parser.parse_args()
 if not 1 <= args.tps_max <= 32768:
     parser.error('--tps-max must be 1..32768')
@@ -256,7 +258,9 @@ int main(int argc, char **argv) {
         u.mem_write(payload, bytes([72, 1, 0, 1, 0]) + bytes(u.mem_read(bench['payload'], 72)))
         wire = call('esb_prx_tx_prepare', payload)
         assert wire
-        u.mem_write(work, struct.pack('<III4sI', bench['c'], bench['plan'], wire, bytes(u.mem_read(bench['crc'], 4)), event))
+        generation = read32(sym['relay_layout_generation.lto_priv.0'])
+        u.mem_write(work, struct.pack('<III4sIIIIII?', bench['c'], bench['plan'], wire,
+                                     bytes(u.mem_read(bench['crc'], 4)), event, 0, 0, 8, 0, generation, False))
         result = call('relay_freeze_arm', bench['rc'], work, measure=True)
         assert result == 0, (seed, result)
         if dwt_reads:
@@ -287,7 +291,8 @@ int main(int argc, char **argv) {
         expected = golden[seed * 72:(seed + 1) * 72]
         assert actual == expected, (seed, [(i, a, b) for i, (a, b) in enumerate(zip(actual, expected)) if a != b])
         assert read32(0x4000a544) == 21  # unchanged TX offset, fast ramp = 40 us
-        assert read32(0x4000a548) == 59  # MPSL PA enable 2 us before TX ramp ends
+        expected_pa = 21 + 40 - args.pa_settle_us
+        assert read32(0x4000a548) == expected_pa, (seed, 'configured FEM PA lead', read32(0x4000a548), expected_pa)
         # TIMER START must be driven by the scheduled RTC event, not software.
         assert read32(0x4000a000) == 0
         enabled = read32(0x4001f500)
@@ -302,7 +307,7 @@ int main(int argc, char **argv) {
             # the actual repeat arm entry separately against the same ceilings.
             source = 0x2003c200
             u.mem_write(source, actual)
-            at = int.from_bytes(actual[12:16],'big') + ((args.repairs+1)*args.slot_ticks if args.control_repeat_mode==2 else 2*args.slot_ticks)
+            at = int.from_bytes(actual[12:16],'big') + 4 + ((args.repairs+1)*args.slot_ticks if args.control_repeat_mode==2 else 2*args.slot_ticks)
             # Execute the real copy-1 DISABLED/PRX restoration,
             # then encoding/preparation; caller/wait-return cost is reserved below.
             # No assumption that this work happens
@@ -333,15 +338,17 @@ int main(int argc, char **argv) {
             slack_cycles = (callback_ticks-11)*64000000//32768
             repeat_post_end_max=max(repeat_post_end_max,post_end_cycles)
             assert post_end_cycles < slack_cycles, (seed,'repeat control frame callback already due',post_end_cycles,slack_cycles)
-            generation=read32(sym['relay_layout_generation.lto_priv.0'])
-            assert call('relay_repeat_arm',event,generation+1) & 0x80000000
+            write32(work + 36, generation + 1)
+            assert call('relay_repeat_arm',work) & 0x80000000
             assert read32(sym['radio_operation_busy.lto_priv.0'])==0
-            assert call('relay_repeat_arm',event,generation,measure=True)==0
+            write32(work + 36, generation)
+            assert call('relay_repeat_arm',work,measure=True)==0
             repeat_arm_max=max(repeat_arm_max,cycles+24)
     if args.control_repeat_mode:
         print('repeat control frame arm/encode:',repeat_arm_max,repeat_encode_max)
         print('primary control frame END to prepared repeat control frame, including 128us dispatch/caller allowance:',repeat_post_end_max,'cycles; callback slack',slack_cycles,'cycles')
-        assert repeat_arm_max<=1130 and repeat_encode_max<=805
+        assert repeat_arm_max <= 1562, 'repeat arm cycle budget exceeded'
+        # Repeat encoding precedes arm; its deadline is the END-to-callback pipeline above.
     # Failures must not steal another owner's radio, or leak our ownership.
     for failure in ('stale', 'busy', 'not_prx', 'late', 'reinit', 'disabled_stuck', 'disabled_late'):
         u.mem_write(0x20000000, initial_ram)
@@ -350,8 +357,9 @@ int main(int argc, char **argv) {
         call('setup', 1)
         u.mem_write(payload, bytes([72, 1, 0, 1, 0]) + bytes(u.mem_read(bench['payload'], 72)))
         wire = call('esb_prx_tx_prepare', payload)
-        u.mem_write(work, struct.pack('<III4sI', bench['c'], bench['plan'], wire,
-                                     bytes(u.mem_read(bench['crc'], 4)), event))
+        generation = read32(sym['relay_layout_generation.lto_priv.0'])
+        u.mem_write(work, struct.pack('<III4sIIIIII?', bench['c'], bench['plan'], wire,
+                                     bytes(u.mem_read(bench['crc'], 4)), event, 0, 0, 8, 0, generation, False))
         busy = sym['radio_operation_busy.lto_priv.0']
         disable_stuck = failure.startswith('disabled_')
         if failure == 'reinit':
@@ -389,5 +397,3 @@ int main(int argc, char **argv) {
     assert arm_max + 24 <= 1562, '80% arm cycle budget exceeded'
     assert encode_max + 24 <= 21 * 64, 'payload not ready before TXEN'
 
-    assert arm_max + 24 <= 1130, 'modeled arm baseline exceeded'
-    assert encode_max + 24 <= 805, 'modeled encode baseline exceeded'

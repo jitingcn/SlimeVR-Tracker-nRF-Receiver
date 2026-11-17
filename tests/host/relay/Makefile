@@ -52,6 +52,7 @@ check:
 	$(CC) $(CFLAGS) test_learn.c $(SRC)/relay_coord.c -o $(TMP)/test_learn
 	$(TMP)/test_learn
 	CC="$(CC)" python3 run_control.py
+	CC="$(CC)" python3 run_control_schedule.py
 	python3 check_protocol_sync.py
 	CC="$(CC)" python3 run_hid.py
 	CC="$(CC)" python3 run_deferred.py

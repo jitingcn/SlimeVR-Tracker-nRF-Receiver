@@ -648,7 +648,7 @@ static void runtime_settings_publication(void)
 	uint32_t next;
 	assert(relay_timeline_start(&relay_timeline_active, relay_timeline_active.frame, &start));
 	assert(relay_timeline_start(&relay_timeline_active, relay_timeline_active.frame + 1, &next));
-	assert(next - start == 320 && relay_applied_settings.max_repairs == 3);
+	assert(next - start == 324 && relay_applied_settings.max_repairs == 3);
 	/* Exercise actual publication across every threshold in both directions.
 	 * The old applied queue stays intact while the next publication is staged. */
 	for (unsigned target = 100; target <= 120; target += 20) {
@@ -685,7 +685,8 @@ static void runtime_settings_publication(void)
 						n,
 						relay_frame_repairs(relay_timeline_active.frame),
 						16,
-						120
+						120,
+						relay_applied_settings.control_repeat_mode
 					)
 				);
 				tdma_staged.valid = false;

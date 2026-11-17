@@ -40,7 +40,7 @@ static void policy(void)
 	for (unsigned f = 321; f < 500; f++) {
 		relay_demand_update(&d, f, 16, &(struct relay_runtime_settings){16, 3, 16, 100, 120, 1, 0});
 		for (unsigned k = 0; k < 3; k++) {
-			assert(relay_runtime_period(f + k, 16, d.queued[k], 16, 120) <= 32768 / 100);
+			assert(relay_runtime_period(f + k, 16, d.queued[k], 16, 120, 0) <= 32768 / 100);
 		}
 	}
 	s.repair_floor = 0;
@@ -340,7 +340,7 @@ static void simulate(unsigned members, unsigned mode, unsigned trace, unsigned f
 
 		if (f < frames) {
 			occupancy[c.repair_count]++;
-			ticks += relay_runtime_period(f, members, c.repair_count, 16, 120);
+			ticks += relay_runtime_period(f, members, c.repair_count, 16, 120, 0);
 		}
 		if (f >= 4 && f - 4 < frames) {
 			unsigned ri = (f - 4) % 5;

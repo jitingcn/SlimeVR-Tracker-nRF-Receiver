@@ -88,7 +88,7 @@ int main(void){
  for(unsigned target=100;target<=120;target+=20)for(unsigned n=1;n<=16;n++){
   struct relay_runtime_settings desired={16,5,16,target,120,5,0};
   struct relay_runtime_settings applied=relay_runtime_for_members(desired,n);
-  unsigned r=(target==120?17:20)-n-1;r=r>5?5:r<1?1:r;
+  unsigned slots=(32768U/target-4U)/16U;unsigned r=slots>n+1?slots-n-1:1;r=r>5?5:r;
   assert(applied.max_repairs==r && applied.repair_floor==r && desired.max_repairs==5);
   relay_applied_settings=applied;for(unsigned f=0;f<24;f++)assert(relay_frame_repairs(f)==(r==1 && f%8==0?2:r));
  }
