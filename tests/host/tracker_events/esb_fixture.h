@@ -1,5 +1,7 @@
 /* Hardware leaves only; parser and pairing-clear transaction are extracted verbatim. */
 #include <zephyr/kernel.h>
+static bool esb_ota_relay_is_active(void) { return false; }
+static bool receiver_ota_is_active(void) { return false; }
 #define MAX_TRACKERS 16
 #define ESB_COMPOSITE_TYPE 0xfe
 #define TEST_ALL_JOIN_CONFIG_GRACE_MS 1500

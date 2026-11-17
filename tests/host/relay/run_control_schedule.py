@@ -81,6 +81,7 @@ static uint32_t relay_control_late, relay_control_plan_max, relay_control_grant_
 static uint32_t relay_control_entry_late, relay_control_entry_max;
 static int relay_control_err;
 static int radio_operation_busy;
+static bool relay_control_ready;
 static int relay_freeze_done;
 '''
 prefix += '\n' + structure('relay_control_diagnostics')

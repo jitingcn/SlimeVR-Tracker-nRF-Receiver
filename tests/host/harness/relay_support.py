@@ -54,7 +54,7 @@ def relay_declarations(esb, member_diagnostics=True):
         diagnostics.append(re.search(r"^static struct relay_member_diagnostics relay_member_diag;", esb, re.M).group())
     # The publication-to-tdma_staged slice already contains control diagnostics.
     return "\n".join(['#include "relay_coord.c"', '#include "relay_demand.h"', defaults, runtime, *state, *diagnostics, stats.group(0), diag.group(0),
-                      publication.group(0),
+                      publication.group(0), "static atomic_t radio_operation_busy;",
                       "#if defined(CONFIG_TDMA_DIAGNOSTICS)\nstatic uint32_t tdma_stats_generation[MAX_TRACKERS];\n#endif",
                       "#define relay_hid_packet hid_write_packet_n\n#define relay_defer_capture relay_coord_capture\n#define relay_defer_report relay_coord_report",
                       "static struct { uint32_t CYCCNT; } fixture_dwt;",
@@ -62,7 +62,7 @@ def relay_declarations(esb, member_diagnostics=True):
                       "static inline void relay_rx_measure(uint32_t start) { (void)start; }",
                       _function(esb, "tdma_staged_due_locked"),
                       "__attribute__((constructor)) static void relay_fixture_init(void)"
-                      " { relay_coord_init(&relay_coord);"
+                      " { relay_coord_init(&relay_coord); relay_control_ready = true;"
                       " (void)relay_control_diag; (void)relay_member_diag; }", ""])
 
 def relay_query_helpers(esb, membership=False):

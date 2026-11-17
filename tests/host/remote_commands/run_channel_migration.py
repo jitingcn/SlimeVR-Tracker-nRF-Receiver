@@ -54,7 +54,7 @@ functions = [
     "esb_channel_is_busy", "radio_operation_begin", "esb_radio_operation_begin",
     "esb_radio_collection_begin", "esb_radio_operation_end",
     "channel_command_for_tracker", "esb_send_remote_command_arg", "esb_send_remote_command",
-    "channel_apply", "channel_change_begin", "channel_change_poll",
+    "channel_apply", "channel_change_poll",
     "esb_set_all_trackers_channel", "esb_clear_all_trackers_channel",
     "esb_auto_channel_request", "esb_set_receiver_channel", "esb_clear_receiver_channel",
     "esb_get_receiver_channel",
@@ -66,7 +66,7 @@ functions = [
 ]
 start = source.index("/* Migration owns an ACK overlay")
 end = source.index("bool esb_channel_is_busy", start)
-production = source[start:end]
+production = source[start:end] + "\nstatic int channel_change_begin(uint8_t, uint8_t, bool, uint8_t, uint32_t);\n"
 production += '\n'.join(re.findall(
     r'^static uint32_t decision_\w+[^;]*;', source, re.MULTILINE)) + '\n'
 production += extract.function(header, "esb_rf_channel_encode")
@@ -107,6 +107,7 @@ from relay_support import relay_section, relay_query_helpers, staging_helpers  #
 if "tdma_active_mask" not in prelude + production:
     production += "\n".join(re.findall(r"^static uint32_t tdma_active_mask;", source, re.MULTILINE)) + "\n"
 production += "\n" + relay_section(source, stats=False)
+production += "\n" + publication_function("channel_change_begin")
 production += "\n" + relay_query_helpers(source)
 production += "\n" + staging_helpers(source)
 production += '\n#include "tracker_event_protocol.h"\n'

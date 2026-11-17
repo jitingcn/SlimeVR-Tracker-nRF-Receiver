@@ -229,6 +229,8 @@ static void tdma_loss_reset_windows(void)
 	tdma_loss_pool_ticks = 0;
 }
 
+static atomic_t radio_operation_busy;
+
 static inline uint32_t tdma_pack_config(uint8_t slot, uint8_t total, uint8_t slot_ticks, uint8_t epoch)
 {
 	return ((uint32_t)slot << 24) | ((uint32_t)total << 16) | ((uint32_t)slot_ticks << 8) | (uint32_t)epoch;
@@ -815,6 +817,7 @@ struct tdma_publication {
 	uint8_t profile;
 };
 static uint8_t relay_profile;
+static bool relay_control_ready;
 static uint32_t relay_origin;
 /* Frame anchor survives profile-1 layout changes that clear current grants. */
 static uint32_t relay_frame_anchor, relay_start_anchor;
@@ -1189,7 +1192,9 @@ static void tdma_recalculate(bool forced)
 			tdma_cap_level = tdma_published_cap_level;
 		}
 #if defined(CONFIG_RELAY)
-		uint8_t profile = now >= relay_query_until && relay_coord.auto_engaged && relay_coord_ready(&relay_coord, (uint16_t)new_mask) ? RELAY_PROFILE_120HZ : 0;
+		uint8_t profile = relay_control_ready && !atomic_get(&radio_operation_busy)
+			&& !esb_ota_relay_is_active() && !receiver_ota_is_active()
+			&& now >= relay_query_until && relay_coord.auto_engaged && relay_coord_ready(&relay_coord, (uint16_t)new_mask) ? RELAY_PROFILE_120HZ : 0;
 		uint8_t slot_ticks = profile ? relay_settings.slot_ticks : tdma_slot_ticks_for(active_count);
 #else
 		uint8_t slot_ticks = tdma_slot_ticks_for(active_count);
@@ -5986,6 +5991,14 @@ static int channel_change_begin(uint8_t encoded, uint8_t command, bool manual,
 		}
 	}
 	unsigned int key = irq_lock();
+#if defined(CONFIG_RELAY)
+	if (relay_profile || (tdma_staged.valid && tdma_staged.p.profile)) {
+		irq_unlock(key);
+		k_mutex_unlock(&tracker_store_lock);
+		esb_radio_operation_end();
+		return -EBUSY;
+	}
+#endif
 	uint8_t home = esb_rf_channel_decode(receiver_rf_channel);
 	if (home == ESB_RF_CHANNEL_DEFAULT) {
 		home = RADIO_RF_CHANNEL;
@@ -6276,6 +6289,7 @@ bool esb_relay_blocks_ota(uint8_t id)
 	}
 	unsigned int key = irq_lock();
 	bool relayed = (relay_profile != 0)
+		|| (tdma_staged.valid && tdma_staged.p.profile)
 		|| !relay_coord_direct_ready(&relay_coord, id, k_uptime_get_32());
 	irq_unlock(key);
 	return relayed;
@@ -7075,6 +7089,9 @@ static void relay_control_thread(void)
 	 * ran before freeze. The channel is owned for this thread's lifetime. */
 	(void)z_nrf_rtc_timer_compare_int_lock(rtc_channel);
 	uint32_t launch_event = z_nrf_rtc_timer_compare_evt_address_get(rtc_channel);
+	unsigned ready_key = irq_lock();
+	relay_control_ready = true;
+	irq_unlock(ready_key);
 	uint32_t sent = 0, sent_generation = 0, sent_session = 0;
 	bool sent_valid = false;
 	for (;;) {

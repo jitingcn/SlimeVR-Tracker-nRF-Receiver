@@ -137,6 +137,8 @@ static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t length)
 /* DIAGNOSTIC DECLARATIONS */
 static uint32_t decision_ready_mask, decision_fence_mask;
 static bool esb_ota_relay_is_active(void) { return false; }
+static bool self_ota;
+static bool receiver_ota_is_active(void) { return self_ota; }
 static atomic_t test_all_state_valid, test_all_confirmed_mask;
 static void (*remote_confirm_cb)(uint8_t, uint8_t);
 static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return ticks; }
@@ -749,6 +751,21 @@ static void member_cap_relay_off(void)
 	}
 	assert(tdma_active_mask == 7 && !relay_profile && slot(tracker_slots[2].tdma_config_packed) != 0xff);
 	puts("PASS member cap: relay off keeps direct members above max_trackers");
+}
+
+static void relay_entry_fences(void)
+{
+ for (unsigned fence=0; fence<3; fence++) {
+  tdma_staged.valid=false;relay_profile=0;
+  two_member_layout(2, true);now_ms=6000;service();
+  relay_coord.enabled=true;relay_coord.auto_engaged=true;
+  relay_control_ready=fence!=0;radio_operation_busy=fence==1;self_ota=fence==2;
+  force_layout();assert(!relay_profile && !(tdma_staged.valid && tdma_staged.p.profile));
+  relay_control_ready=true;radio_operation_busy=0;self_ota=false;
+  force_layout();assert(tdma_staged.valid && tdma_staged.p.profile);
+  assert(esb_relay_blocks_ota(0));
+  tdma_staged.valid=false;relay_coord.auto_engaged=false;
+ }
 }
 
 static void automatic_profile_publication(void)
@@ -1397,6 +1414,7 @@ int main(int argc, char **argv)
     owner_store_lock_delay();
     restore_retry();
     staged_publication();
+	relay_entry_fences();
 	automatic_profile_publication();
 	automatic_reentry_continues_frames();
 	permission_off_keeps_control_through_exit();

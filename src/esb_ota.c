@@ -470,6 +470,13 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 
 		for (;;) {
 			unsigned int irq_key = irq_lock();
+#if defined(CONFIG_RELAY)
+			if (esb_relay_blocks_ota(tracker_id)) {
+				irq_unlock(irq_key);
+				if (acquired_radio) esb_radio_operation_end();
+				break;
+			}
+#endif
 			uint32_t now = k_uptime_ticks();
 			k_spinlock_key_t key = k_spin_lock(&ota_relay_lock);
 			struct ota_per_tracker *t = &ota_relay.tracker[tracker_id];
