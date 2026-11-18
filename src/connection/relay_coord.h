@@ -106,6 +106,9 @@ struct rc_receipt {
  * which it displaces repairs. */
 #define RC_MAINTENANCE_MS 997U
 #define RC_MAINTENANCE_URGENT_MS 3000U
+/* D16/R1 has a maintenance slot pair only every eighth frame. At the
+ * default 120 TPS cap, three 16-member rounds can take about 3.4 seconds. */
+#define RC_LAYOUT_SLOW_ACTIVATION_MS 3500U
 
 struct rc_peer {
 	uint16_t expected, heard;

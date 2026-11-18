@@ -1153,6 +1153,53 @@ static void relay_mode_transitions(void)
 	puts("PASS relay modes: auto default, force holds, auto follows demand, off stages exit, OTA and channel exclusion");
 }
 
+static void dense_relay_exit_announcement_lead(void)
+{
+	reset_fixture(RELAY_MAX_TRACKERS, 0);
+	relay_settings = (struct relay_runtime_settings){16, 5, 16, 120, 120, 5, 0};
+	relay_settings_generation++;
+	assert(tracker_store_restore() == 0);
+	for (uint8_t id = 0; id < RELAY_MAX_TRACKERS; ++id) {
+		relay_coord_note_caps(&relay_coord, id, RELAY_INFO_CAPS);
+		query_case_ping(id, ESB_PONG_FLAG_NORMAL);
+	}
+	service();
+	now_ms = 101;
+	service();
+	assert(tdma_active_mask == UINT16_MAX && !relay_profile);
+
+	now_ms = 2000;
+	esb_relay_set_mode(RELAY_MODE_FORCE);
+	service();
+	assert(tdma_staged.valid && tdma_staged.p.profile);
+	assert(tdma_staged.activation_ticks == ticks_at(now_ms) + k_ms_to_ticks_ceil32(RELAY_LAYOUT_ACTIVATION_MS));
+
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1U;
+	for (uint8_t id = 0; id < RELAY_MAX_TRACKERS; ++id) {
+		query_case_ping(id, ESB_PONG_FLAG_NORMAL);
+	}
+	service();
+	assert(relay_profile && relay_applied_settings.repair_floor == 1);
+
+	/* Seven R1 frames and one R2 maintenance frame per opportunity. */
+	uint32_t round_ticks = RELAY_MAX_TRACKERS * (
+		7U * relay_runtime_period(0, 16, 1, 16, 120, 0)
+		+ relay_runtime_period(0, 16, 2, 16, 120, 0));
+	assert(3U * round_ticks > k_ms_to_ticks_ceil32(RELAY_LAYOUT_ACTIVATION_MS));
+	assert(3U * round_ticks < k_ms_to_ticks_ceil32(RC_LAYOUT_SLOW_ACTIVATION_MS));
+	esb_relay_set_mode(RELAY_MODE_OFF);
+	service();
+	assert(tdma_staged.valid && !tdma_staged.p.profile);
+	assert(tdma_staged.activation_ticks == ticks_at(now_ms) + k_ms_to_ticks_ceil32(RC_LAYOUT_SLOW_ACTIVATION_MS));
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1U;
+	service();
+	assert(relay_profile && relay_control_eligible() && tdma_staged.valid);
+	now_ms += RC_LAYOUT_SLOW_ACTIVATION_MS - RELAY_LAYOUT_ACTIVATION_MS;
+	service();
+	assert(!relay_profile && !tdma_staged.valid);
+	puts("PASS dense relay exit: three maintenance rounds fit the staged lead");
+}
+
 /* Last modeled repair before the query-triggered native activation. */
 #define QUERY_CASE_LAST_REPAIR_MS (6000U + RELAY_LAYOUT_ACTIVATION_MS - 10U)
 
@@ -1532,6 +1579,7 @@ int main(int argc, char **argv)
 	member_cap_owner_blocks();
 	member_cap_relay_off();
 	relay_mode_transitions();
+	dense_relay_exit_announcement_lead();
 	query_membership_recovery(0, false);
 	query_membership_recovery(0, true);
 	query_membership_recovery((uint64_t)UINT32_MAX - 20000U, true);

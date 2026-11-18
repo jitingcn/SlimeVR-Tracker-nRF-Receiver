@@ -17,8 +17,10 @@ Equal requested floor/ceiling means static allocation at that derived R.
 the 120 TPS cap while spending more slots on repairs as membership grows.
 At sixteen members, 120 mode uses R1 and redundancy uses R3. Every eighth
 frame with nominal R1 still opens R2 for the two-attempt maintenance exchange.
-This yields 273/274-tick frames except 288 ticks at T15 maintenance, about
-119.185 TPS, and 288/304 ticks at T16, about 112.993 TPS. No guard is reduced.
+With the arming guard, T15/R1 uses 276-tick frames with 292 ticks for
+maintenance, about 117.87 TPS. T16/R1 uses 292/308 ticks, about 111.46 TPS.
+Three full T16/R1 maintenance rounds take about 3.45 s, so this applied
+layout retains a 3.5 s announcement lead.
 
 An explicit lower `repair_floor` opts into experimental on-demand repair.
 Its ceiling is the same per-member derived R, and its floor is clamped to

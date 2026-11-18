@@ -1307,15 +1307,20 @@ static void tdma_recalculate(bool forced)
 		tdma_last_reconfig_valid = true;
 #if defined(CONFIG_RELAY)
 		if ((!forced || relay_profile || profile) && active_count && tdma_staging_supported_locked(old_mask, new_mask)) {
+			/* The old layout carries the PONG announcements. Keep the longer
+			 * lead for slow or full-fleet layouts with sparse maintenance. */
+			uint32_t activation_ms = relay_profile && (relay_applied_settings.tps_max < 120U
+					|| (tdma_dynamic_active_count == RELAY_MAX_TRACKERS
+						&& relay_applied_settings.repair_floor < 2U))
+				? RC_LAYOUT_SLOW_ACTIVATION_MS : RELAY_LAYOUT_ACTIVATION_MS;
 			tdma_staged.p = pub;
 			tdma_staged.activation_ticks = (uint32_t)k_uptime_ticks()
-				+ (uint32_t)k_ms_to_ticks_ceil32(RELAY_LAYOUT_ACTIVATION_MS);
+				+ (uint32_t)k_ms_to_ticks_ceil32(activation_ms);
 			/* Quiet-zone admission fences the old layout; this activation
 			 * tick is the first start of the new membership's timeline. */
 			tdma_staged.valid = true;
 			irq_unlock(key);
-			LOG_INF("TDMA layout epoch %u staged: activates in %u ms", epoch,
-				(unsigned)RELAY_LAYOUT_ACTIVATION_MS);
+			LOG_INF("TDMA layout epoch %u staged: activates in %u ms", epoch, (unsigned)activation_ms);
 #else
 		if (!atomic_get(&tdma_shadow_pending_join_mask)) {
 			tdma_membership_deadline_armed = false;
@@ -2489,7 +2494,7 @@ static void esb_stats_thread(void)
 		 * so the coordinator pauses (and releases every role) meanwhile. */
 		{
 			uint32_t planned_power_down = tracker_events_power_down_mask(
-				k_uptime_get_32(), TDMA_SHADOW_LEAVE_GRACE_MS + 2U * RELAY_LAYOUT_ACTIVATION_MS
+				k_uptime_get_32(), TDMA_SHADOW_LEAVE_GRACE_MS + 2U * RC_LAYOUT_SLOW_ACTIVATION_MS
 					+ TDMA_RECONFIG_MIN_MS + 2U * TPS_MONITOR_INTERVAL_MS
 			);
 			unsigned int relay_key = irq_lock();
