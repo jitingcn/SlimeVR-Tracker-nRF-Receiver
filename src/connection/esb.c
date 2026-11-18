@@ -884,7 +884,9 @@ static bool relay_direct_pose;
 static struct {
 	struct tdma_publication p;
 	uint32_t activation_ticks;
+	uint16_t deferred_joins;
 	bool valid;
+	bool native_followup;
 } tdma_staged;
 
 static bool relay_layout_stageable(uint8_t direct)
@@ -989,12 +991,12 @@ static bool tdma_staged_due_locked(uint32_t now_ticks)
 	return tdma_staged.valid && (int32_t)(now_ticks - tdma_staged.activation_ticks) >= 0;
 }
 
-/* Relay switches reserve NORMAL clock PONGs for affected v5 members.
- * A native-only change leaves the command path available. */
+/* Reserve NORMAL clock PONGs for relay switches and their follow-up joins.
+ * Ordinary native-only changes leave the command path available. */
 static inline uint32_t tdma_staged_pong_mask(uint32_t now_ticks)
 {
 	return tdma_staged.valid && !tdma_staged_due_locked(now_ticks)
-		&& (relay_profile || tdma_staged.p.profile)
+		&& (relay_profile || tdma_staged.p.profile || tdma_staged.native_followup)
 		? tdma_active_mask | tdma_staged.p.new_mask : 0;
 }
 
@@ -1211,6 +1213,14 @@ static void tdma_recalculate(bool forced)
 				return;
 			}
 			struct tdma_publication due = tdma_staged.p;
+			if ((relay_profile && !due.profile) || tdma_staged.native_followup) {
+				/* Joiners outside the announced tuple must wait through a second
+				 * activation. Include evidence that the owner has yet to merge. */
+				tdma_staged.deferred_joins
+					= (uint16_t)((uint32_t)atomic_get(&tdma_shadow_live_evidence_mask) & ~due.new_mask);
+			} else {
+				tdma_staged.deferred_joins &= ~due.new_mask;
+			}
 			tdma_staged.valid = false;
 			tdma_apply_locked(&due, now);
 			irq_unlock(key);
@@ -1242,6 +1252,9 @@ static void tdma_recalculate(bool forced)
 			new_mask = relay_mask;
 		}
 		uint8_t profile = relay_requested ? RELAY_PROFILE_120HZ : 0;
+		tdma_staged.deferred_joins &= (uint32_t)atomic_get(&tdma_shadow_live_evidence_mask);
+		bool native_followup = !relay_profile && !profile && old_mask
+			&& (new_mask & tdma_staged.deferred_joins);
 #endif
 		uint8_t active_count = 0;
 		for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
@@ -1362,12 +1375,15 @@ static void tdma_recalculate(bool forced)
 		/* Stage the final native tuple for the current relay roster. Legacy
 		 * joiners see their old unassigned tuple until the same activation. */
 		uint32_t announce_mask = relay_profile && !profile && (old_mask & new_mask) ? old_mask : new_mask;
-		if ((!forced || relay_profile || profile) && active_count
-		    && tdma_staging_supported_locked(old_mask, announce_mask)) {
+		/* Only v5 trackers can follow a staged PONG. A legacy joiner
+		 * keeps seeing an unassigned slot until the follow-up takes effect. */
+		if (native_followup || ((!forced || relay_profile || profile) && active_count
+		    && tdma_staging_supported_locked(old_mask, announce_mask))) {
 			/* The applied layout carries the announcements. */
 			uint32_t lead = relay_profile ? relay_stage_lead_ticks(&relay_applied_settings, tdma_dynamic_active_count)
 				: k_ms_to_ticks_ceil32(RELAY_LAYOUT_ACTIVATION_MS);
 			tdma_staged.p = pub;
+			tdma_staged.native_followup = native_followup;
 			tdma_staged.activation_ticks = (uint32_t)k_uptime_ticks() + lead;
 			/* Quiet-zone admission fences the old layout; this activation
 			 * tick is the first start of the new membership's timeline. */
@@ -1395,6 +1411,7 @@ static void tdma_recalculate(bool forced)
 			return;
 		}
 #if defined(CONFIG_RELAY)
+		tdma_staged.deferred_joins &= ~pub.new_mask;
 		tdma_staged.activation_ticks = (uint32_t)k_uptime_ticks();
 		tdma_apply_locked(&pub, now);
 		irq_unlock(key);

@@ -164,6 +164,8 @@ static void reset_fixture(uint8_t count, uint64_t time)
     assert(!irq_depth && !mutex_depth && count <= MAX_TRACKERS);
     now_ms = time; restore_error = 0; saved_count = count;
     tdma_active_mask = 0;
+    tdma_staged.deferred_joins = 0;
+    tdma_staged.native_followup = false;
     relay_user_mode = RELAY_MODE_AUTO;
     relay_coord_set_enabled(&relay_coord, relay_user_mode != RELAY_MODE_OFF);
     unsigned int key = irq_lock();
@@ -1289,6 +1291,71 @@ static void legacy_join_waits_for_relay_exit(void)
 	puts("PASS legacy join: lower ID remains unassigned until the announced native roster activates");
 }
 
+static void legacy_join_during_relay_exit_lead(void)
+{
+	reset_fixture(3, 0);
+	assert(tracker_store_restore() == 0);
+	relay_coord_init(&relay_coord);
+	esb_relay_set_mode(RELAY_MODE_AUTO);
+	relay_settings = (struct relay_runtime_settings){3, 1, 16, 100, 120, 0};
+	relay_settings_generation++;
+	relay_coord_note_caps(&relay_coord, 0, RELAY_INFO_CAPS);
+	relay_coord_note_caps(&relay_coord, 2, RELAY_INFO_CAPS);
+	assert(ping(0, true) && ping(2, true));
+	service();
+	now_ms = 101;
+	service();
+	const uint32_t v5_mask = BIT(0) | BIT(2);
+	assert(tdma_active_mask == v5_mask && !tdma_staged.valid);
+	relay_coord.auto_engaged = true;
+	now_ms += TDMA_RECONFIG_MIN_MS;
+	service();
+	assert(tdma_staged.valid && tdma_staged.p.profile);
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1;
+	service();
+	assert(relay_profile && tdma_active_mask == v5_mask);
+
+	esb_relay_set_mode(RELAY_MODE_OFF);
+	now_ms += TDMA_RECONFIG_MIN_MS;
+	assert(ping(0, true) && ping(2, true));
+	service();
+	assert(tdma_staged.valid && !tdma_staged.p.profile && tdma_staged.p.new_mask == v5_mask);
+	uint32_t exit_at = tdma_staged.activation_ticks;
+	uint32_t exit_tuple = tdma_advertised_config(2, exit_at);
+	assert(slot(exit_tuple) == 1 && total(exit_tuple) == 2);
+	assert(slot(tdma_advertised_config(1, exit_at - 1)) == 0xff);
+	/* Wake after the exit tuple is announced and before it applies. */
+	uint32_t exit_delay = k_ticks_to_ms_ceil32(exit_at - ticks_at(now_ms));
+	now_ms += 100;
+	assert(ping(1, true));
+	service();
+	assert(tdma_staged.valid && tdma_staged.activation_ticks == exit_at);
+	now_ms += exit_delay - 100 + 1;
+	service();
+	assert(!relay_profile && tdma_active_mask == v5_mask);
+	assert(tracker_slots[2].tdma_config_packed == exit_tuple);
+	assert(slot(tracker_slots[1].tdma_config_packed) == 0xff);
+
+	assert(tdma_staged.valid && !tdma_staged.p.profile && tdma_staged.p.new_mask == 7);
+	uint32_t join_at = tdma_staged.activation_ticks;
+	assert(join_at == ticks_at(now_ms) + k_ms_to_ticks_ceil32(RELAY_LAYOUT_ACTIVATION_MS));
+	assert((tdma_staged_pong_mask(ticks_at(now_ms)) & v5_mask) == v5_mask);
+	assert(tdma_advertised_config(2, join_at - 1) == exit_tuple);
+	assert(slot(tdma_advertised_config(1, join_at - 1)) == 0xff);
+	assert(slot(tdma_advertised_config(1, join_at)) == 1);
+	assert(slot(tdma_advertised_config(2, join_at)) == 2);
+	now_ms += 1000;
+	assert(ping(0, true) && ping(1, true) && ping(2, true));
+	service();
+	assert(tdma_staged.valid && tdma_staged.activation_ticks == join_at);
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS - 1000 + 1;
+	service();
+	assert(!tdma_staged.valid && tdma_active_mask == 7);
+	assert(slot(tracker_slots[1].tdma_config_packed) == 1);
+	assert(slot(tracker_slots[2].tdma_config_packed) == 2);
+	puts("PASS legacy wake during exit lead: v5 keeps the announced native tuple until the join stage activates");
+}
+
 /* Last modeled repair before the query-triggered native activation. */
 #define QUERY_CASE_LAST_REPAIR_MS (6000U + RELAY_LAYOUT_ACTIVATION_MS - 10U)
 
@@ -1702,6 +1769,7 @@ int main(int argc, char **argv)
 	relay_mode_transitions();
 	relay_admission_requires_a_representable_exit();
 	legacy_join_waits_for_relay_exit();
+	legacy_join_during_relay_exit_lead();
 	dense_relay_exit_announcement_lead(100);
 	dense_relay_exit_announcement_lead(120);
 	query_membership_recovery(0, false);
