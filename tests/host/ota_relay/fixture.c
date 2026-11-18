@@ -710,7 +710,7 @@ static void test_reservation(void)
 {
     reset_world();stage_during_admission = true;
     begin(0, begin_a);
-    assert(!esb_ota_relay_is_active() && !radio_owned && radio_claims == radio_releases);
+    assert(!esb_ota_relay_is_active() && !radio_owned && radio_claims == 1 && radio_releases == 1);
 
     reset_world();
     radio_operation_busy = 1;

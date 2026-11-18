@@ -296,7 +296,7 @@ void esb_relay_set_mode(enum relay_mode mode);
 /* Test hook: drop percent% of id's direct uplink (pose and PINGs). */
 void esb_relay_block(uint8_t id, uint8_t percent);
 bool esb_relay_block_mask(uint16_t mask, uint8_t seconds);
-/* OTA requires a direct link: true while id is delivered through a relay. */
+/* Blocks OTA during applied or staged relay, or without a recent healthy direct link. */
 bool esb_relay_blocks_ota(uint8_t id);
 void esb_relay_layout_print(void);
 int esb_relay_layout_set(const char *name, uint16_t value);

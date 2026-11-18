@@ -207,7 +207,7 @@ static void test_peer_report(void)
 	for (unsigned slot=0;slot<5;slot++) relay_grants.grants[slot].owner=RELAY_OWNER_IDLE;
 	relay_grants.grants[2] = (struct relay_grant){.owner=0,.children=0};
 	struct relay_peer_report report={.helper=0,.session=42,.epoch=7,.count=1};
-	report.entries[0]=(struct relay_peer_observation){.child=2,.expected=120,.heard=0};
+	report.entries[0]=(struct relay_peer_observation){.child=2,.expected=100,.heard=0};
 	struct esb_payload packet={.pipe=1,.rssi=40};
 	packet.length=relay_peer_report_encode(packet.data,&report);
 	uint32_t at=relay_frame_start(relay_origin,10)+RELAY_REPAIR_START+2*RELAY_SLOT_TICKS+2;
@@ -221,10 +221,10 @@ static void test_peer_report(void)
 	CHECK(!relay_coord.peer[0][2].expected);
 	relay_grants.grants[2].children=0;
 	esb_receive_peer_report(&packet,end);
-	CHECK(relay_coord.peer[0][2].expected==120 && !relay_coord.peer[0][2].heard);
+	CHECK(relay_coord.peer[0][2].expected==100 && !relay_coord.peer[0][2].heard);
 	CHECK(!relay_coord.peer[2][0].expected && hid_count==0);
 	esb_receive_peer_report(&packet,end+RELAY_FRAME_TICKS_MAX);
-	CHECK(relay_coord.peer[0][2].expected==120);
+	CHECK(relay_coord.peer[0][2].expected==100);
 	relay_profile=0;
 }
 
