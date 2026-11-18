@@ -4958,19 +4958,14 @@ void esb_set_addr_unified(void)
 }
 
 #if defined(CONFIG_RELAY)
-/* Caller holds tracker_store_lock after the roster save succeeds. Stop old
- * announcements before publishing the pairing change. A control copy can
- * already be armed at freeze, and an ACK can already be in the radio. One
- * millisecond covers either turn (1 + 4 guard + 2 offset + 11 air ticks for
- * control, and less for an ACK). No subsequent copy can arm with the old roster. */
+/* Caller holds tracker_store_lock after the roster save succeeds. Filter
+ * new PONGs before publishing the pairing change and let any ACK already in
+ * the radio finish. Relay control keeps using the applied layout. */
 static void tdma_revoke_pairings(uint16_t removed)
 {
 	unsigned key = irq_lock();
 	tdma_staged.revoked_mask |= removed;
 	tdma_staged.readmit_mask &= ~removed;
-	if (tdma_active_mask & removed) {
-		relay_layout_generation++;
-	}
 	irq_unlock(key);
 	if (removed) {
 		k_msleep(1);
@@ -7341,9 +7336,7 @@ static void relay_control_plan(struct relay_control *control, struct rc_grant_pl
  * while the fleet keeps running. */
 static bool relay_control_eligible(void)
 {
-	/* v5 requires every direct ID for this geometry. A shortened mask would
-	 * be rejected or imply different slot ranks. Resume after a clean publish. */
-	return esb_initialized && relay_profile && !(tdma_active_mask & tdma_staged.revoked_mask);
+	return esb_initialized && relay_profile;
 }
 
 static bool relay_control_context_current(const struct relay_control *control, uint32_t origin)
