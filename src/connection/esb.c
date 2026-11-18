@@ -3102,9 +3102,11 @@ static void esb_ack_handler_cb(
 		bool ota_aborting = false;
 		bool staged_pong = false;
 #if defined(CONFIG_RELAY)
-		/* A staged tuple needs the NORMAL clock bytes. Keep commands queued
-		 * for these members until the activation passes. */
+		/* A relay switch needs the NORMAL clock bytes. Keep commands queued
+		 * for affected members until activation. Native-only changes can
+		 * still run during OTA and must leave its command path available. */
 		staged_pong = tdma_staged.valid && !tdma_staged_due_locked(rx_ticks)
+			&& (relay_profile || tdma_staged.p.profile)
 			&& ((tdma_active_mask | tdma_staged.p.new_mask) & BIT(tracker_id))
 			&& relay_coord_is_capable(&relay_coord, tracker_id);
 #endif
@@ -3272,7 +3274,7 @@ static void esb_ack_handler_cb(
 			trailer.pending = false;
 			/* Announce a staged layout on NORMAL PONGs, whose bytes 3..6
 			 * carry the receiver timestamp the activation is relative to. */
-			if (staged_pong && cmd == ESB_PONG_FLAG_NORMAL) {
+			if (tdma_staged.valid && !due && cmd == ESB_PONG_FLAG_NORMAL) {
 				uint32_t lead = tdma_staged.activation_ticks - rx_ticks;
 				trailer.pending = (int32_t)lead > 0;
 				trailer.pending_epoch = tdma_staged.p.epoch;

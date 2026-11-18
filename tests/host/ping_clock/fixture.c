@@ -478,6 +478,10 @@ static void test_maintenance(void)
 	assert(trailer.pending && trailer.pending_epoch == 4 && trailer.pending_total == 3);
 	assert(trailer.activation_units * RELAY_ACTIVATION_UNIT_TICKS == 1024U);
 	assert(tracker_slots[id].tracker_remote_command == ESB_PONG_FLAG_CALIBRATE);
+	relay_profile = 0; /* A native-only stage preserves command delivery. */
+	ack = ack_for(&p, &has_ack);
+	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
+	relay_profile = RELAY_PROFILE_120HZ;
 	now_ticks = tdma_staged.activation_ticks;
 	ack = ack_for(&p, &has_ack);
 	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
