@@ -468,6 +468,19 @@ static void test_maintenance(void)
 	tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
 	ack = ack_for(&p, &has_ack);
 	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
+
+	tdma_staged.valid = true;
+	tdma_staged.p = (struct tdma_publication){.new_mask = 7, .active_count = 3, .slot_ticks = 48, .epoch = 4};
+	tdma_staged.activation_ticks = now_ticks + 1024U;
+	ack = ack_for(&p, &has_ack);
+	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_NORMAL);
+	assert(relay_trailer_decode_len(&ack.data[ESB_PONG_LEN], ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.pending && trailer.pending_epoch == 4 && trailer.pending_total == 3);
+	assert(trailer.activation_units * RELAY_ACTIVATION_UNIT_TICKS == 1024U);
+	assert(tracker_slots[id].tracker_remote_command == ESB_PONG_FLAG_CALIBRATE);
+	now_ticks = tdma_staged.activation_ticks;
+	ack = ack_for(&p, &has_ack);
+	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
 }
 
 static void test_valid(void)

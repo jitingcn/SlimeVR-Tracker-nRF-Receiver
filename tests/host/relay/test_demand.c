@@ -192,6 +192,57 @@ static void maintenance_debt(void)
 	puts("PASS demand: maintenance yields to aged debt when both cannot fit, then resumes with two slots");
 }
 
+static void staging_maintenance(void)
+{
+	struct relay_runtime_settings s = {16, 1, 16, 100, 100, 0, 0};
+	struct relay_coord rc = {.cache_frames = 5};
+	struct rc_plan_snapshot snapshot = {.cache_frames = 5};
+	snapshot.learn.learn_members = UINT16_MAX;
+	unsigned opportunities[RC_MAX] = {0};
+	for (unsigned id = 0; id < RC_MAX; id++) {
+		snapshot.learn.t[id].direct_permille = 1000;
+		rc.maintenance_ms[id] = 5000; /* A full round just ended. */
+	}
+	unsigned stride = relay_stage_maintenance_stride(&s);
+	assert(stride == 8);
+	uint32_t elapsed = relay_runtime_period(0, 16, 2, 16, 100, 0);
+	for (unsigned frame = stride + 1; frame <= (1 + 3 * RC_MAX) * stride; frame++) {
+		struct relay_control c = {.frame = frame, .members = UINT16_MAX, .expected = UINT16_MAX,
+			.direct_count = 16, .slot_ticks = 16, .tps_max = 100, .profile = 1, .on_demand = true,
+			.repair_count = relay_demand_slots(frame, 1)};
+		for (unsigned age = 0; age < 5; age++) {
+			uint32_t prior = frame - age;
+			struct rc_watch *w = &snapshot.watch[prior % 5];
+			*w = (struct rc_watch){.frame = prior, .members = UINT16_MAX, .primary_valid = 1U << 9};
+			w->helpers[9] = 1;
+		}
+		memcpy(snapshot.maintenance_ms, rc.maintenance_ms, sizeof(snapshot.maintenance_ms));
+		snapshot.maintenance_next = rc.maintenance_next;
+		bool stage_maintenance = frame % stride == 0;
+		struct rc_grant_plan plan;
+		relay_plan_snapshot_grants(&snapshot, &c, &plan, 5000U + elapsed * 1000U / 32768U, stage_maintenance);
+		uint8_t wire[RELAY_CONTROL_LEN];
+		relay_control_encode(wire, &c);
+		relay_coord_finish_frozen(&c, &plan, wire);
+		relay_coord_read_grants(&c, wire);
+		if (stage_maintenance) {
+			assert(plan.demand_eligible[4] & (1U << 9)); /* Sustained repair debt. */
+			assert((c.flags & RELAY_CONTROL_MAINTENANCE) && c.maintenance_owner < RC_MAX);
+			assert(c.grants[0].owner == RELAY_OWNER_MAINTENANCE && c.grants[1].owner == RELAY_OWNER_MAINTENANCE);
+			opportunities[c.maintenance_owner]++;
+		} else {
+			assert(!(c.flags & RELAY_CONTROL_MAINTENANCE));
+		}
+		relay_coord_commit_grants(&rc, &c, &plan);
+		elapsed += relay_runtime_period(frame, 16, c.repair_count, 16, 100, 0);
+	}
+	for (unsigned id = 0; id < RC_MAX; id++) {
+		assert(opportunities[id] == 3);
+	}
+	assert(elapsed < relay_stage_lead_ticks(&s, RC_MAX));
+	puts("PASS staged T16/R1 demand: all members get three PONG opportunities under sustained repair debt");
+}
+
 /* Deterministic capacity simulation using the production planner, frozen
  * allocator and immutable queue. Helpers capture every assigned pose; repair
  * packet delivery is perfect. Results describe capacity under those assumptions. */
@@ -369,6 +420,7 @@ int main(int argc, char **argv)
 	wire();
 	late_direct();
 	maintenance_debt();
+	staging_maintenance();
 	simulate(11, 0, 5, 200);
 	simulate(11, 1, 5, 200);
 	simulate(11, 0, 6, 200);

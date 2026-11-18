@@ -3,6 +3,7 @@
 #endif
 /* Receiver-side relay coordinator. Pure policy; see relay_coord.h. */
 #include "relay_coord.h"
+#include "relay_demand.h"
 
 #include <string.h>
 #ifdef __ZEPHYR__
@@ -20,6 +21,29 @@ static bool rc_after(uint32_t now, uint32_t then, uint32_t interval)
 }
 
 static void rc_auto_restart(struct relay_coord *rc);
+
+unsigned relay_stage_maintenance_stride(const struct relay_runtime_settings *applied)
+{
+	return applied->repair_floor < 2U ? RELAY_MAINTENANCE_PAIR_PERIOD : 4U;
+}
+
+uint32_t relay_stage_lead_ticks(const struct relay_runtime_settings *applied, uint8_t direct)
+{
+	/* cap - 1 selects the longest padding interval of the rational grid. */
+	uint16_t cap = applied->tps_max;
+	uint8_t repairs = applied->max_repairs;
+	uint32_t regular = relay_runtime_period(cap - 1U, direct, repairs,
+		applied->slot_ticks, cap, applied->control_repeat_mode);
+	uint32_t maintenance = repairs < 2U ? relay_runtime_period(cap - 1U, direct, 2U,
+		applied->slot_ticks, cap, applied->control_repeat_mode) : regular;
+	uint32_t turn = (relay_stage_maintenance_stride(applied) - 1U) * regular + maintenance;
+	/* Oldest-first gives each member a turn every direct reservations. Allow
+	 * one already planned frame, the last exchange, and the clock margin. */
+	uint32_t margin = (32768U * (RELAY_LAYOUT_ACTIVATION_MS - RELAY_LAYOUT_GRANT_MS) + 999U) / 1000U;
+	uint32_t lead = 3U * direct * turn + 2U * maintenance + margin;
+	uint32_t native_lead = (32768U * RELAY_LAYOUT_ACTIVATION_MS + 999U) / 1000U;
+	return lead > native_lead ? lead : native_lead;
+}
 
 void relay_coord_init(struct relay_coord *rc)
 {
@@ -907,7 +931,7 @@ rc_rescue_diagnose(const struct rc_plan_snapshot *rc, const struct relay_control
 static void rc_finish_demand(struct relay_control *c, const struct rc_grant_plan *p, uint8_t *wire);
 /* Selection scans run before the mask freeze. Ties retain rotation order. */
 void relay_plan_snapshot_grants(struct rc_plan_snapshot *rc, struct relay_control *c,
-	struct rc_grant_plan *p, uint32_t now_ms)
+	struct rc_grant_plan *p, uint32_t now_ms, bool stage_maintenance)
 {
 	for (unsigned i = 0; i < RELAY_REPAIR_MAX; i++) {
 		c->grants[i] = (struct relay_grant){.owner = RELAY_OWNER_IDLE};
@@ -920,7 +944,7 @@ void relay_plan_snapshot_grants(struct rc_plan_snapshot *rc, struct relay_contro
 		unsigned id = (rc->maintenance_next + n) % RC_MAX;
 		if (rc->learn.t[id].direct_permille < RC_HEAD_MIN_PERMILLE) p->fresh_survey |= RC_BIT(id);
 		uint32_t age = now_ms - rc->maintenance_ms[id];
-		if ((c->members & RC_BIT(id)) && age >= RC_MAINTENANCE_MS &&
+		if ((c->members & RC_BIT(id)) && (stage_maintenance || age >= RC_MAINTENANCE_MS) &&
 		    (p->maintenance < 0 || age > oldest_m)) {
 			p->maintenance = id;
 			oldest_m = age;
@@ -965,7 +989,8 @@ void relay_plan_snapshot_grants(struct rc_plan_snapshot *rc, struct relay_contro
 		p->maintenance = -1;
 	}
 	p->urgent = p->maintenance >= 0
-			 && (oldest_m >= RC_MAINTENANCE_URGENT_MS || (c->on_demand && c->repair_count >= 2 && c->frame % 8U == 0));
+			 && (stage_maintenance || oldest_m >= RC_MAINTENANCE_URGENT_MS
+				 || (c->on_demand && c->frame % RELAY_MAINTENANCE_PAIR_PERIOD == 0));
 	if (c->frame % 10U == 0) {
 		for (unsigned n = 0; n < RC_MAX; n++) {
 			unsigned child = (rc->survey_next + n) % RC_MAX;
@@ -1086,7 +1111,7 @@ void relay_plan_snapshot_grants(struct rc_plan_snapshot *rc, struct relay_contro
 		for (unsigned age = 1; age < 5; age++) {
 			aged |= relay_control_missing(c, age) & p->demand_eligible[age];
 		}
-		if (aged && c->repair_count < relay_mask_count(aged) + 2U) {
+		if (!stage_maintenance && aged && c->repair_count < relay_mask_count(aged) + 2U) {
 			p->maintenance = -1;
 			p->urgent = false;
 		}
@@ -1600,5 +1625,5 @@ void relay_coord_plan_grants(struct relay_coord *rc, struct relay_control *c,
 {
 	struct rc_plan_snapshot s;
 	rc_copy_plan(&s, rc);
-	relay_plan_snapshot_grants(&s, c, p, now);
+	relay_plan_snapshot_grants(&s, c, p, now, false);
 }

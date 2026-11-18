@@ -979,11 +979,19 @@ static uint32_t tdma_admissible_mask(uint32_t desired)
 	return selected;
 }
 
+static bool relay_layout_stageable(uint16_t members)
+{
+	uint8_t direct = relay_mask_count(members);
+	struct relay_runtime_settings applied = relay_runtime_for_members(relay_settings, direct);
+	return relay_stage_lead_ticks(&applied, direct) <= RC_LAYOUT_MAX_ACTIVATION_TICKS;
+}
+
 static bool relay_auto_roster_eligible(uint32_t desired)
 {
 	return relay_user_mode != RELAY_MODE_AUTO
 		|| (relay_mask_count((uint16_t)desired) <= relay_settings.max_trackers
-			&& relay_coord_capable(&relay_coord, (uint16_t)desired));
+			&& relay_coord_capable(&relay_coord, (uint16_t)desired)
+			&& relay_layout_stageable((uint16_t)desired));
 }
 
 /* How long the stats owner may sleep while a membership change is pending.
@@ -1186,7 +1194,8 @@ static void tdma_recalculate(bool forced)
 			&& now >= relay_query_until && relay_auto_roster_eligible(new_mask)
 			&& relay_coord_requested(&relay_coord, relay_user_mode, (uint16_t)relay_mask);
 		if (relay_user_mode == RELAY_MODE_FORCE) {
-			relay_requested = relay_requested && (relay_profile || relay_force_entry_allowed());
+			relay_requested = relay_requested && (relay_profile || relay_force_entry_allowed())
+				&& relay_layout_stageable((uint16_t)relay_mask);
 			new_mask = relay_mask;
 		}
 		uint8_t profile = relay_requested ? RELAY_PROFILE_120HZ : 0;
@@ -1316,20 +1325,16 @@ static void tdma_recalculate(bool forced)
 		tdma_last_reconfig_valid = true;
 #if defined(CONFIG_RELAY)
 		if ((!forced || relay_profile || profile) && active_count && tdma_staging_supported_locked(old_mask, new_mask)) {
-			/* The old layout carries the PONG announcements. Keep the longer
-			 * lead for slow or full-fleet layouts with sparse maintenance. */
-			uint32_t activation_ms = relay_profile && (relay_applied_settings.tps_max < 120U
-					|| (tdma_dynamic_active_count == RELAY_MAX_TRACKERS
-						&& relay_applied_settings.repair_floor < 2U))
-				? RC_LAYOUT_SLOW_ACTIVATION_MS : RELAY_LAYOUT_ACTIVATION_MS;
+			/* The applied layout carries the announcements. */
+			uint32_t lead = relay_profile ? relay_stage_lead_ticks(&relay_applied_settings, tdma_dynamic_active_count)
+				: k_ms_to_ticks_ceil32(RELAY_LAYOUT_ACTIVATION_MS);
 			tdma_staged.p = pub;
-			tdma_staged.activation_ticks = (uint32_t)k_uptime_ticks()
-				+ (uint32_t)k_ms_to_ticks_ceil32(activation_ms);
+			tdma_staged.activation_ticks = (uint32_t)k_uptime_ticks() + lead;
 			/* Quiet-zone admission fences the old layout; this activation
 			 * tick is the first start of the new membership's timeline. */
 			tdma_staged.valid = true;
 			irq_unlock(key);
-			LOG_INF("TDMA layout epoch %u staged: activates in %u ms", epoch, (unsigned)activation_ms);
+			LOG_INF("TDMA layout epoch %u staged: activates in %u ms", epoch, k_ticks_to_ms_ceil32(lead));
 #else
 		if (!atomic_get(&tdma_shadow_pending_join_mask)) {
 			tdma_membership_deadline_armed = false;
@@ -2504,7 +2509,7 @@ static void esb_stats_thread(void)
 		 * so the coordinator pauses (and releases every role) meanwhile. */
 		{
 			uint32_t planned_power_down = tracker_events_power_down_mask(
-				k_uptime_get_32(), TDMA_SHADOW_LEAVE_GRACE_MS + 2U * RC_LAYOUT_SLOW_ACTIVATION_MS
+				k_uptime_get_32(), TDMA_SHADOW_LEAVE_GRACE_MS + 2U * RC_LAYOUT_MAX_ACTIVATION_MS
 					+ TDMA_RECONFIG_MIN_MS + 2U * TPS_MONITOR_INTERVAL_MS
 			);
 			unsigned int relay_key = irq_lock();
@@ -3093,9 +3098,17 @@ static void esb_ack_handler_cb(
 #endif
 		bool channel_confirm = (pdu_data[7] & ESB_PING_FLAG_CHANNEL_CONFIRM) != 0;
 		uint32_t rx_ticks = k_uptime_ticks();
-		uint8_t cmd = ESB_PONG_FLAG_CHANNEL_CONFIRM;
+		uint8_t cmd = channel_confirm ? ESB_PONG_FLAG_CHANNEL_CONFIRM : ESB_PONG_FLAG_NORMAL;
 		bool ota_aborting = false;
-		if (!channel_confirm) {
+		bool staged_pong = false;
+#if defined(CONFIG_RELAY)
+		/* A staged tuple needs the NORMAL clock bytes. Keep commands queued
+		 * for these members until the activation passes. */
+		staged_pong = tdma_staged.valid && !tdma_staged_due_locked(rx_ticks)
+			&& ((tdma_active_mask | tdma_staged.p.new_mask) & BIT(tracker_id))
+			&& relay_coord_is_capable(&relay_coord, tracker_id);
+#endif
+		if (!channel_confirm && !staged_pong) {
 			cmd = tracker_slots[tracker_id].tracker_remote_command;
 			/* Keep an active metadata request on duplicate PINGs until its echo
 			 * arrives; channel probes must leave both pending and active tuples alone. */
@@ -3259,7 +3272,7 @@ static void esb_ack_handler_cb(
 			trailer.pending = false;
 			/* Announce a staged layout on NORMAL PONGs, whose bytes 3..6
 			 * carry the receiver timestamp the activation is relative to. */
-			if (tdma_staged.valid && !due && ack_payload->data[7] == ESB_PONG_FLAG_NORMAL) {
+			if (staged_pong && cmd == ESB_PONG_FLAG_NORMAL) {
 				uint32_t lead = tdma_staged.activation_ticks - rx_ticks;
 				trailer.pending = (int32_t)lead > 0;
 				trailer.pending_epoch = tdma_staged.p.epoch;
@@ -3299,7 +3312,7 @@ static void esb_ack_handler_cb(
 		/* If OTA session has a pending command for this tracker
 		 * (e.g., BEGIN before tracker enters OTA mode), override the
 		 * standard PONG with the OTA payload. */
-		if (!channel_confirm && esb_ota_relay_is_active() && esb_ota_relay_is_target(tracker_id)) {
+		if (!channel_confirm && !staged_pong && esb_ota_relay_is_active() && esb_ota_relay_is_target(tracker_id)) {
 			bool ota_has_ack = false;
 			esb_ota_relay_fill_ack(tracker_id, pipe_id, ack_payload, &ota_has_ack, NULL, 0);
 			if (ota_has_ack) {
@@ -7123,11 +7136,13 @@ static void relay_control_plan(struct relay_control *control, struct rc_grant_pl
 	snapshot.report_next = relay_coord.report_next;
 	snapshot.survey_next = relay_coord.survey_next;
 	snapshot.cache_frames = relay_coord.cache_frames;
+	bool stage_maintenance = tdma_staged.valid
+		&& control->frame % relay_stage_maintenance_stride(&relay_applied_settings) == 0;
 	IRQ_PROBE_END(plan);
 	irq_unlock(key);
 	relay_plan_snapshot_watch(&snapshot, control);
-	relay_plan_snapshot_grants(&snapshot, control, plan, k_uptime_get_32());
-	if (relay_applied_settings.repair_floor < 2U && control->frame % 8U == 0 && control->repair_count >= 2U
+	relay_plan_snapshot_grants(&snapshot, control, plan, k_uptime_get_32(), stage_maintenance);
+	if (relay_applied_settings.repair_floor < 2U && control->frame % RELAY_MAINTENANCE_PAIR_PERIOD == 0 && control->repair_count >= 2U
 		&& plan->maintenance >= 0) {
 		plan->urgent = true;
 	}

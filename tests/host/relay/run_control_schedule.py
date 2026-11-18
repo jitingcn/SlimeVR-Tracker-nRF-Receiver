@@ -73,6 +73,7 @@ static struct relay_control relay_grants;
 static bool esb_initialized;
 static uint8_t relay_profile, relay_epoch;
 static uint32_t tdma_active_mask, relay_origin, relay_session, relay_layout_generation;
+static struct { bool valid; } tdma_staged;
 static uint32_t relay_frame_anchor, relay_start_anchor;
 static uint32_t relay_control_repeat_sent, relay_control_repeat_failed;
 static int relay_control_repeat_err;

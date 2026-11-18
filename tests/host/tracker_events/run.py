@@ -58,6 +58,7 @@ static inline uint32_t k_uptime_get_32(void) { return host_now; }
 static inline int64_t k_uptime_get(void) { return host_now; }
 static inline int64_t k_uptime_ticks(void) { return (int64_t)host_now * 32768 / 1000; }
 static inline uint32_t k_ms_to_ticks_ceil32(uint32_t ms) { return (uint32_t)(((uint64_t)ms * 32768 + 999) / 1000); }
+static inline uint32_t k_ticks_to_ms_ceil32(uint32_t ticks) { return (uint32_t)(((uint64_t)ticks * 1000 + 32767) / 32768); }
 struct k_spinlock { int unused; };
 typedef unsigned int k_spinlock_key_t;
 static inline k_spinlock_key_t k_spin_lock(struct k_spinlock *s) { (void)s; return 0; }
@@ -208,7 +209,8 @@ def main():
         (path/'esb_membership_declarations.inc').write_text(declarations)
         membership = '\n'.join(function(esb, name) for name in (
             'tdma_loss_reset_windows', 'tdma_pack_config', 'relay_query_can_resume', 'relay_query_update_locked', 'tdma_shadow_observe',
-            'tdma_admissible_mask', 'relay_auto_roster_eligible', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked',
+            'tdma_admissible_mask', 'relay_layout_stageable', 'relay_auto_roster_eligible',
+            'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked',
             'tdma_slot_ticks_for', 'tdma_staging_supported_locked', 'tdma_apply_locked',
             'tdma_apply_finish', 'relay_auto_ladder_paused', 'esb_loss_operations_idle',
             'relay_force_entry_allowed', 'tdma_recalculate'))

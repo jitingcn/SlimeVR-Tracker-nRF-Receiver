@@ -57,7 +57,7 @@ static void clear_output(void) { count=0; }
 #if defined(CONFIG_RELAY)
 /* The caller supplies RF grace plus up to two staged layouts and owner slack. */
 #include "connection/relay_coord.h"
-#define RELAY_TEST_TAIL_MS (15000U + 2U * RC_LAYOUT_SLOW_ACTIVATION_MS + 1000U + 2U * 500U)
+#define RELAY_TEST_TAIL_MS (15000U + 2U * RC_LAYOUT_MAX_ACTIVATION_MS + 1000U + 2U * 500U)
 static uint32_t relay_mask(uint32_t now) {
     return tracker_events_power_down_mask(now, RELAY_TEST_TAIL_MS);
 }

@@ -107,9 +107,11 @@ struct rc_receipt {
  * which it displaces repairs. */
 #define RC_MAINTENANCE_MS 997U
 #define RC_MAINTENANCE_URGENT_MS 3000U
-/* D16/R1 has a maintenance slot pair only every eighth frame. At the
- * default 120 TPS cap, three 16-member rounds can take about 3.4 seconds. */
-#define RC_LAYOUT_SLOW_ACTIVATION_MS 3500U
+#define RC_LAYOUT_MAX_ACTIVATION_TICKS (UINT16_MAX * RELAY_ACTIVATION_UNIT_TICKS)
+#define RC_LAYOUT_MAX_ACTIVATION_MS ((RC_LAYOUT_MAX_ACTIVATION_TICKS * 1000U + 32767U) / 32768U)
+
+unsigned relay_stage_maintenance_stride(const struct relay_runtime_settings *applied);
+uint32_t relay_stage_lead_ticks(const struct relay_runtime_settings *applied, uint8_t direct);
 
 struct rc_peer {
 	uint16_t expected, heard;
@@ -207,7 +209,7 @@ struct rc_plan_snapshot {
 void relay_learn_snapshot_tick(struct rc_learn_snapshot *rc, uint32_t now_ms);
 void relay_plan_snapshot_watch(struct rc_plan_snapshot *rc, struct relay_control *c);
 void relay_plan_snapshot_grants(struct rc_plan_snapshot *rc, struct relay_control *c,
-	struct rc_grant_plan *p, uint32_t now_ms);
+	struct rc_grant_plan *p, uint32_t now_ms, bool stage_maintenance);
 
 /* Background expiry; caller must serialize against report updates. */
 void relay_coord_expire_peer(struct relay_coord *rc, unsigned helper,

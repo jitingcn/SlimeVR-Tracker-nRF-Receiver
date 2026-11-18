@@ -8,8 +8,9 @@ remains an alias for `relay auto`. Mode selection lasts until reboot and
 persistent record.
 
 Defaults are max_trackers=16, max_repairs=5, repair_floor=5, slot_ticks=16,
-tps_min=120 and tps_max=120. The member cap is capacity; the staged layout's
-actual member count T sets R=clamp(floor(32768/tps_min/slot_ticks)-T-1,1,max_repairs).
+tps_min=120 and tps_max=120. Native auto keeps the full live roster. An auto
+entry needs every live tracker to support relay and the roster to fit the cap.
+The staged layout's actual member count T sets R=clamp(floor(32768/tps_min/slot_ticks)-T-1,1,max_repairs).
 Equal requested floor/ceiling means static allocation at that derived R.
 `tps_min` is a repair-budget target, not a hard throughput guarantee.
 
@@ -19,8 +20,12 @@ At sixteen members, 120 mode uses R1 and redundancy uses R3. Every eighth
 frame with nominal R1 still opens R2 for the two-attempt maintenance exchange.
 With the arming guard, T15/R1 uses 276-tick frames with 292 ticks for
 maintenance, about 117.87 TPS. T16/R1 uses 292/308 ticks, about 111.46 TPS.
-Three full T16/R1 maintenance rounds take about 3.45 s, so this applied
-layout retains a 3.5 s announcement lead.
+During staging, a relay layout with fewer than two guaranteed repair slots
+reserves a maintenance pair every eighth frame. Layouts with at least two
+guaranteed slots reserve one every fourth frame. The lead budgets three rounds
+of PONGs at the applied layout's slowest cadence, plus two frames and 150 ms.
+T16/R1 needs 3.615 s at a 120 TPS cap and 4.014 s at a 100 TPS cap. Native
+TDMA keeps its 3.15 s lead.
 
 An explicit lower `repair_floor` opts into experimental on-demand repair.
 Its ceiling is the same per-member derived R, and its floor is clamped to

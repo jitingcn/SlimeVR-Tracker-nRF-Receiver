@@ -19,12 +19,14 @@ code=r'''
 #include <stdint.h>
 #include <string.h>
 #include "relay_coord.h"
+#include "relay_demand.h"
 struct esb_payload {uint8_t data[72];};
 static struct relay_coord relay_coord;
 static struct relay_runtime_settings relay_applied_settings={16,RELAY_REPAIR_SLOTS,16,100,120,RELAY_REPAIR_SLOTS,0};
 static bool esb_initialized=true,esb_pairing,locked;
 static uint8_t relay_profile=1,relay_epoch=2;
 static uint16_t tdma_active_mask=0x7ff;
+static struct { bool valid; } tdma_staged;
 static uint32_t relay_session=42,relay_origin=100;
 static unsigned locks, plans;
 static uint32_t relay_learn_lock_max;
@@ -46,7 +48,7 @@ static void plan_watch(struct rc_plan_snapshot *snapshot,struct relay_control *c
  /* Concurrent evidence must survive; planning publishes no coordinator state. */
  relay_coord.peer[15][14].heard=88;
 }
-static void plan_grants(struct rc_plan_snapshot *snapshot,struct relay_control *c,struct rc_grant_plan *p,uint32_t now){assert(!locked);relay_plan_snapshot_grants(snapshot,c,p,now);plans++;}
+static void plan_grants(struct rc_plan_snapshot *snapshot,struct relay_control *c,struct rc_grant_plan *p,uint32_t now,bool stage){assert(!locked && !stage);relay_plan_snapshot_grants(snapshot,c,p,now,stage);plans++;}
 static void encode(uint8_t *wire,const struct relay_control *c){assert(!locked);relay_control_encode(wire,c);plans++;}
 #define relay_plan_snapshot_watch plan_watch
 #define relay_plan_snapshot_grants plan_grants

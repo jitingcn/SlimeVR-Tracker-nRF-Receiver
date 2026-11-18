@@ -2,6 +2,7 @@
 #define RELAY_DEMAND_H
 #include "relay_protocol.h"
 #define RELAY_DEMAND_HOLD 30U
+#define RELAY_MAINTENANCE_PAIR_PERIOD 8U
 /* Fixed cost for the frozen demand path, independent of burst cardinality. */
 static inline __attribute__((always_inline)) unsigned relay_demand_count(uint16_t mask)
 {
@@ -18,7 +19,7 @@ struct relay_demand {
 };
 static inline __attribute__((always_inline)) uint8_t relay_demand_slots(uint32_t frame, uint8_t target)
 {
-	return target < 2U && frame % 8U == 0 ? 2U : target;
+	return target < 2U && frame % RELAY_MAINTENANCE_PAIR_PERIOD == 0 ? 2U : target;
 }
 static inline __attribute__((always_inline)) void
 relay_demand_reset(struct relay_demand *d, uint32_t frame, uint8_t floor)
