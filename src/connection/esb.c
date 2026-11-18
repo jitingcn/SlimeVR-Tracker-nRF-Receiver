@@ -2968,25 +2968,19 @@ static int esb_initialize_internal(bool tx, bool quiet)
 	int err;
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
+	config.protocol = ESB_PROTOCOL_ESB_DPL;
 	config.bitrate = ESB_BITRATE_2MBPS_BLE;
+	config.event_handler = event_handler;
+	config.tx_output_power = CONFIG_RADIO_TX_POWER;
+	config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
+	config.selective_auto_ack = true;
+	config.use_fast_ramp_up = true;
 
 	if (tx) {
-		config.protocol = ESB_PROTOCOL_ESB_DPL;
-		config.event_handler = event_handler;
-		config.tx_output_power = CONFIG_RADIO_TX_POWER;
-		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
 		config.tx_mode = ESB_TXMODE_MANUAL;
-		config.selective_auto_ack = true;
-		config.use_fast_ramp_up = true;
 	} else {
-		config.protocol = ESB_PROTOCOL_ESB_DPL;
 		config.mode = ESB_MODE_PRX;
-		config.event_handler = event_handler;
 		config.ack_handler = esb_ack_handler_cb;
-		config.tx_output_power = CONFIG_RADIO_TX_POWER;
-		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
-		config.selective_auto_ack = true;
-		config.use_fast_ramp_up = true;
 	}
 
 	if (!quiet) {
