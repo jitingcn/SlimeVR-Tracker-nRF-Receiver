@@ -242,6 +242,7 @@ static void reset(unsigned count) {
     memset(stored_tracker_addr, 0, sizeof(stored_tracker_addr));
     for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
         tracker_slots[i].tracker_remote_command = 0;
+        tracker_slots[i].query_advertised = false;
         tracker_slots[i].metadata_active_mask = 0;
         tracker_slots[i].metadata_pending_mask = 0;
         tracker_slots[i].ping_counter_initialized = false;
@@ -431,6 +432,40 @@ static void assert_channel_confirm(struct esb_payload p, uint8_t channel) {
     assert(p.data[3] == 0x12 && p.data[4] == 0x34 &&
            p.data[5] == 0x56 && p.data[6] == 0x78);
 }
+static void test_query_confirmation(void)
+{
+    reset(1);
+    relay_query_until = 0;
+    const uint8_t query = ESB_PONG_FLAG_OTA_QUERY_INFO;
+    echo(0, query);
+    assert(!relay_query_until);
+    esb_send_remote_command_arg(0, query, 0);
+    echo(0, query);
+    assert(!relay_query_until);
+    assert(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM).data[7] == ESB_PONG_FLAG_CHANNEL_CONFIRM);
+    assert(!tracker_slots[0].query_advertised);
+    now_ticks = (uint32_t)now;
+    assert(test_pong(query).data[7] == query);
+    echo(0, query);
+    assert(!relay_query_until); /* This PING predates its own ACK. */
+    now++;
+    struct esb_payload wrong_pipe = {.length = ESB_PING_LEN, .pipe = 2};
+    wrong_pipe.data[0] = ESB_PING_TYPE;
+    wrong_pipe.data[2] = ++echo_counter[0];
+    wrong_pipe.data[7] = query;
+    wrong_pipe.data[12] = crc8_ccitt(0x07, wrong_pipe.data, 12);
+    esb_receive_ping(&wrong_pipe, (uint32_t)now);
+    assert(!relay_query_until && tracker_slots[0].tracker_remote_command == query);
+    now++;
+    echo(0, query);
+    const int64_t deadline = now + 15000;
+    assert(relay_query_until == deadline);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
+    now++;
+    echo(0, query);
+    assert(relay_query_until == deadline);
+}
+
 static void test_channel_pongs(void) {
     reset(2);
     /* Released trackers see the exact legacy tuple at every physical channel. */
@@ -849,6 +884,7 @@ int main(void) {
     test_wom_timeouts();
     test_wom_staging_deadline();
     test_channel_pongs();
+    test_query_confirmation();
     /* Production channel_apply discards queued old-home packets before
      * resetting admission, including storage-error rollback. */
     for (unsigned rollback = 0; rollback < 2; ++rollback) {

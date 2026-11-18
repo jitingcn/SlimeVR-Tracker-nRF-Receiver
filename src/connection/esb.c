@@ -171,6 +171,10 @@ struct tracker_slot {
 	bool last_raw_valid;
 	/* Shared ACK tuples are published under irq_lock with their command flag. */
 	uint8_t tracker_remote_command;
+#if defined(CONFIG_RELAY)
+	bool query_advertised;
+	uint32_t query_advertised_ticks;
+#endif
 	uint8_t pending_cmd_arg;
 	uint16_t tracker_test_on_tps;
 	int16_t pending_sens_data[3];
@@ -3349,6 +3353,15 @@ static void esb_ack_handler_cb(
 				*has_ack_payload = true;
 			}
 		}
+#if defined(CONFIG_RELAY)
+		if (cmd == ESB_PONG_FLAG_OTA_QUERY_INFO && *has_ack_payload &&
+		    ack_payload->data[0] == ESB_PONG_TYPE && ack_payload->data[7] == cmd &&
+		    tracker_id < stored_trackers && ack_payload->pipe == pipe_id &&
+		    !tracker_slots[tracker_id].query_advertised) {
+			tracker_slots[tracker_id].query_advertised_ticks = rx_ticks;
+			tracker_slots[tracker_id].query_advertised = true;
+		}
+#endif
 		/* Arm only the final selected request, never a PONG replaced by OTA.
 		 * The incoming PING predates this ACK and cannot confirm it. */
 #if defined(CONFIG_RELAY)
@@ -3735,14 +3748,6 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 	} // End of else branch for ping_counter_initialized
 
 	remote_wom_receive(tracker_id, ping_ack_flag, &payload->data[8], counter);
-#if defined(CONFIG_RELAY)
-	/* The tracker echoes QUERY_INFO once it has the command, however it was
-	 * queued (single or all) and in either profile; its 66-byte reply needs
-	 * profile 0, so hold that from delivery, not from queuing. */
-	if (ping_ack_flag == ESB_PONG_FLAG_OTA_QUERY_INFO) {
-		relay_query_begin();
-	}
-#endif
 	if (ping_ack_flag == ESB_PONG_FLAG_METADATA_REQUEST) {
 		uint16_t echoed_token = ((uint16_t)payload->data[10] << 8) | payload->data[11];
 		bool metadata_matches = tracker_slots[tracker_id].metadata_active_mask != 0 &&
@@ -3764,9 +3769,31 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 			|| ping_ack_tps == tracker_slots[tracker_id].tracker_test_on_tps;
 		bool batch_payload_matches = ping_ack_flag != ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
 			|| payload->data[8] == tracker_slots[tracker_id].pending_cmd_arg;
-		if (tracker_slots[tracker_id].tracker_remote_command == ping_ack_flag
-		    && test_payload_matches && batch_payload_matches) {
-			tracker_slots[tracker_id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
+		bool confirmed;
+#if defined(CONFIG_RELAY)
+		if (ping_ack_flag == ESB_PONG_FLAG_OTA_QUERY_INFO) {
+			unsigned int key = irq_lock();
+			/* The receive timestamp predates the ACK for this same PING. */
+			confirmed = tracker_id < stored_trackers && payload->pipe == 1U + tracker_id % 7U &&
+				tracker_slots[tracker_id].tracker_remote_command == ping_ack_flag &&
+				tracker_slots[tracker_id].query_advertised &&
+				(int32_t)(event_ticks - tracker_slots[tracker_id].query_advertised_ticks) > 0;
+			if (confirmed) {
+				tracker_slots[tracker_id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
+				tracker_slots[tracker_id].query_advertised = false;
+				relay_query_begin();
+			}
+			irq_unlock(key);
+		} else
+#endif
+		{
+			confirmed = tracker_slots[tracker_id].tracker_remote_command == ping_ack_flag
+				&& test_payload_matches && batch_payload_matches;
+			if (confirmed) {
+				tracker_slots[tracker_id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
+			}
+		}
+		if (confirmed) {
 			/* Confirmations are frequent under load — keep UART off EVENT IRQ. */
 			LOG_DBG(
 				"Tracker %u confirmed command %s (0x%02X)",
@@ -5385,7 +5412,16 @@ static void esb_publish_flag_mask(uint8_t command_flag, uint32_t mask)
 {
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
 		if (mask & BIT(i)) {
+#if defined(CONFIG_RELAY)
+			unsigned int key = irq_lock();
+			if (command_flag == ESB_PONG_FLAG_OTA_QUERY_INFO) {
+				tracker_slots[i].query_advertised = false;
+			}
+#endif
 			tracker_slots[i].tracker_remote_command = command_flag;
+#if defined(CONFIG_RELAY)
+			irq_unlock(key);
+#endif
 		}
 	}
 }
@@ -5700,6 +5736,11 @@ void esb_publish_remote_command_locked(uint8_t tracker_id, uint8_t command_flag,
 		raw_arq_reset();
 	}
 	tracker_slots[tracker_id].pending_cmd_arg = arg;
+#if defined(CONFIG_RELAY)
+	if (command_flag == ESB_PONG_FLAG_OTA_QUERY_INFO) {
+		tracker_slots[tracker_id].query_advertised = false;
+	}
+#endif
 	tracker_slots[tracker_id].tracker_remote_command = command_flag;
 }
 

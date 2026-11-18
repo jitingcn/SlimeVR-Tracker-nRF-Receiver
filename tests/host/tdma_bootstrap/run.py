@@ -107,7 +107,7 @@ functions.append('static bool host_validated_ping(void) {\n'
                  'if (rx_payload.length != ESB_PING_LEN || rx_payload.data[0] != ESB_PING_TYPE) return false;\n'
                  'uint8_t id = rx_payload.data[1];\n'
                  'uint32_t errors = id < MAX_TRACKERS ? tracker_slots[id].crc_error_count : 0;\n'
-                 'esb_receive_ping(&rx_payload, 0);\n'
+                 'esb_receive_ping(&rx_payload, (uint32_t)k_uptime_ticks());\n'
                  'return id < MAX_TRACKERS && tracker_slots[id].crc_error_count == errors;\n}')
 owner = function('esb_stats_thread')
 early_wake = extract_block(owner, r'^[ \t]*if \(\(int64_t\)now < next_monitor_time\)\s*\{')
