@@ -248,14 +248,7 @@ static void relay_query_update_locked(void);
 /* Profile 0 is held until this uptime after a tracker confirms QUERY_INFO:
  * the staged exit lead plus time for its reliable 66-byte reply. */
 static int64_t relay_query_until;
-#if defined(CONFIG_RELAY_DEFAULT_FORCE)
-#define RELAY_DEFAULT_MODE RELAY_MODE_FORCE
-#elif defined(CONFIG_RELAY_DEFAULT_OFF)
-#define RELAY_DEFAULT_MODE RELAY_MODE_OFF
-#else
-#define RELAY_DEFAULT_MODE RELAY_MODE_AUTO
-#endif
-static enum relay_mode relay_user_mode = RELAY_DEFAULT_MODE;
+static enum relay_mode relay_user_mode = RELAY_MODE_AUTO;
 #endif
 static void tdma_sync_stats_reset(void);
 

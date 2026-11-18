@@ -203,21 +203,6 @@ config RELAY
 
 if RELAY
 
-choice RELAY_DEFAULT_MODE
-    prompt "Peer relay mode at boot"
-    default RELAY_DEFAULT_AUTO
-
-config RELAY_DEFAULT_AUTO
-    bool "Auto (engage on sustained loss)"
-
-config RELAY_DEFAULT_FORCE
-    bool "Force (engage whenever eligible)"
-
-config RELAY_DEFAULT_OFF
-    bool "Off"
-
-endchoice
-
 config RELAY_RAMFUNC
     bool "Run relay freeze and repeat code from RAM"
     default n if SOC_NRF52833

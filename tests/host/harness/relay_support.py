@@ -27,8 +27,6 @@ def relay_declarations(esb, member_diagnostics=True):
                        esb, re.MULTILINE)
     if len(state) != 7:
         raise ValueError(f"relay state declarations changed: {state}")
-    default_mode = re.search(r"^#if defined\(CONFIG_RELAY_DEFAULT_FORCE\)\n.*?^#endif",
-                             esb, re.M | re.S).group()
     stats = re.search(r"^static struct \{\n\tuint32_t arrivals;.*?\} relay_rx_stats;", esb,
                       re.MULTILINE | re.DOTALL)
     if not stats:
@@ -55,7 +53,7 @@ def relay_declarations(esb, member_diagnostics=True):
         diagnostics.append(extract_block(esb, r"^struct relay_member_diagnostics\s*\{", semicolon=True))
         diagnostics.append(re.search(r"^static struct relay_member_diagnostics relay_member_diag;", esb, re.M).group())
     # The publication-to-tdma_staged slice already contains control diagnostics.
-    return "\n".join(['#include "relay_coord.c"', '#include "relay_demand.h"', defaults, runtime, default_mode, *state, *diagnostics, stats.group(0), diag.group(0),
+    return "\n".join(['#include "relay_coord.c"', '#include "relay_demand.h"', defaults, runtime, *state, *diagnostics, stats.group(0), diag.group(0),
                       publication.group(0), "static atomic_t radio_operation_busy;",
                       "#if defined(CONFIG_TDMA_DIAGNOSTICS)\nstatic uint32_t tdma_stats_generation[MAX_TRACKERS];\n#endif",
                       "#define relay_hid_packet hid_write_packet_n\n#define relay_defer_capture relay_coord_capture\n#define relay_defer_report relay_coord_report",
