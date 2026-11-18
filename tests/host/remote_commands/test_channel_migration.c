@@ -229,6 +229,7 @@ static void done(bool success) {
 }
 static void reset(unsigned count) {
     radio_operation_busy = channel_change_pending = 0;
+    radio_startup_state = ESB_RADIO_READY;
     tracker_store_lock = 0;
     stored_trackers = count;
     memset(stored_tracker_addr, 0, sizeof(stored_tracker_addr));

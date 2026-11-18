@@ -65,7 +65,6 @@ static void k_busy_wait(unsigned us) {
 }
 static void k_msleep(unsigned ms) { tick+=ms*1000; }
 static void k_yield(void) {}
-static int clocks_start(void) { return 0; }
 static int esb_radio_operation_begin(void) { assert(!owner); owner=true; return 0; }
 static void esb_radio_operation_end(void) { assert(owner && hw.STATE==3); releases++; owner=false; }
 static int esb_radio_operation_stop(void) { assert(owner); hw.STATE=0; return 0; }

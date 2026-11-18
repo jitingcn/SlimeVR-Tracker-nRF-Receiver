@@ -147,7 +147,6 @@ static inline uint8_t esb_rf_channel_decode(uint8_t stored)
 #define ESB_OTA_VERIFY_TYPE 0x24   // Request CRC verification (receiver → tracker)
 #define ESB_OTA_ACTIVATE_TYPE 0x25 // Activate new firmware (receiver → tracker)
 
-int clocks_start(void);
 int esb_initialize(bool);
 /* Internal background transactions suppress only routine initialization INFO. */
 int esb_initialize_quiet(bool tx);
@@ -248,11 +247,14 @@ void esb_set_remote_confirm_cb(esb_remote_confirm_cb_t cb);
 // Local receiver channel management
 int esb_set_receiver_channel(uint8_t channel); // Set local home, errno on failure
 int esb_clear_receiver_channel(void);         // Restore default local home
-/* Nonreentrant radio gate. Begin/end do not stop/restore hardware. Active transfer
- * predicates retain exclusion after their admission owner releases this gate. */
+/* Nonreentrant radio gate, available only after boot RX succeeds. Begin/end
+ * do not stop/restore hardware. Active transfer predicates retain exclusion
+ * after their admission owner releases this gate. */
 bool esb_channel_is_busy(void);
 int esb_radio_operation_begin(void);
 int esb_radio_collection_begin(void); /* Admission for replacing an existing raw session */
+/* USB flash-only recovery may reserve the gate after a safe startup failure. */
+int esb_radio_self_ota_begin(void);
 void esb_radio_operation_end(void);
 int esb_radio_operation_stop(void);
 /* Owner-held checked PTX/PRX teardown. Failure latches the radio owner fault. */

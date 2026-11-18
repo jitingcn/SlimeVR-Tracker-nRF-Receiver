@@ -41,11 +41,13 @@ def function(source, name, occurrence=0):
 
 esb = (SOURCE / "esb.c").read_text()
 auto = (SOURCE / "auto_channel.c").read_text()
+startup = extract_block(esb, r"^enum esb_radio_startup \{", semicolon=True)
 lifecycle = "\n\n".join(function(esb, name) for name in (
     "esb_radio_quiesce", "esb_initialize_internal", "esb_initialize",
     "esb_initialize_quiet", "esb_home_beacon_send", "esb_radio_operation_stop",
     "radio_operation_begin", "esb_radio_operation_begin", "esb_radio_operation_end",
     "channel_apply"))
+lifecycle = startup + "\nstatic atomic_t radio_startup_state;\n\n" + lifecycle
 ack = function(esb, "esb_ack_handler_cb").split("/* ---- Discovery pairing packets", 1)[0]
 ack += "\n downstream_ack++; (void)pipe_id; (void)ack_payload;\n}\n"
 event = "\n\n".join(

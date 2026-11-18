@@ -48,7 +48,7 @@ typedef atomic_int atomic_t;
 #define atomic_set(a,v) atomic_store(a,v)
 #define atomic_clear(a) atomic_store(a,0)
 static bool radio_owned;
-static int esb_radio_operation_begin(void) {
+static int esb_radio_self_ota_begin(void) {
     if (radio_owned) return -EBUSY;
     radio_owned = true;
     return 0;

@@ -317,6 +317,7 @@ static int k_msgq_put(void *queue, const void *item, int timeout)
 static void reset(void)
 {
     home_beacon_tx_result = radio_operation_busy = 0;
+    radio_startup_state = ESB_RADIO_READY;
     esb_initialized = esb_radio_fault = radio_fault = false;
     info_logs = error_logs = warning_logs = status_errors = 0;
     init_calls = disable_calls = write_calls = start_calls = rx_start_calls = 0;

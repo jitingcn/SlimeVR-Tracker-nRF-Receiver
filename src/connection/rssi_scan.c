@@ -265,13 +265,12 @@ static struct {
 
 void rssi_scan_run_and_print(void)
 {
-	if (esb_radio_operation_begin()) {
-		printk("RSSI scan busy: radio in use\n");
+	int admission = esb_radio_operation_begin();
+	if (admission) {
+		printk(admission == -EBUSY ? "RSSI scan busy: radio in use\n" :
+		       "RSSI scan unavailable: radio startup or teardown failed\n");
 		return;
 	}
-	// Ensure HF clock is running (best-effort). This is already started by ESB thread,
-	// but keeping it explicit makes the scan less fragile.
-	(void)clocks_start();
 
 	printk(
 		"RSSI scan (ESB channels %u..%u): samples/ch/sweep=%u, sweeps=%d (total=%u samples/ch)\n",

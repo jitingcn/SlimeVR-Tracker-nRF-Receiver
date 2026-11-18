@@ -742,6 +742,12 @@ static void tdma_recalculate(bool forced)
 static atomic_t radio_operation_busy;
 /* Sticky on an unsafe teardown: never reinitialize/release a faulted RADIO. */
 static bool esb_radio_fault;
+enum esb_radio_startup {
+	ESB_RADIO_STARTING,
+	ESB_RADIO_READY,
+	ESB_RADIO_STARTUP_FAILED,
+};
+static atomic_t radio_startup_state;
 static atomic_t channel_change_pending;
 static uint8_t pending_channel;
 static uint8_t channel_command;
@@ -756,15 +762,17 @@ static esb_remote_confirm_cb_t remote_confirm_cb;
 
 bool esb_channel_is_busy(void)
 {
-	return atomic_get(&radio_operation_busy) != 0;
+	return atomic_get(&radio_startup_state) != ESB_RADIO_READY ||
+	       atomic_get(&radio_operation_busy) != 0;
 }
 
-static int radio_operation_begin(bool replace_collection)
+static int radio_operation_begin(bool replace_collection, bool require_radio)
 {
-	if (esb_radio_fault) {
+	enum esb_radio_startup startup = atomic_get(&radio_startup_state);
+	if (esb_radio_fault || (require_radio && startup == ESB_RADIO_STARTUP_FAILED)) {
 		return -EIO;
 	}
-	if (!atomic_cas(&radio_operation_busy, 0, 1)) {
+	if (startup == ESB_RADIO_STARTING || !atomic_cas(&radio_operation_busy, 0, 1)) {
 		return -EBUSY;
 	}
 	if (esb_ota_relay_is_active() || receiver_ota_is_active() ||
@@ -783,12 +791,17 @@ static int radio_operation_begin(bool replace_collection)
 
 int esb_radio_operation_begin(void)
 {
-	return radio_operation_begin(false);
+	return radio_operation_begin(false, true);
+}
+
+int esb_radio_self_ota_begin(void)
+{
+	return radio_operation_begin(false, false);
 }
 
 int esb_radio_collection_begin(void)
 {
-	int err = radio_operation_begin(true);
+	int err = radio_operation_begin(true, true);
 	if (!err) {
 		esb_auto_loss_invalidate();
 	}
@@ -2890,42 +2903,49 @@ static void event_handler(struct esb_evt const *event)
 	}
 }
 
-int clocks_start(void)
-{
-	int err;
-	int res;
-	struct onoff_manager *clk_mgr;
-	struct onoff_client clk_cli;
-	int fetch_attempts = 0;
+#define HFXO_START_TIMEOUT_MS 100
+static K_SEM_DEFINE(clocks_start_sem, 0, 1);
+static struct onoff_client clocks_start_client;
+static int clocks_start_result;
 
-	clk_mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
-	if (!clk_mgr) {
-		LOG_ERR("Unable to get the Clock manager");
+static void clocks_start_complete(struct onoff_manager *mgr, struct onoff_client *cli,
+				  uint32_t state, int res)
+{
+	ARG_UNUSED(mgr);
+	ARG_UNUSED(cli);
+	clocks_start_result = res < 0 ? res : (state == ONOFF_STATE_ON ? 0 : -EIO);
+	k_sem_give(&clocks_start_sem);
+}
+
+/* Single attempt, owned by the ESB startup thread. On success the receiver
+ * keeps this reference until reset, including between ESB/scanner modes. */
+static __attribute__((noinline)) int clocks_start(void)
+{
+	struct onoff_manager *mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
+	if (!mgr) {
 		return -ENXIO;
 	}
 
-	sys_notify_init_spinwait(&clk_cli.notify);
-
-	err = onoff_request(clk_mgr, &clk_cli);
+	/* Completion may run inside request, or even after a timeout if the
+	 * manager already detached the notification. Never reuse this client. */
+	sys_notify_init_callback(&clocks_start_client.notify, clocks_start_complete);
+	int err = onoff_request(mgr, &clocks_start_client);
 	if (err < 0) {
-		LOG_ERR("Clock request failed: %d", err);
 		return err;
 	}
 
-	do {
-		err = sys_notify_fetch_result(&clk_cli.notify, &res);
-		if (!err && res) {
-			LOG_ERR("Clock could not be started: %d", res);
-			return res;
-		}
-		if (err && ++fetch_attempts > 10000) {
-			LOG_WRN("Unable to fetch Clock request result: %d", err);
-			return err;
-		}
-	} while (err);
+	if (k_sem_take(&clocks_start_sem, K_MSEC(HFXO_START_TIMEOUT_MS)) == 0) {
+		return clocks_start_result;
+	}
 
-	LOG_DBG("HF clock started");
-	return 0;
+	/* Cancels a queued request, or releases the ref already assigned at
+	 * transition completion, even if our callback hasn't run yet. For a
+	 * raced failed transition the manager is in ERROR and grants no ref. */
+	err = onoff_cancel_or_release(mgr, &clocks_start_client);
+	if (err < 0 && err != -EIO) {
+		LOG_ERR("HFXO timeout cleanup failed: %d", err);
+	}
+	return -ETIMEDOUT;
 }
 /* ESB pipe addresses (base addresses big-endian). */
 static const uint8_t discovery_base_addr_0[4] = {0x62, 0x39, 0x8A, 0xF2};
@@ -4444,8 +4464,6 @@ static int tracker_store_restore(void)
 
 static void esb_thread(void)
 {
-	clocks_start();
-
 	int roster_err = tracker_store_restore();
 	uint32_t roster_retry_at = k_uptime_get_32() + 1000;
 	uint8_t tracker_count = stored_trackers;
@@ -4470,10 +4488,24 @@ static void esb_thread(void)
 	memcpy(receiver_device_addr, dev_addr, 6);
 	LOG_INF("Receiver address: %012llX", *dev_addr & 0xFFFFFFFFFFFF);
 
-	// Always start in unified mode: pipe 0 for pairing, pipes 1-7 for data
-	esb_set_addr_unified();
-	esb_initialize(false);
-	esb_start_rx();
+	int err = clocks_start();
+	if (!err) {
+		// Unified mode: pipe 0 for pairing, pipes 1-7 for data
+		esb_set_addr_unified();
+		err = esb_initialize(false);
+		if (!err) {
+			err = esb_start_rx();
+			if (err) {
+				(void)esb_radio_quiesce();
+			}
+		}
+	}
+	if (err) {
+		LOG_ERR("Radio startup failed: %d", err);
+		set_status(SYS_STATUS_CONNECTION_ERROR, true);
+		atomic_set(&radio_startup_state, ESB_RADIO_STARTUP_FAILED);
+		return;
+	}
 
 	// Auto-enable pairing mode if no stored trackers
 	if (tracker_store_ready && tracker_count == 0) {
@@ -4485,6 +4517,7 @@ static void esb_thread(void)
 		LOG_INF("No stored trackers, pairing mode auto-enabled");
 		set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 	}
+	atomic_set(&radio_startup_state, ESB_RADIO_READY);
 	auto_channel_init(receiver_device_addr);
 
 	while (1) {

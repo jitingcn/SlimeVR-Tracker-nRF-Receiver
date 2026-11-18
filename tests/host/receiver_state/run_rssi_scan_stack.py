@@ -21,8 +21,9 @@ it. The linked scanner, polling, FEM/MPSL ownership/cleanup, SDK ESB
 initialization, address setup, start_rx and printk/cbvprintf_package are real.
 
 Hardware leaves: immediate RADIO task/event/state completion, synthetic RSSI,
-one-shot TIMER compares, EGU/PPI routing, GPIO register storage, HF-clock
-completion, RTC reads and sleeps. Kernel leaves: thread creation/wakeup/naming,
+one-shot TIMER compares, EGU/PPI routing, GPIO register storage, RTC reads and
+sleeps. The boot thread's existing HFXO reservation is a precondition, not
+measured on the worker. Kernel leaves: thread creation/wakeup/naming,
 scheduler switching, spinlock ownership diagnostics and TLS. Real deferred-log
 allocation/publication run against an empty, DWARF-initialized linked ring; an
 independent logger consumer drains committed records at modeled sleeps.
@@ -483,13 +484,8 @@ def replay(path, image, abi, case, soc):
             ret()
         elif base.startswith('k_uptime_get'):
             ret(virtual_us // 1000)
-        elif base == 'onoff_request':
-            cm, _ = abi['onoff_client']
-            nm, _ = abi['sys_notify']
-            notify = cpu.reg_read(UC_ARM_REG_R1) + cm['notify']
-            put_word(notify + nm['flags'], 0)
-            put_word(notify + nm['result'], 0)
-            ret()
+        elif base == 'onoff_request' and phase == 'worker':
+            raise RuntimeError('RSSI scanner acquired a second boot-owned HFXO reference')
         elif base in ('z_spin_lock_set_owner', 'k_wakeup',
                       'z_impl_k_wakeup', 'k_thread_name_set', 'z_impl_k_thread_name_set',
                       'reschedule', 'z_reschedule', 'z_reschedule_unlocked', 'z_swap_irqlock',
@@ -673,6 +669,9 @@ def replay(path, image, abi, case, soc):
         # same (tx, quiet) ABI and remains the actual full SDK restoration path.
         check(call('esb_initialize_internal', (0, 1)) == 0, 'Initial real ESB initialization failed')
         check(call('esb_start_rx') == 0 and word(RADIO + STATE) == 3, 'Initial physical RX failed')
+        # This fixture runs the post-boot scanner, not the ESB boot thread.
+        # Mirror its ESB_RADIO_READY publication only after RX really started.
+        put('radio_startup_state', 1)
         home_radio = {offset: word(RADIO + offset) for offset in HOME_REGISTERS}
         started, busy = status_code('RCV_HID_ST_STARTED'), status_code('RCV_HID_ST_EBUSY')
         request(started)
@@ -763,7 +762,7 @@ def main():
     if args.cases and not fem_build and 'restore_failure' in args.cases:
         parser.error('restore_failure requires a linked FEM build')
     names = {'k_work_q', 'k_work', '_slist', 'init_entry', 'mpsc_pbuf_buffer',
-             'onoff_client', 'sys_notify', 'device', 'device_ops'}
+             'device', 'device_ops'}
     if fem_build:
         names.add('mpsl_fem_event_t')
     abi = layouts(args.elf, names)

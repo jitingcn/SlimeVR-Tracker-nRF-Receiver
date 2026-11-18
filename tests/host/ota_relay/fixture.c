@@ -185,6 +185,7 @@ bool esb_ota_relay_is_active(void);
 static bool receiver_ota_is_active(void) { return receiver_ota_active; }
 static bool data_collect_is_active(void) { return collect_active; }
 static bool data_collect_batch_is_active(void) { return collect_batch_active; }
+static int atomic_get(const atomic_t *value) { return *value; }
 static bool atomic_cas(atomic_t *value, int old, int next)
 {
     assert(value == &radio_operation_busy && old == 0 && next == 1);
