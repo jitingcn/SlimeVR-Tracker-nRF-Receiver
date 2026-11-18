@@ -164,8 +164,8 @@ static void reset_fixture(uint8_t count, uint64_t time)
     assert(!irq_depth && !mutex_depth && count <= MAX_TRACKERS);
     now_ms = time; restore_error = 0; saved_count = count;
     tdma_active_mask = 0;
-    tdma_staged.deferred_joins = 0;
-    tdma_staged.native_followup = false;
+    tdma_staged.valid = tdma_staged.native_followup = false;
+    tdma_staged.native_guard_until_ms = 0;
     relay_user_mode = RELAY_MODE_AUTO;
     relay_coord_set_enabled(&relay_coord, relay_user_mode != RELAY_MODE_OFF);
     unsigned int key = irq_lock();
