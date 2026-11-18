@@ -6927,6 +6927,12 @@ static RELAY_RAMFUNC int relay_freeze_arm(struct relay_coord *rc, const struct r
 		relay_control_diag.arm_failed++;
 		relay_control_diag.arm_err = err;
 		relay_arm_failure(w, before, err);
+		if (err == -ETIMEDOUT) {
+			/* SDK could not confirm RADIO DISABLED and invalidated PRX. */
+			esb_initialized = false;
+			esb_radio_fault = true;
+			return err;
+		}
 		goto failed;
 	}
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
@@ -7040,6 +7046,11 @@ __attribute__((noipa, optimize("O3"))) static RELAY_RAMFUNC int relay_repeat_arm
 			relay_control_diag.arm_failed++;
 			relay_control_diag.arm_err = err;
 			relay_arm_failure(w, before, err);
+			if (err == -ETIMEDOUT) {
+				esb_initialized = false;
+				esb_radio_fault = true;
+				return err;
+			}
 		}
 	}
 	if (err) {

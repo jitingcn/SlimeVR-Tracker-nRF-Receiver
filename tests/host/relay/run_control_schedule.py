@@ -70,7 +70,7 @@ static struct relay_demand relay_demand_state;
 static struct relay_runtime_settings relay_applied_settings;
 static struct relay_coord relay_coord;
 static struct relay_control relay_grants;
-static bool esb_initialized;
+static bool esb_initialized, esb_radio_fault;
 static uint8_t relay_profile, relay_epoch;
 static uint32_t tdma_active_mask, relay_origin, relay_session, relay_layout_generation;
 static struct { bool valid; } tdma_staged;
@@ -246,6 +246,7 @@ static void reset_device(void)
     relay_control_late = relay_control_plan_max = relay_control_grant_max = 0;
     relay_control_entry_late = relay_control_entry_max = 0;
     relay_freeze_done = radio_operation_busy = 0;
+    esb_radio_fault = false;
     irq_depth = sleeps = prepare_count = 0;
     inject_late_prepare = check_future_preparation = false;
     fail_prepare = fail_freeze = false;
@@ -470,6 +471,27 @@ static void failed_repeat_snapshot(void)
     assert(relay_control_diag.failed_arm_after == -2 && relay_control_diag.failed_arm_err == -ETIME);
 }
 
+static void sdk_arm_timeout(bool repeat)
+{
+    reset_device();
+    struct relay_control control = {.epoch = 7, .session = 123};
+    struct relay_control_work work = {
+        .control = &control, .generation = 9, .start_event = 1, .repeat = repeat
+    };
+    relay_layout_generation = 9;
+    relay_epoch = 7;
+    relay_session = 123;
+    relay_profile = 1;
+    esb_initialized = true;
+    fail_arm = -ETIMEDOUT;
+    assert(!relay_control_schedule(0, 1, clock_ticks + 40U,
+        repeat ? relay_repeat_callback : relay_freeze_callback, &work));
+    k_sem_take(&relay_freeze_done, K_FOREVER);
+    assert(work.result == -ETIMEDOUT && esb_radio_fault && radio_operation_busy);
+    assert(!esb_initialized && !relay_control_eligible());
+    relay_control_cancel(0, 1);
+}
+
 int main(void)
 {
     /* 120-Hz rational padding has both 273 and 274 tick frames. */
@@ -488,6 +510,8 @@ int main(void)
         for (unsigned lag = 0; lag <= 2; ++lag)
             for (unsigned work = 0; work <= 2; ++work) guarded_arm(mode, lag, work);
     failed_repeat_snapshot();
+    sdk_arm_timeout(false);
+    sdk_arm_timeout(true);
     for (enum thread_fault fault = LATE; fault <= GENERATION; ++fault) thread_case(fault);
     puts("Control target, live repair phase, late setup, compare cleanup and future retry passed");
 }
