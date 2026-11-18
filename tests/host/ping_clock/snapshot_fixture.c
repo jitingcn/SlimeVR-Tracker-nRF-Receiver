@@ -82,18 +82,6 @@ static uint32_t checked_ping_ticks(uint32_t ticks)
     attempt_preemption(PING_TIMESTAMP, TICKS_READ);
     return ticks;
 }
-static bool checked_slot_valid(bool valid)
-{
-    observed_valid = valid;
-    attempt_preemption(SLOT_TIMESTAMP, VALID_READ);
-    return valid;
-}
-static uint32_t checked_slot_ticks(uint32_t ticks)
-{
-    observed_ticks = ticks;
-    attempt_preemption(SLOT_TIMESTAMP, TICKS_READ);
-    return ticks;
-}
 #else
 static uint32_t snapshot_uptime_ticks(void) { return k_uptime_ticks(); }
 #endif
@@ -221,34 +209,7 @@ static void test_reader_preemption(enum preemption_point point)
     assert(tracker_diags[2].g_ping_isr_rx_ticks_valid);
     assert(tracker_diags[2].g_ping_isr_rx_ticks == 12);
 
-    prepare(SLOT_TIMESTAMP, 12, true, 17, point, PUBLISH_RADIO);
-    tdma_check_slot(2, 13, 40);
-    tdma_deferred_process();
-    check_preemption(true, 12);
-    assert(tracker_diags[2].stats.count == 1);
-    assert(tracker_diags[2].stats.raw_min_offset == 2);
-    assert(tracker_diags[2].stats.phase_hist[66] == 1);
-    assert(tracker_diags[2].stats.rssi_hist[40] == 1);
-    assert(tracker_diags[2].g_last_isr_rx_valid);
-    assert(tracker_diags[2].g_last_isr_rx_ticks == 17);
 
-    prepare(SLOT_TIMESTAMP, 12, false, 17, point, PUBLISH_RADIO);
-    tdma_check_slot(2, 13, 40);
-    tdma_deferred_process();
-    check_preemption(false, 12);
-    assert(tracker_diags[2].stats.raw_min_offset == 3);
-    assert(tracker_diags[2].stats.phase_hist[67] == 1);
-    assert(tracker_diags[2].g_last_isr_rx_valid);
-    assert(tracker_diags[2].g_last_isr_rx_ticks == 17);
-
-    prepare(SLOT_TIMESTAMP, UINT32_MAX - 1u, true, 15, point, PUBLISH_RADIO);
-    tdma_check_slot(2, 16, 40);
-    tdma_deferred_process();
-    check_preemption(true, UINT32_MAX - 1u);
-    assert(tracker_diags[2].stats.raw_min_offset == 4);
-    assert(tracker_diags[2].stats.phase_hist[68] == 1);
-    assert(tracker_diags[2].g_last_isr_rx_valid);
-    assert(tracker_diags[2].g_last_isr_rx_ticks == 15);
 }
 
 static void test_writer_preemption(enum preemption_point point)
@@ -260,12 +221,7 @@ static void test_writer_preemption(enum preemption_point point)
     assert(tracker_diags[2].g_last_ping_isr_rx_ticks_raw == 132800);
     assert(tracker_diags[2].g_last_ping_rx_time_diff_ticks == 5);
 
-    prepare(SLOT_TIMESTAMP, 12, false, 17, point, SNAPSHOT_EVENT);
-    publish_radio();
-    check_preemption(true, 17);
-    assert(tracker_diags[2].stats.count == 1);
-    assert(tracker_diags[2].stats.raw_min_offset == 7);
-    assert(tracker_diags[2].stats.phase_hist[71] == 1);
+
 }
 static void test_deferred_diagnostics(void)
 {
@@ -273,6 +229,8 @@ static void test_deferred_diagnostics(void)
     tracker_slots[2].tdma_config_packed = (1u << 16) | (20u << 8);
     tdma_diag_head = tdma_diag_tail = UINT32_MAX - 10u;
     tdma_diag_overflow = 0;
+    tracker_diags[2].g_last_isr_rx_valid = true;
+    tracker_diags[2].g_last_isr_rx_ticks = 17; /* Later packet, same ID. */
     tdma_check_slot(2, 13, 40);
     assert(tracker_diags[2].stats.count == 0);
     /* Changes after capture must not alter the queued packet's phase. */

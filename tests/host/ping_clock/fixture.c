@@ -364,14 +364,18 @@ static struct esb_payload ack_for(const struct esb_payload *p, bool *has_ack)
 	tick_context = TICK_EVENT;
 	return ack;
 }
-static void dispatch(const struct esb_payload *p)
+static void dispatch_received(const struct esb_payload *p, uint32_t rx_ticks)
 {
     incoming = *p;
-	incoming.rx_ticks = now_ticks;
+	incoming.rx_ticks = rx_ticks;
 	incoming_ready = true;
 	const struct esb_evt event = {.evt_id = ESB_EVENT_RX_RECEIVED};
 	event_handler(&event);
 	assert(!incoming_ready);
+}
+static void dispatch(const struct esb_payload *p)
+{
+    dispatch_received(p, now_ticks);
 }
 static void confirm(uint8_t id, uint8_t flag)
 {
@@ -436,7 +440,7 @@ static void test_invalid(const char *which)
         assert(!has_ack);
     }
     now_ticks = 132795;
-    dispatch(&p);
+    dispatch_received(&p, 132768);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     equal_state(&before);
 #endif
@@ -624,7 +628,7 @@ static void test_valid(void)
     equal_state(&expected);
 #endif
     now_ticks = 132795;
-    dispatch(&p);
+    dispatch_received(&p, 132768);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     expected.bias[id] = 9;
     expected.ppb[id] = 122070;
@@ -653,7 +657,7 @@ static void test_valid_dirty(void)
     equal_state(&expected);
 #endif
     now_ticks = 132795;
-    dispatch(&p);
+    dispatch_received(&p, 132768);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     expected.dirty[id] = 4;
     expected.rejects[id] = 11;
@@ -678,7 +682,7 @@ static void test_reacquire(void)
     equal_state(&expected);
 #endif
     now_ticks = 132795;
-    dispatch(&p);
+    dispatch_received(&p, 132768);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     expected.bias[id] = 163;
     expected.ppb_valid[id] = 0;
@@ -817,7 +821,7 @@ static void test_valid_after_invalid(void)
     equal_state(&expected);
 #endif
     now_ticks = 132795;
-    dispatch(&p);
+    dispatch_received(&p, 132768);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     expected.bias[id] = 9;
     expected.ppb[id] = 122070;
@@ -852,7 +856,7 @@ static void test_early_sequence_exit(bool duplicate)
     equal_state(&expected);
 #endif
     now_ticks = 132795;
-    dispatch(&p);
+    dispatch_received(&p, 132768);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     expected.bias[id] = 9;
     expected.ppb[id] = 122070;

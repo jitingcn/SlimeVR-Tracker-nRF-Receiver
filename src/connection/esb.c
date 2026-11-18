@@ -2185,18 +2185,6 @@ static void tdma_check_slot(uint8_t tracker_id, uint32_t rx_ticks, int8_t rssi)
 		return;
 	}
 
-	/* Prefer RADIO ISR timestamp (accurate) over EVENT_IRQ timestamp
-	 * (delayed 10-25+ ticks by kernel scheduling).  The ISR timestamp is
-	 * now available for ALL packets including NoACK data, thanks to the
-	 * ESB library patch that always calls on_radio_disabled_rx_dpl(). */
-	k_spinlock_key_t timestamp_key = k_spin_lock(&tdma_timestamp_lock);
-	bool timestamp_valid = tracker_diags[tracker_id].g_last_isr_rx_valid;
-	uint32_t timestamp_ticks = tracker_diags[tracker_id].g_last_isr_rx_ticks;
-	k_spin_unlock(&tdma_timestamp_lock, timestamp_key);
-	if (timestamp_valid) {
-		rx_ticks = timestamp_ticks;
-	}
-
 	unsigned key = irq_lock();
 	uint32_t cfg = tracker_slots[tracker_id].tdma_config_packed;
 	if ((cfg >> 24) == 0xff || !(cfg & 0xff0000) || !(cfg & 0xff00)) {

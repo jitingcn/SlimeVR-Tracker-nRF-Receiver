@@ -61,10 +61,7 @@ clock = instrument('account_ping_clock', (
     ('g_ping_isr_rx_ticks_valid', 'checked_ping_valid'),
     ('g_ping_isr_rx_ticks', 'checked_ping_ticks'),
 ))
-slot = instrument('tdma_check_slot', (
-    ('g_last_isr_rx_valid', 'checked_slot_valid'),
-    ('g_last_isr_rx_ticks', 'checked_slot_ticks'),
-))
+slot = instrument('tdma_check_slot', ())
 deferred = source[source.index('struct tdma_diag_sample {'):source.index('static void tdma_check_slot(')]
 ack = extract_block(source, r'^static void esb_ack_handler_cb\s*\([^;{}]*\)\s*\{')
 ack = ack.split('\t/* Other packet types:', 1)[0] + '\n}\n'
