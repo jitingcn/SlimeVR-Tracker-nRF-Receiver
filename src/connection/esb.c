@@ -164,17 +164,19 @@ struct tracker_slot {
 	uint8_t last_ping_counter;
 	bool ping_counter_initialized;
 	uint64_t last_ping_time;
+#if defined(CONFIG_RELAY)
+	uint64_t query_advertised_ticks;
+#endif
 	uint8_t last_pong_queued_counter;
 	uint8_t pipe_mismatch_count;
 	uint8_t crc_error_count;
 	uint16_t last_raw_seq;
 	bool last_raw_valid;
-	/* Shared ACK tuples are published under irq_lock with their command flag. */
-	uint8_t tracker_remote_command;
 #if defined(CONFIG_RELAY)
 	bool query_advertised;
-	uint64_t query_advertised_ticks;
 #endif
+	/* Shared ACK tuples are published under irq_lock with their command flag. */
+	uint8_t tracker_remote_command;
 	uint8_t pending_cmd_arg;
 	uint16_t tracker_test_on_tps;
 	int16_t pending_sens_data[3];
