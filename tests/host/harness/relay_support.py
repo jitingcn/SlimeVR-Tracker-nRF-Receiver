@@ -66,6 +66,9 @@ def relay_declarations(esb, member_diagnostics=True):
                       " { relay_coord_init_once(); relay_control_ready = true;"
                       " (void)relay_control_diag; (void)relay_member_diag; }", ""])
 
+RELAY_ADMISSION = ("relay_layout_stageable", "relay_auto_roster_eligible")
+
+
 def relay_query_helpers(esb, membership=False):
     """Production query capture; isolated PING fixtures need its real state."""
     esb = select_relay(esb)
@@ -80,14 +83,14 @@ def relay_query_helpers(esb, membership=False):
             declaration = re.search(r"^static (?:atomic_t|uint32_t|bool) " + name
                                     + r"\b[^;]*;", esb, re.M).group()
             state.append(declaration.replace("ATOMIC_INIT(0)", "0"))
+        state.extend(_function(esb, name) for name in RELAY_ADMISSION)
     return "\n".join((*state, _function(esb, "relay_query_can_resume"),
                       _function(esb, "relay_query_update_locked"),
                       _function(esb, "relay_query_begin"), ""))
 
 
 
-STAGING_RECALC = ("tdma_staging_supported_locked", "tdma_apply_locked", "tdma_apply_finish",
-                  "relay_layout_stageable", "relay_auto_roster_eligible")
+STAGING_RECALC = ("tdma_staging_supported_locked", "tdma_apply_locked", "tdma_apply_finish") + RELAY_ADMISSION
 
 
 def staging_helpers(esb, recalc=False):

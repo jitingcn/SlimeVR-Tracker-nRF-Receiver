@@ -880,10 +880,26 @@ static struct {
 	bool valid;
 } tdma_staged;
 
+static bool relay_layout_stageable(uint16_t members)
+{
+	uint8_t direct = relay_mask_count(members);
+	struct relay_runtime_settings applied = relay_runtime_for_members(relay_settings, direct);
+	return relay_stage_lead_ticks(&applied, direct) <= RC_LAYOUT_MAX_ACTIVATION_TICKS;
+}
+
+static bool relay_auto_roster_eligible(uint32_t desired)
+{
+	return relay_user_mode != RELAY_MODE_AUTO
+		|| (relay_mask_count((uint16_t)desired) <= relay_settings.max_trackers
+			&& relay_coord_capable(&relay_coord, (uint16_t)desired)
+			&& relay_layout_stageable((uint16_t)desired));
+}
+
 /* All query lease state is serialized with membership and layout publication. */
 static bool relay_query_can_resume(void)
 {
-	return relay_coord_requested(&relay_coord, relay_user_mode, (uint16_t)tdma_active_mask);
+	return relay_coord_requested(&relay_coord, relay_user_mode, (uint16_t)tdma_active_mask)
+		&& relay_auto_roster_eligible(tdma_active_mask);
 }
 
 /* Caller holds irq_lock. A missed native hold must not pin its roster. */
@@ -977,21 +993,6 @@ static uint32_t tdma_admissible_mask(uint32_t desired)
 		candidates &= candidates - 1U;
 	}
 	return selected;
-}
-
-static bool relay_layout_stageable(uint16_t members)
-{
-	uint8_t direct = relay_mask_count(members);
-	struct relay_runtime_settings applied = relay_runtime_for_members(relay_settings, direct);
-	return relay_stage_lead_ticks(&applied, direct) <= RC_LAYOUT_MAX_ACTIVATION_TICKS;
-}
-
-static bool relay_auto_roster_eligible(uint32_t desired)
-{
-	return relay_user_mode != RELAY_MODE_AUTO
-		|| (relay_mask_count((uint16_t)desired) <= relay_settings.max_trackers
-			&& relay_coord_capable(&relay_coord, (uint16_t)desired)
-			&& relay_layout_stageable((uint16_t)desired));
 }
 
 /* How long the stats owner may sleep while a membership change is pending.
@@ -6536,8 +6537,9 @@ void esb_relay_print_status(void)
 	unsigned int key = irq_lock();
 	struct relay_control control = relay_grants;
 	enum relay_mode mode = relay_user_mode;
-	bool ready = relay_coord_ready(&relay_coord, (uint16_t)tdma_active_mask);
 	uint16_t members = (uint16_t)tdma_active_mask;
+	bool ready = relay_coord_ready(&relay_coord, members)
+		&& relay_auto_roster_eligible((uint32_t)atomic_get(&tdma_shadow_desired_mask));
 	bool engaged = relay_profile != 0;
 
 	uint16_t block_mask = relay_block_mask;

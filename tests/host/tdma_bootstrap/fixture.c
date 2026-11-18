@@ -1381,7 +1381,7 @@ static void query_forget_and_inability(void)
 	assert(!((uint32_t)atomic_get(&tdma_shadow_desired_mask) & BIT(2)));
 	assert(now_ms < (uint64_t)relay_query_until);
 
-	for (unsigned reason = 0; reason < 3; ++reason) {
+	for (unsigned reason = 0; reason < 4; ++reason) {
 		query_case_setup(0, true);
 		query_case_begin(0);
 		query_case_live_until(12000);
@@ -1392,10 +1392,12 @@ static void query_forget_and_inability(void)
 			esb_relay_set_mode(RELAY_MODE_OFF);
 		} else if (reason == 1) {
 			relay_coord.auto_engaged = false;
-		} else {
+		} else if (reason == 2) {
 			unsigned key = irq_lock();
 			relay_coord_forget(&relay_coord, 1, (uint32_t)now_ms);
 			irq_unlock(key);
+		} else {
+			relay_settings.max_trackers = 2; /* Auto cannot resume with three live members. */
 		}
 		service();
 		query_case_live_until(QUERY_CASE_LAST_REPAIR_MS + TDMA_SHADOW_LEAVE_GRACE_MS - 1);
