@@ -6144,9 +6144,6 @@ static int channel_change_begin(uint8_t encoded, uint8_t command, bool manual,
 	if (err) {
 		return err;
 	}
-	if (manual) {
-		auto_channel_set_enabled(false);
-	}
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	uint32_t mask = 0;
 	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; ++i) {
@@ -6185,6 +6182,9 @@ static int channel_change_begin(uint8_t encoded, uint8_t command, bool manual,
 	atomic_set(&channel_change_pending, 1);
 	irq_unlock(key);
 	k_mutex_unlock(&tracker_store_lock);
+	if (manual) {
+		auto_channel_set_enabled(false);
+	}
 	return 0;
 }
 

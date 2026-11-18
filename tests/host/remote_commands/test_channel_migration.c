@@ -1093,10 +1093,15 @@ int main(void) {
     for (unsigned pending=0; pending<2; pending++) {
         reset(3);relay_profile=!pending;
         tdma_staged.valid=pending;tdma_staged.p.profile=1;
-        assert(esb_set_all_trackers_channel(33)==-EBUSY);
-        assert(!radio_operation_busy && !channel_change_pending);
-        relay_profile=0;tdma_staged.valid=false;
-        assert(esb_set_all_trackers_channel(33)==0);deadline();
+        assert(esb_set_all_trackers_channel(33) == -EBUSY);
+        assert(auto_enabled && !radio_operation_busy && !channel_change_pending);
+        relay_profile = 0;
+        tdma_staged.valid = false;
+        assert(esb_set_all_trackers_channel(33) == 0);
+        assert(!auto_enabled);
+        deadline();
+        assert(completed == 1 && succeeded && physical_channel == 33);
+        assert(!esb_channel_is_busy());
     }
     puts("PASS receiver channel migration: offline/partial/all, fixed deadline, pending command isolation, snapshot, repeat/clear/zero, RF/storage rollback and exclusion");
     return 0;
