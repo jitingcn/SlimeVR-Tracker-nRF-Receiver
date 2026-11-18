@@ -988,7 +988,7 @@ static void query_info_holds_profile0(void)
 	rx_payload.data[7] = ESB_PONG_FLAG_OTA_QUERY_INFO;
 	tracker_slots[0].tracker_remote_command = ESB_PONG_FLAG_OTA_QUERY_INFO;
 	tracker_slots[0].query_advertised = true;
-	tracker_slots[0].query_advertised_ticks = (uint32_t)k_uptime_ticks() - 1;
+	tracker_slots[0].query_advertised_ticks = k_uptime_ticks() - 1;
 	rx_payload.data[ESB_PING_LEN - 1] = crc8_ccitt(0x07, rx_payload.data, ESB_PING_LEN - 1);
 	assert(host_validated_ping());
 	assert(relay_query_until == (int64_t)now_ms + 15000);
@@ -1017,7 +1017,7 @@ static void query_case_ping(uint8_t id, uint8_t flag)
 	if (flag == ESB_PONG_FLAG_OTA_QUERY_INFO) {
 		tracker_slots[id].tracker_remote_command = flag;
 		tracker_slots[id].query_advertised = true;
-		tracker_slots[id].query_advertised_ticks = (uint32_t)k_uptime_ticks() - 1;
+		tracker_slots[id].query_advertised_ticks = k_uptime_ticks() - 1;
 	}
 	memset(&rx_payload, 0, sizeof(rx_payload));
 	rx_payload.length = ESB_PING_LEN;

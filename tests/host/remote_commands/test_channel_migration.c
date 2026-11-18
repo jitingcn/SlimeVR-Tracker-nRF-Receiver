@@ -448,7 +448,7 @@ static void test_query_confirmation(void)
     assert(test_pong(query).data[7] == query);
     echo(0, query);
     assert(!relay_query_until); /* This PING predates its own ACK. */
-    now++;
+    now_ticks = (uint32_t)++now;
     struct esb_payload wrong_pipe = {.length = ESB_PING_LEN, .pipe = 2};
     wrong_pipe.data[0] = ESB_PING_TYPE;
     wrong_pipe.data[2] = ++echo_counter[0];
@@ -456,12 +456,12 @@ static void test_query_confirmation(void)
     wrong_pipe.data[12] = crc8_ccitt(0x07, wrong_pipe.data, 12);
     esb_receive_ping(&wrong_pipe, (uint32_t)now);
     assert(!relay_query_until && tracker_slots[0].tracker_remote_command == query);
-    now++;
+    now_ticks = (uint32_t)++now;
     echo(0, query);
     const int64_t deadline = now + 15000;
     assert(relay_query_until == deadline);
     assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
-    now++;
+    now_ticks = (uint32_t)++now;
     echo(0, query);
     assert(relay_query_until == deadline);
 }

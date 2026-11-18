@@ -173,7 +173,7 @@ struct tracker_slot {
 	uint8_t tracker_remote_command;
 #if defined(CONFIG_RELAY)
 	bool query_advertised;
-	uint32_t query_advertised_ticks;
+	uint64_t query_advertised_ticks;
 #endif
 	uint8_t pending_cmd_arg;
 	uint16_t tracker_test_on_tps;
@@ -3359,7 +3359,7 @@ static void esb_ack_handler_cb(
 		    ack_payload->data[0] == ESB_PONG_TYPE && ack_payload->data[7] == cmd &&
 		    tracker_id < stored_trackers && ack_payload->pipe == pipe_id &&
 		    !tracker_slots[tracker_id].query_advertised) {
-			tracker_slots[tracker_id].query_advertised_ticks = rx_ticks;
+			tracker_slots[tracker_id].query_advertised_ticks = k_uptime_ticks();
 			tracker_slots[tracker_id].query_advertised = true;
 		}
 #endif
@@ -3774,11 +3774,14 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 #if defined(CONFIG_RELAY)
 		if (ping_ack_flag == ESB_PONG_FLAG_OTA_QUERY_INFO) {
 			unsigned int key = irq_lock();
-			/* The receive timestamp predates the ACK for this same PING. */
+			/* Expand the queued 32-bit RX timestamp against current uptime.
+			 * The receive timestamp predates the ACK for this same PING. */
+			uint64_t now_ticks = k_uptime_ticks();
+			uint64_t received_ticks = now_ticks - ((uint32_t)now_ticks - event_ticks);
 			confirmed = tracker_id < stored_trackers && payload->pipe == 1U + tracker_id % 7U &&
 				tracker_slots[tracker_id].tracker_remote_command == ping_ack_flag &&
 				tracker_slots[tracker_id].query_advertised &&
-				(int32_t)(event_ticks - tracker_slots[tracker_id].query_advertised_ticks) > 0;
+				received_ticks > tracker_slots[tracker_id].query_advertised_ticks;
 			if (confirmed) {
 				tracker_slots[tracker_id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
 				tracker_slots[tracker_id].query_advertised = false;
