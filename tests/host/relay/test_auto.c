@@ -223,6 +223,24 @@ static void test_fast_switch_hysteresis(void) {
     assert(!rc.auto_engaged && now - recovery_start + RELAY_LAYOUT_ACTIVATION_MS <= 5000);
 }
 
+static void test_outage_cannot_inherit_another_members_weak_time(void) {
+    unsigned direct[11];
+    setup(); run(4,0,false);
+    for (unsigned id = 0; id < 11; id++) direct[id] = 50;
+    direct[3] = 30;
+    for (unsigned i = 0; i < SUSTAIN_TICKS - 1; i++) step_frames(direct,50,false);
+    assert(!rc.auto_engaged);
+
+    direct[3] = 50;
+    direct[4] = 0;
+    step_frames(direct,50,false); /* A recovers on B's first silent window. */
+    assert(!rc.auto_engaged);
+    step_frames(direct,50,false);
+    assert(!rc.auto_engaged);
+    step_frames(direct,50,false);
+    assert(rc.auto_engaged && rc.auto_poor_members == (1U << 4));
+}
+
 /* A remembered child needs a recovery judgement, even when direct arrivals
  * break its silence before there are enough frames to judge. */
 static void test_recovery_needs_samples(void) {
@@ -242,6 +260,7 @@ static void test_recovery_needs_samples(void) {
 }
 int main(void) {
     test_fast_switch_hysteresis();
+    test_outage_cannot_inherit_another_members_weak_time();
     test_recovery_needs_samples();
     setup(); run(400,0,false); assert(!rc.auto_engaged);
     run(400,4,false); assert(!rc.auto_engaged); /* 10% loss stays direct */

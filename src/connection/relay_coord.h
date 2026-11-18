@@ -158,15 +158,15 @@ static inline const struct rc_watch *relay_plan_watch_const(const struct rc_gran
 
 struct relay_coord {
 	bool auto_engaged, auto_applied;
-	uint16_t auto_members, auto_poor_members, auto_recovery_evidence;
-	uint32_t auto_poor_since, auto_good_since, auto_applied_since;
+	uint16_t auto_members, auto_poor_members, auto_recovery_evidence, auto_outage_members;
+	uint32_t auto_good_since, auto_applied_since;
 	/* Per member, over the recovery window: sum of 10 * direct - 9 * expected
 	 * frames of each judgement, clamped to int16. Until it first clamps,
 	 * >= 0 means exactly pooled >= 900; a clamped sum keeps its sign at the
 	 * clamp but may have a different sign from the unclamped sum. */
 	int16_t auto_balance[RC_MAX];
-	/* Per member: start of its current weak streak, 0 = not weak. */
-	uint32_t auto_weak_since[RC_MAX];
+	/* Per member: start of its current weak or outage streak, 0 = neither. */
+	uint32_t auto_poor_since[RC_MAX];
 	uint8_t cache_frames;
 	struct rc_peer peer[RC_MAX][RC_MAX]; /* helper -> child */
 	struct rc_choice choice[RC_MAX][2];

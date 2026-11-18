@@ -51,7 +51,8 @@ void relay_coord_forget(struct relay_coord *rc, uint8_t id, uint32_t now_ms)
 	memset(&rc->w[id], 0, sizeof(rc->w[id]));
 	/* A new session owes nothing for the old one's poor direct link. */
 	rc->auto_poor_members &= (uint16_t)~RC_BIT(id);
-	rc->auto_weak_since[id] = 0;
+	rc->auto_poor_since[id] = 0;
+	rc->auto_outage_members &= (uint16_t)~RC_BIT(id);
 	rc_auto_restart(rc);
 	for (unsigned i = 0; i < RC_MAX; i++) {
 		memset(&rc->peer[id][i], 0, sizeof(rc->peer[id][i]));
@@ -181,16 +182,22 @@ static uint32_t rc_auto_since(uint32_t now)
 	return now ? now : UINT32_MAX;
 }
 
-/* Track each member's weak streak; return members weak continuously for the
- * entry rule's RC_AUTO_ENTER_MS. weak = 0 clears every streak. */
-static uint16_t rc_auto_sustained(struct relay_coord *rc, uint16_t weak, uint32_t now)
+/* A member starts a new streak when it changes between weak and silent. */
+static uint16_t rc_auto_sustained(struct relay_coord *rc, uint16_t poor, uint16_t outage, uint32_t now)
 {
 	uint16_t sustained = 0;
+	uint16_t changed = rc->auto_outage_members ^ outage;
+	rc->auto_outage_members = outage;
 	for (unsigned i = 0; i < RC_MAX; i++) {
-		if (!(weak & RC_BIT(i))) rc->auto_weak_since[i] = 0;
-		else if (!rc->auto_weak_since[i]) rc->auto_weak_since[i] = rc_auto_since(now);
-		else if ((int32_t)(now - rc->auto_weak_since[i]) >= (int32_t)RC_AUTO_ENTER_MS)
+		uint32_t *since = &rc->auto_poor_since[i];
+		uint32_t threshold = (outage & RC_BIT(i)) ? RC_AUTO_OUTAGE_ENTER_MS : RC_AUTO_ENTER_MS;
+		if (!(poor & RC_BIT(i))) {
+			*since = 0;
+		} else if (!*since || (changed & RC_BIT(i))) {
+			*since = rc_auto_since(now);
+		} else if ((int32_t)(now - *since) >= (int32_t)threshold) {
 			sustained |= RC_BIT(i);
+		}
 	}
 	return sustained;
 }
@@ -200,48 +207,42 @@ static uint16_t rc_auto_sustained(struct relay_coord *rc, uint16_t weak, uint32_
 void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 	uint32_t now, bool applied, bool eligible)
 {
-	if (!relay_coord_ready(rc, members)) {
+	bool ready = relay_coord_ready(rc, members);
+	if (!ready) {
 		rc->auto_engaged = false;
-		rc->auto_poor_since = 0;
-		rc_auto_restart(rc);
 	}
 	/* A member that leaves owes nothing; one that rejoins starts unremembered. */
 	rc->auto_poor_members &= rc->auto_engaged ? members : 0U;
 	if (applied && !rc->auto_applied) rc->auto_applied_since = now;
 	rc->auto_applied = applied;
-	if (!eligible || members != rc->auto_members) {
-		/* A roster change resets the windows, not this tick's evidence. */
-		uint16_t sustained = rc_auto_sustained(rc, eligible ? rc_auto_weak(rc, members, now) : 0U, now);
-		if (rc->auto_engaged) rc->auto_poor_members |= sustained;
-		rc->auto_poor_since = 0;
-		rc_auto_restart(rc);
+	if (!eligible || !ready) {
 		rc->auto_members = members;
-		return;
-	}
-	if (!relay_coord_ready(rc, members)) {
-		rc->auto_poor_since = 0;
 		rc_auto_restart(rc);
-		(void)rc_auto_sustained(rc, 0U, now);
+		(void)rc_auto_sustained(rc, 0U, 0U, now);
 		return;
 	}
-	uint16_t weak = rc_auto_weak(rc, members, now), poor = weak;
-	bool fresh = true, outage = false;
+	uint16_t outage = 0;
+	bool fresh = true;
 	for (unsigned i = 0; i < RC_MAX; i++) {
 		if (!(members & RC_BIT(i))) continue;
 		const struct rc_tracker *t = &rc->t[i];
 		if (rc_direct_quiet(t, now)) {
-			poor |= RC_BIT(i);
-			outage = true;
+			outage |= RC_BIT(i);
 		}
 		fresh &= t->seen && !rc_after(now, t->quality_ms, RC_AUTO_QUALITY_MAX_MS);
 	}
 	/* Isolated judgements below RC_WEAK_PERMILLE neither mark a member nor
 	 * restart recovery; a weak streak, silence or stale quality restarts it.
 	 * Only a streak as long as the entry window marks an untouched member. */
-	uint16_t sustained = rc_auto_sustained(rc, weak, now);
+	uint16_t poor = rc_auto_weak(rc, members, now) | outage;
+	uint16_t sustained = rc_auto_sustained(rc, poor, outage, now);
 	if (rc->auto_engaged) rc->auto_poor_members |= sustained;
-	if (!poor) rc->auto_poor_since = 0;
-	else if (!rc->auto_poor_since) rc->auto_poor_since = rc_auto_since(now);
+	if (members != rc->auto_members) {
+		/* Preserve continuing members' streaks across a roster change. */
+		rc->auto_members = members;
+		rc_auto_restart(rc);
+		return;
+	}
 	if (poor || !fresh) {
 		rc_auto_restart(rc);
 	} else if (!rc->auto_good_since) {
@@ -249,9 +250,7 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 		rc_auto_restart(rc);
 		rc->auto_good_since = rc_auto_since(now);
 	}
-	uint32_t enter_ms = outage ? RC_AUTO_OUTAGE_ENTER_MS : RC_AUTO_ENTER_MS;
-	if (!rc->auto_engaged && rc->auto_poor_since
-	    && (int32_t)(now - rc->auto_poor_since) >= (int32_t)enter_ms) {
+	if (!rc->auto_engaged && sustained) {
 		rc->auto_engaged = true;
 		rc->auto_poor_members = poor; /* the trigger set */
 		rc_auto_restart(rc);
@@ -268,7 +267,6 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 		} else if (!(rc->auto_poor_members & ~rc->auto_recovery_evidence)
 			   && applied && rc_after(now, rc->auto_applied_since, RC_AUTO_HOLD_MS)) {
 			rc->auto_engaged = false;
-			rc->auto_poor_since = 0;
 			rc->auto_poor_members = 0;
 			rc_auto_restart(rc);
 		}
@@ -342,7 +340,8 @@ void relay_coord_set_enabled(struct relay_coord *rc, bool enabled)
 	rc->enabled = enabled;
 	if (!enabled) {
 		rc->auto_engaged = false;
-		rc->auto_poor_since = rc->auto_good_since = 0;
+		(void)rc_auto_sustained(rc, 0U, 0U, 0U);
+		rc_auto_restart(rc);
 	}
 }
 
