@@ -183,7 +183,7 @@ static uint16_t rc_auto_weak(const struct relay_coord *rc, uint16_t members, uin
 }
 
 _Static_assert(RC_GOOD_PERMILLE % 100U == 0U, "exact pooled recovery balance");
-/* Pool one judgement into the recovery window. Until the balance first
+/* Pool one stats interval into the recovery window. Until the balance first
  * clamps, it is >= 0 exactly while direct / expected frames across the window
  * is >= RC_GOOD_PERMILLE. After clamping, its sign can differ from that pool. */
 static void rc_auto_pool(int16_t *balance, struct rc_judgement j)
@@ -316,8 +316,8 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 		bool owed = false, sampled = true;
 		for (unsigned i = 0; i < RC_MAX; i++) {
 			if (!(rc->auto_poor_members & RC_BIT(i))) continue;
-			owed |= rc->auto_balance[i] < 0;
-			sampled &= rc->t[i].recovery_expected >= RC_MIN_EXPECTED;
+			if (rc->t[i].recovery_expected < RC_MIN_EXPECTED) sampled = false;
+			else if (rc->auto_balance[i] < 0) owed = true;
 		}
 		if (owed) {
 			/* Consecutive windows: early loss is not averaged away. */

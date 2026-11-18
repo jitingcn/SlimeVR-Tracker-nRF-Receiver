@@ -273,13 +273,25 @@ static void test_reentry_outage_counts_only_native_silence(void) {
 
 /* One frame per member every 10 ms. Drop two out of five frames from ID 3
  * during a burst. Sample the loss at frame time so bursts can cross windows. */
-static void step_burst(unsigned elapsed, unsigned phase, unsigned length, bool applied) {
-    unsigned direct[11];
-    for (unsigned i = 0; i < 11; i++) direct[i] = RC_WINDOW_MS / 10;
-    for (unsigned ms = elapsed; ms < elapsed + RC_WINDOW_MS; ms += 10) {
-        if ((ms + phase) % 8000 < length && (ms / 10) % 5 < 2) direct[3]--;
+static void burst_samples(unsigned elapsed, unsigned phase, unsigned length,
+                          unsigned first, unsigned end) {
+    unsigned expected = 0, gaps = 0;
+    for (unsigned offset = first; offset < end; offset += 10) {
+        unsigned ms = elapsed + offset;
+        expected++;
+        if ((ms + phase) % 8000 < length && (ms / 10) % 5 < 2) gaps++;
     }
-    step_frames(direct,RC_WINDOW_MS / 10,applied);
+    for (unsigned id = 0; id < 11; id++) {
+        unsigned missing = id == 3 ? gaps : 0;
+        for (unsigned n = 0; n < expected - missing; n++)
+            relay_coord_note_frame(&rc,id,RC_DIRECT,RC_SEQ_NORMAL,n ? 0 : missing,70,now + end);
+    }
+}
+
+static void finish_burst(bool applied) {
+    now += RC_WINDOW_MS;
+    relay_coord_tick(&rc,roster,now);
+    relay_coord_auto_update(&rc,roster,now,applied,true);
 }
 
 static unsigned periodic_transitions(unsigned length, unsigned phase) {
@@ -288,13 +300,18 @@ static unsigned periodic_transitions(unsigned length, unsigned phase) {
     unsigned transitions = 0;
     bool applied = false, staged = false;
     for (unsigned elapsed = 0; elapsed < 80000; elapsed += RC_WINDOW_MS) {
+        unsigned first = 0;
         if (activation && now + RC_WINDOW_MS >= activation) {
+            first = (activation - now + 9) / 10 * 10;
+            burst_samples(elapsed,phase,length,0,first);
             applied = staged;
             if (!applied) relay_coord_auto_native(&rc,activation);
             activation = 0;
             transitions++;
         }
-        step_burst(elapsed,phase,length,applied);
+        burst_samples(elapsed,phase,length,first,RC_WINDOW_MS);
+        if (first && !applied) assert(rc.w[0].direct == (RC_WINDOW_MS - first) / 10);
+        finish_burst(applied);
         if (!activation && rc.auto_engaged != applied) {
             activation = now + RELAY_LAYOUT_ACTIVATION_MS;
             staged = rc.auto_engaged;
@@ -323,7 +340,8 @@ static void test_loss_switches_and_entry_decision(void) {
         setup(); run(4,0,false);
         unsigned elapsed = 0;
         while (!rc.auto_engaged && elapsed < 3000) {
-            step_burst(elapsed,8000 - offset,8000 - RC_WINDOW_MS,false);
+            burst_samples(elapsed,8000 - offset,8000 - RC_WINDOW_MS,0,RC_WINDOW_MS);
+            finish_burst(false);
             elapsed += RC_WINDOW_MS;
         }
         unsigned delay = elapsed - offset;
@@ -410,6 +428,16 @@ static void test_recovery_window_boundary(void) {
     step_frames(direct,18,true);
     assert(rc.auto_engaged); /* 17 of the 20 frames after recovery began. */
     assert(until_exit(0,4) <= 4);
+
+    setup(); run(SUSTAIN_TICKS,1,false); run(8,2,true);
+    step(0,true,true);
+    for (unsigned i = 0; i < 11; i++) direct[i] = 3;
+    step_frames(direct,4,true);
+    step_frames(direct,4,true);
+    assert(rc.auto_good_since && rc.auto_engaged); /* Only eight samples. */
+    for (unsigned i = 0; i < 11; i++) direct[i] = 12;
+    step_frames(direct,12,true);
+    assert(!rc.auto_engaged); /* The completed window has 18 of 20 direct. */
 }
 
 int main(void) {
