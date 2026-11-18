@@ -27,7 +27,7 @@ from relay_support import relay_declarations
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--source', type=Path, default=ROOT / 'src/connection/esb.c')
-parser.add_argument('--case', choices=['owner-store-lock-delay'])
+parser.add_argument('--case', choices=['owner-store-lock-delay', 'relay-exit-order'])
 args = parser.parse_args()
 source = select_relay(args.source.read_text())
 header = (ROOT / 'src/connection/esb.h').read_text()

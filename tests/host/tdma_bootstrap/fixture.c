@@ -77,7 +77,11 @@ static void k_mutex_unlock(int *lock)
 static int64_t k_uptime_get(void) { return (int64_t)now_ms; }
 static uint32_t k_uptime_get_32(void) { return (uint32_t)now_ms; }
 /* 32768 Hz kernel ticks, as on the receiver. */
-static int64_t k_uptime_ticks(void) { return (int64_t)now_ms * 32768 / 1000; }
+static uint32_t exact_ticks;
+static int64_t k_uptime_ticks(void)
+{
+    return exact_ticks ? exact_ticks : (int64_t)now_ms * 32768 / 1000;
+}
 static uint32_t k_ticks_to_ms_ceil32(uint32_t ticks)
 {
 	return (uint32_t)(((uint64_t)ticks * 1000 + 32767) / 32768);
@@ -162,7 +166,7 @@ static const char *esb_pong_flag_name(uint8_t flag) { (void)flag; return "comman
 static void reset_fixture(uint8_t count, uint64_t time)
 {
     assert(!irq_depth && !mutex_depth && count <= MAX_TRACKERS);
-    now_ms = time; restore_error = 0; saved_count = count;
+    now_ms = time; exact_ticks = 0; restore_error = 0; saved_count = count;
     tdma_active_mask = 0;
     tdma_staged.valid = tdma_staged.native_followup = false;
     tdma_staged.native_guard_until_ms = 0;
@@ -1356,6 +1360,163 @@ static void legacy_join_during_relay_exit_lead(void)
 	puts("PASS legacy wake during exit lead: v5 keeps the announced native tuple until the join stage activates");
 }
 
+static void service_at_tick(uint32_t tick)
+{
+	now_ms += k_ticks_to_ms_ceil32(tick - ticks_at(now_ms));
+	exact_ticks = tick;
+	service();
+	exact_ticks = 0;
+}
+
+enum exit_wake_order {
+	WAKE_BEFORE_STAGE,
+	WAKE_DURING_LEAD,
+	WAKE_TOGETHER_DURING_LEAD,
+	WAKE_AT_TICK_BEFORE_OWNER,
+	WAKE_AT_TICK_AFTER_OWNER,
+	WAKE_SPLIT_ACROSS_STAGE,
+	WAKE_AFTER_GUARD,
+};
+
+static void relay_exit_wake_order(bool off, enum exit_wake_order order)
+{
+	const uint32_t v5 = BIT(2) | BIT(3);
+	bool pre_join = order == WAKE_BEFORE_STAGE || order == WAKE_SPLIT_ACROSS_STAGE;
+	uint32_t exit_mask = v5 | (pre_join ? BIT(1) : 0);
+	uint8_t joiner = order == WAKE_BEFORE_STAGE || order == WAKE_DURING_LEAD
+		|| order == WAKE_AT_TICK_BEFORE_OWNER ? 1 : 0;
+	uint32_t final_mask = exit_mask | BIT(joiner);
+	if (order == WAKE_TOGETHER_DURING_LEAD) final_mask |= BIT(1);
+
+	reset_fixture(4, 0);
+	assert(tracker_store_restore() == 0);
+	relay_coord_init(&relay_coord);
+	esb_relay_set_mode(RELAY_MODE_AUTO);
+	relay_settings = (struct relay_runtime_settings){4, 1, 16, 100, 120, 0};
+	relay_settings_generation++;
+	relay_coord_note_caps(&relay_coord, 2, RELAY_INFO_CAPS);
+	relay_coord_note_caps(&relay_coord, 3, RELAY_INFO_CAPS);
+	assert(ping(2, true) && ping(3, true));
+	service();
+	now_ms += TDMA_MEMBERSHIP_COHORT_MS;
+	service();
+	assert(tdma_active_mask == v5 && !tdma_staged.valid);
+	relay_coord.auto_engaged = true;
+	now_ms += TDMA_RECONFIG_MIN_MS;
+	service();
+	assert(tdma_staged.valid && tdma_staged.p.profile);
+	service_at_tick(tdma_staged.activation_ticks);
+	assert(relay_profile && tdma_active_mask == v5);
+
+	if (off) {
+		esb_relay_set_mode(RELAY_MODE_OFF);
+	} else {
+		/* State after the coordinator decides to exit on recovery. */
+		relay_coord.auto_engaged = false;
+		relay_coord.auto_exit_pending = true;
+	}
+	now_ms += TDMA_RECONFIG_MIN_MS;
+	assert(ping(2, true) && ping(3, true));
+	if (pre_join) {
+		assert(ping(1, true));
+		now_ms += TDMA_MEMBERSHIP_COHORT_MS;
+	}
+	service();
+	assert(tdma_staged.valid && !tdma_staged.p.profile && tdma_staged.p.new_mask == exit_mask);
+	uint32_t exit_tick = tdma_staged.activation_ticks;
+	uint32_t exit_v5 = tdma_advertised_config(2, exit_tick);
+	uint64_t wake_ms = now_ms;
+	if (order == WAKE_DURING_LEAD || order == WAKE_TOGETHER_DURING_LEAD || order == WAKE_SPLIT_ACROSS_STAGE) {
+		now_ms += 100;
+		wake_ms = now_ms;
+		assert(ping(joiner, true));
+		if (order == WAKE_TOGETHER_DURING_LEAD) assert(ping(1, true));
+		service();
+		assert(tdma_staged.activation_ticks == exit_tick);
+	}
+	now_ms += k_ticks_to_ms_ceil32(exit_tick - ticks_at(now_ms));
+	exact_ticks = exit_tick;
+	if (order == WAKE_AT_TICK_BEFORE_OWNER) {
+		wake_ms = now_ms;
+		assert(ping(joiner, true));
+		assert(!(atomic_get(&tdma_shadow_desired_mask) & BIT(joiner)));
+	}
+	service();
+	assert(!relay_profile && tdma_active_mask == exit_mask);
+	if (order == WAKE_AT_TICK_AFTER_OWNER) {
+		assert(!tdma_staged.valid);
+		wake_ms = now_ms;
+		assert(ping(joiner, true));
+	}
+	exact_ticks = 0;
+	assert(tracker_slots[2].tdma_config_packed == exit_v5);
+	const char *mode = off ? "off" : "auto";
+	if (order == WAKE_BEFORE_STAGE) {
+		assert(!tdma_staged.valid && slot(tracker_slots[1].tdma_config_packed) == 0);
+		printf("PASS %s: legacy wake before announcement joins on exit\n", mode);
+		return;
+	}
+	assert(slot(tracker_slots[joiner].tdma_config_packed) == 255);
+
+	if (order == WAKE_AFTER_GUARD) {
+		now_ms += RELAY_LAYOUT_ACTIVATION_MS;
+		assert(ping(joiner, true));
+		service();
+		now_ms += TDMA_MEMBERSHIP_COHORT_MS;
+		service();
+		assert(!tdma_staged.valid && tdma_active_mask == final_mask);
+		printf("PASS %s: join after the guard uses native publication\n", mode);
+		return;
+	}
+
+	now_ms += TDMA_MEMBERSHIP_COHORT_MS;
+	service();
+	assert(tdma_staged.valid && tdma_staged.native_followup && tdma_staged.p.new_mask == final_mask);
+	assert(tdma_active_mask == exit_mask);
+	assert((tdma_staged_pong_mask(ticks_at(now_ms)) & v5) == v5);
+	uint32_t join_tick = tdma_staged.activation_ticks;
+	uint32_t max_lead = k_ms_to_ticks_ceil32(RELAY_LAYOUT_ACTIVATION_MS);
+	uint32_t min_lead = k_ms_to_ticks_ceil32(RELAY_LAYOUT_ACTIVATION_MS - TDMA_MEMBERSHIP_COHORT_MS - 1);
+	assert(join_tick - ticks_at(now_ms) <= max_lead);
+	assert(join_tick - ticks_at(now_ms) >= min_lead);
+	now_ms += 1000;
+	for (uint8_t id = 0; id < 4; id++) {
+		if (final_mask & BIT(id)) assert(ping(id, true));
+	}
+	service();
+	assert(tdma_staged.valid && tdma_staged.activation_ticks == join_tick);
+	assert(tdma_advertised_config(2, join_tick - 1) == exit_v5);
+	assert(slot(tdma_advertised_config(joiner, join_tick - 1)) == 255);
+	uint32_t legacy_before = tdma_advertised_config(1, join_tick - 1);
+	service_at_tick(join_tick);
+	assert(!tdma_staged.valid && tdma_active_mask == final_mask);
+	assert(slot(tracker_slots[joiner].tdma_config_packed) < total(tracker_slots[joiner].tdma_config_packed));
+	assert(epoch_of(tracker_slots[2].tdma_config_packed) == (uint8_t)(epoch_of(exit_v5) + 1));
+	if (order == WAKE_SPLIT_ACROSS_STAGE) {
+		/* Same 3->4 native join as dev. The legacy incumbent can keep
+		 * slot 0 until its next base PONG. The v5 members have a stage. */
+		uint32_t legacy_after = tracker_slots[1].tdma_config_packed;
+		uint32_t joined = tracker_slots[0].tdma_config_packed;
+		assert(!relay_coord_is_capable(&relay_coord, 1));
+		assert(slot(legacy_before) == 0 && total(legacy_before) == 3 && width(legacy_before) == 48);
+		assert(slot(joined) == 0 && total(joined) == 4 && width(joined) == 36);
+		assert(slot(legacy_after) == 1 && epoch_of(legacy_after) == epoch_of(joined));
+	}
+	assert(now_ms - wake_ms <= 2 * RELAY_LAYOUT_ACTIVATION_MS + TDMA_MEMBERSHIP_COHORT_MS);
+	printf("PASS %s: wake order %u admitted in %llu ms (%s)\n", mode, (unsigned)order,
+	       (unsigned long long)(now_ms - wake_ms),
+	       order == WAKE_SPLIT_ACROSS_STAGE ? "legacy tuple matches dev" : "v5 tuple staged");
+}
+
+static void relay_exit_wake_orders(void)
+{
+	for (unsigned off = 0; off <= 1; off++) {
+		for (enum exit_wake_order order = WAKE_BEFORE_STAGE; order <= WAKE_AFTER_GUARD; order++) {
+			relay_exit_wake_order(off, order);
+		}
+	}
+}
+
 /* Last modeled repair before the query-triggered native activation. */
 #define QUERY_CASE_LAST_REPAIR_MS (6000U + RELAY_LAYOUT_ACTIVATION_MS - 10U)
 
@@ -1740,6 +1901,11 @@ static void query_single_late_echo(uint64_t base, bool eligible)
 int main(int argc, char **argv)
 {
     if (argc == 2) {
+        if (!strcmp(argv[1], "relay-exit-order")) {
+            legacy_join_during_relay_exit_lead();
+            relay_exit_wake_orders();
+            return 0;
+        }
         assert(!strcmp(argv[1], "owner-store-lock-delay"));
         owner_store_lock_delay();
         puts("Receiver owner lock-delay cases passed");
@@ -1770,6 +1936,7 @@ int main(int argc, char **argv)
 	relay_admission_requires_a_representable_exit();
 	legacy_join_waits_for_relay_exit();
 	legacy_join_during_relay_exit_lead();
+	relay_exit_wake_orders();
 	dense_relay_exit_announcement_lead(100);
 	dense_relay_exit_announcement_lead(120);
 	query_membership_recovery(0, false);
