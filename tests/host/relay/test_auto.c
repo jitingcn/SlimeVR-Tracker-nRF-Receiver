@@ -391,10 +391,29 @@ static void test_recovery_needs_samples(void) {
         relay_coord_tick(&rc,roster,now);
         relay_coord_auto_update(&rc,roster,now,true,true);
     }
-    assert(rc.auto_engaged && !(rc.auto_recovery_evidence & (1U << 3)));
+    assert(rc.auto_engaged && rc.t[3].recovery_expected < RC_MIN_EXPECTED);
     assert(until_exit(0,4) <= 4);
 }
+/* Sparse judgements can straddle the start of the recovery interval. */
+static void test_recovery_window_boundary(void) {
+    unsigned direct[11];
+    setup();
+    run(SUSTAIN_TICKS,1,false);
+    run(8,2,true);
+    step(0,true,false); /* Clear the weak streak without opening recovery. */
+    for (unsigned i = 0; i < 11; i++) direct[i] = 18;
+    step_frames(direct,18,true);
+    assert(rc.auto_good_since == now && rc.t[3].acc_expected == 18);
+    for (unsigned i = 0; i < 11; i++) direct[i] = 2;
+    step_frames(direct,2,true);
+    for (unsigned i = 0; i < 11; i++) direct[i] = 15;
+    step_frames(direct,18,true);
+    assert(rc.auto_engaged); /* 17 of the 20 frames after recovery began. */
+    assert(until_exit(0,4) <= 4);
+}
+
 int main(void) {
+    test_recovery_window_boundary();
     test_fast_switch_hysteresis();
     test_outage_cannot_inherit_another_members_weak_time();
     test_reentry_uses_native_evidence();

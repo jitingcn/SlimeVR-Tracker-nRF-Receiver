@@ -196,7 +196,8 @@ static void rc_auto_pool(int16_t *balance, struct rc_judgement j)
 static void rc_auto_restart(struct relay_coord *rc)
 {
 	rc->auto_good_since = 0;
-	rc->auto_recovery_evidence = 0;
+	for (unsigned i = 0; i < RC_MAX; i++)
+		rc->t[i].recovery_expected = 0;
 	memset(rc->auto_balance, 0, sizeof(rc->auto_balance));
 }
 
@@ -312,13 +313,16 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 	    && (int32_t)(now - rc->auto_good_since) >= (int32_t)RC_AUTO_RECOVER_MS) {
 		/* Untouched links need only stay non-weak. Every remembered link
 		 * must pool the separate good threshold over the window. */
-		bool owed = false;
-		for (unsigned i = 0; i < RC_MAX; i++)
-			owed |= (rc->auto_poor_members & RC_BIT(i)) && rc->auto_balance[i] < 0;
+		bool owed = false, sampled = true;
+		for (unsigned i = 0; i < RC_MAX; i++) {
+			if (!(rc->auto_poor_members & RC_BIT(i))) continue;
+			owed |= rc->auto_balance[i] < 0;
+			sampled &= rc->t[i].recovery_expected >= RC_MIN_EXPECTED;
+		}
 		if (owed) {
 			/* Consecutive windows: early loss is not averaged away. */
 			rc_auto_restart(rc);
-		} else if (!(rc->auto_poor_members & ~rc->auto_recovery_evidence)
+		} else if (sampled
 			   && applied && rc_after(now, rc->auto_applied_since, RC_AUTO_HOLD_MS)) {
 			rc->auto_engaged = false;
 			rc->auto_exit_pending = true;
@@ -347,14 +351,15 @@ void relay_coord_tick(struct relay_coord *rc, uint16_t member_mask, uint32_t now
 			uint32_t rate = t->rate_x16 ? (3U * t->rate_x16 + sample) / 4U : sample;
 			t->rate_x16 = (uint16_t)(rate > UINT16_MAX ? UINT16_MAX : rate);
 		}
+		if (rc->auto_engaged && rc->auto_good_since) {
+			rc_auto_pool(&rc->auto_balance[i], j[i]);
+			unsigned expected = t->recovery_expected + (unsigned)j[i].expected;
+			t->recovery_expected = expected < RC_MIN_EXPECTED ? expected : RC_MIN_EXPECTED;
+		}
 		jd[i] = rc_accumulate(t, w);
 		if (jd[i].expected) {
 			t->direct_permille = jd[i].permille;
 			t->quality_ms = now;
-			if (rc->auto_engaged) {
-				rc_auto_pool(&rc->auto_balance[i], jd[i]);
-				rc->auto_recovery_evidence |= RC_BIT(i);
-			}
 			if (jd[i].permille < RC_WEAK_PERMILLE) {
 				if (t->weak_windows < UINT8_MAX) {
 					t->weak_windows++;

@@ -75,6 +75,7 @@ struct rc_window {
 struct rc_tracker {
 	bool capable;
 	uint8_t protocol_version;
+	uint8_t recovery_expected; /* In-window sample count, capped at RC_MIN_EXPECTED. */
 	uint32_t last_any_ms;
 	uint32_t last_direct_ms;
 	bool seen;
@@ -162,10 +163,10 @@ static inline const struct rc_watch *relay_plan_watch_const(const struct rc_gran
 
 struct relay_coord {
 	bool auto_engaged, auto_applied;
-	uint16_t auto_members, auto_poor_members, auto_recovery_evidence;
+	uint16_t auto_members, auto_poor_members;
 	uint32_t auto_good_since, auto_applied_since, auto_native_since;
 	/* Per member, over the recovery window: sum of 10 * direct - 9 * expected
-	 * frames of each judgement, clamped to int16. Until it first clamps,
+	 * frames of each stats interval, clamped to int16. Until it first clamps,
 	 * >= 0 means exactly pooled >= 900; a clamped sum keeps its sign at the
 	 * clamp but may have a different sign from the unclamped sum. */
 	int16_t auto_balance[RC_MAX];
