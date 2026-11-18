@@ -279,7 +279,7 @@ def main():
         binary = path / 'test'
         compiler = shlex.split(os.environ.get('CC', 'cc'))
         flags = [
-            '-std=c11', '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g', '-O1',
+            '-std=c11', '-fsanitize=address,undefined', '-fno-sanitize-recover=undefined', '-fno-pie', '-no-pie', '-fno-omit-frame-pointer', '-g', '-O1',
             '-Wall',
             '-Wextra',
             '-Werror',

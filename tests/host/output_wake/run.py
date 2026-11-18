@@ -145,13 +145,15 @@ static bool device_is_ready(const struct device *dev) { return true; }
 
 hid_source = select_relay((src / 'hid.c').read_text())
 hid_decls = hid_source[hid_source.index('static struct k_work'):hid_source.index('static const uint8_t hid_report_desc')]
+split_writer = 'hid_write_packet_n_internal(' in hid_source
 hid_functions = '\n'.join(function(hid_source, name) for name in [
     'packet_device_addr', 'hid_stats_record_reports', 'hid_fill_padding', 'send_report',
     'int_in_ready_cb', 'input_report_done_cb', 'iface_ready_cb',
     'report_event_handler', 'hid_usb_state_changed', 'composite_pre_init',
     'hid_type_byte1_is_tracker_id', 'hid_type_has_rssi_slot',
-    'hid_push_packet', 'hid_note_dropped', 'hid_enqueue_packet', 'hid_write_tracker_event',
-    'hid_write_packet_n_internal', 'hid_write_packet_n'])
+    *(['hid_push_packet', 'hid_note_dropped'] if split_writer else []),
+    'hid_enqueue_packet', 'hid_write_tracker_event',
+    *(['hid_write_packet_n_internal'] if split_writer else []), 'hid_write_packet_n'])
 hid = common + r'''
 #define RCV_HID_TYPE_CMD_ACK 251
 #define RCV_HID_TYPE_CMD 254

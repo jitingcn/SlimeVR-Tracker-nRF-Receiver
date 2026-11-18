@@ -200,15 +200,21 @@ def main():
             tdma_loss_trigger_streak_ticks tdma_loss_recover_streak_ticks
             tdma_loss_probe_streak_ticks tdma_loss_pool_received tdma_loss_pool_gaps
             tdma_loss_pool_ticks'''.split()
-        declarations = '\n'.join([
-            layout_constants,
-            extract_block(esb, r'^struct packet_stats\s*\{', True),
-            extract_block(esb, r'^struct tracker_slot\s*\{', True),
-            'static struct tracker_slot tracker_slots[MAX_TRACKERS];',
-            extract.membership_declarations(esb),
-        ] + [extract.declaration(esb, name) for name in layout_names])
-        declarations += '\n' + extract.diagnostic_loss_declarations(esb)
-        declarations += '\n' + relay_declarations(esb, member_diagnostics=False)
+        def layout_declarations(esb, relay):
+            declarations = '\n'.join([
+                layout_constants,
+                extract_block(esb, r'^struct packet_stats\s*\{', True),
+                extract_block(esb, r'^struct tracker_slot\s*\{', True),
+                'static struct tracker_slot tracker_slots[MAX_TRACKERS];',
+                extract.membership_declarations(esb, relay),
+            ] + [extract.declaration(esb, name) for name in layout_names])
+            declarations += '\n' + extract.diagnostic_loss_declarations(esb)
+            return declarations
+
+        native = select_relay(esb_source, enabled=False)
+        declarations = ('#if defined(CONFIG_RELAY)\n' + layout_declarations(esb, True) +
+                        '\n' + relay_declarations(esb, member_diagnostics=False) +
+                        '\n#else\n' + layout_declarations(native, False) + '\n#endif\n')
         (path/'esb_membership_declarations.inc').write_text(declarations)
         membership = '\n'.join(function(esb, name) for name in (
             'tdma_loss_reset_windows', 'tdma_pack_config', 'relay_layout_stageable', 'relay_roster_eligible',
@@ -223,12 +229,20 @@ def main():
                        function(esb, 'relay_query_begin') + '\n#endif\n')
         lengths = function(esb, 'composite_body_length')
         composite = extract_block(esb, r'^struct composite_result\s*\{', True) + '\n' + '\n'.join(function(esb, n) for n in ('composite_validate', 'esb_execute_composite', 'esb_receive_composite'))
+        native_membership = '\n'.join(function(native, name) for name in (
+            'tdma_loss_reset_windows', 'tdma_pack_config', 'tdma_shadow_observe',
+            'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_slot_ticks_for',
+            'tdma_recalculate'))
+        membership = '#if defined(CONFIG_RELAY)\n' + membership + '\n#else\n' + native_membership + '\n#endif\n'
+        composite = ('#if defined(CONFIG_RELAY)\n' + composite + '\n#else\n' +
+                     function(native, 'esb_forward_tracker_packet') +
+                     function(native, 'esb_receive_composite') + '\n#endif\n')
         clear = function(esb_source, 'esb_clear')
         if 'tdma_revoke_pairings(' in clear:
             clear = ('#if defined(CONFIG_RELAY)\n' +
                      function(esb, 'tdma_revoke_pairings') + '\n#endif\n' + clear)
         (path/'esb_event_paths.inc').write_text(
-            membership + '\n' + relay_helpers(esb) + lengths + '''
+            membership + '\n#if defined(CONFIG_RELAY)\n' + relay_helpers(esb) + '\n#endif\n' + lengths + '''
 static void tracked_tdma_shadow_observe(uint8_t tracker, enum tdma_shadow_evidence kind) {
     assert(tracker==2 && kind==TDMA_SHADOW_EVIDENCE_DATA);
     evidence_calls++;
