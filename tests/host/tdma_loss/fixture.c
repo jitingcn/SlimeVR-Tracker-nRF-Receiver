@@ -697,6 +697,7 @@ static void decision_genuine_loss(void)
 	}
 }
 
+#if defined(TEST_RELAY_SOURCE)
 /* One policy owns the loss ladder and relay lifecycle. Use the production
  * quality accounting, auto policy and loss controller in the same timeline. */
 static void auto_policy_ladder(void)
@@ -813,14 +814,18 @@ static void auto_nonrelay_join(void)
 	assert(tdma_cap_level == 2);
 }
 
+#endif
+
 static const struct {
 	const char *name;
 	void (*run)(void);
 } scenarios[] = {
+#if defined(TEST_RELAY_SOURCE)
 	{"auto-policy-ladder", auto_policy_ladder},
 	{"auto-outage-pending", auto_outage_pending},
 	{"auto-excluded-live", auto_excluded_live},
 	{"auto-nonrelay-join", auto_nonrelay_join},
+#endif
 	{"fast-recovery", fast_recovery},
 	{"slow-probe", slow_probe},
 	{"sparse-recovery", sparse_recovery},

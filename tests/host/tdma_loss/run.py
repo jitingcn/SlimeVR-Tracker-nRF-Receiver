@@ -20,8 +20,8 @@ from c_extract import extract_block
 from relay_support import relay_section, relay_query_helpers, staging_helpers  # noqa: E402
 
 
+RELAY_CASES = ('auto-policy-ladder', 'auto-outage-pending', 'auto-excluded-live', 'auto-nonrelay-join')
 CASES = (
-    'auto-policy-ladder', 'auto-outage-pending', 'auto-excluded-live', 'auto-nonrelay-join',
     'fast-recovery',
     'slow-probe',
     'sparse-recovery',
@@ -104,7 +104,6 @@ def membership_declarations(source):
     start = source.index('#define PING_TIMEOUT_MS')
     end = source.index('static void tdma_shadow_observe', start)
     return '\n'.join((
-        '#include "relay_coord.h"',
         declaration(source, 'tdma_last_reconfig_time'),
         declaration(source, 'tdma_last_reconfig_valid'),
         source[start:end],
@@ -112,7 +111,7 @@ def membership_declarations(source):
 
 
 # These two read relay and staging state, which is declared later.
-LATE_MEMBERSHIP = ('tdma_admissible_mask', 'tdma_membership_wait_ms')
+LATE_MEMBERSHIP = ('tdma_membership_wait_ms',)
 
 
 def membership_bodies(source):
@@ -163,7 +162,7 @@ def production_bodies(source, header=''):
         snapshot += function(source, 'esb_auto_loss_fence', optional=True)
         snapshot += function(source, 'decision_accept', optional=True)
         snapshot += function(source, 'esb_auto_loss_invalidate')
-        snapshot += function(source, 'esb_loss_operations_idle')
+        snapshot += function(source, 'esb_loss_operations_idle', optional=True)
         snapshot += function(source, 'esb_get_auto_loss_snapshot')
         snapshot += function(source, 'esb_rx_discontinuity')
         snapshot += function(source, 'esb_auto_loss_rebase', optional=True)
@@ -210,8 +209,9 @@ static void restart_ping(uint8_t tracker_id) {
 '''
     return '\n'.join((
         constants,
-        "static bool relay_auto_ladder_paused(void);",
-        "static uint32_t tdma_admissible_mask(uint32_t desired);",
+        '#define TEST_RELAY_SOURCE 1\n#include "relay_coord.h"' if relay else '',
+        "static bool relay_auto_ladder_paused(void);" if relay else '',
+        "static uint32_t tdma_admissible_mask(uint32_t desired);" if relay else '',
         'static bool relay_roster_eligible(uint32_t desired);' if relay else '',
         ('static bool relay_query_can_resume(void);\nstatic void relay_query_update_locked(void);\nstatic void relay_query_begin(void);' if relay else ''),
         ping_constants,
@@ -235,14 +235,16 @@ static void restart_ping(uint8_t tracker_id) {
         function(source, 'esb_receive_ping'),
         relay_section(source, stats=False, member_diagnostics=False) if relay else '',
         relay_query_helpers(source, membership=True) if relay else '',
-        function(source, 'relay_auto_ladder_paused'),
-        extract_block(source, r'^struct composite_result\s*\{', True),
-        function(source, 'composite_validate'),
-        function(source, 'esb_execute_composite'),
+        function(source, 'relay_auto_ladder_paused') if relay else '',
+        extract_block(source, r'^struct composite_result\s*\{', True) if relay else '',
+        function(source, 'composite_validate') if relay else '',
+        function(source, 'esb_execute_composite') if relay else '',
+        function(source, 'esb_forward_tracker_packet', optional=True) if not relay else '',
         function(source, 'esb_receive_composite'),
         function(source, 'esb_receive_normal', optional=True),
         staging_helpers(source, recalc=True) if relay else '',
         *(function(source, name) for name in LATE_MEMBERSHIP),
+        function(source, 'tdma_admissible_mask') if relay else '',
         function(source, 'relay_force_entry_allowed') if relay else '',
         function(source, 'tdma_recalculate'),
         admission,
@@ -288,7 +290,8 @@ def main():
             diagnostic_flags = ['-DCONFIG_TDMA_DIAGNOSTICS=1'] if diagnostics else []
             subprocess.run(compiler + flags + diagnostic_flags + [
                 '-I', str(args.source_root / 'src'), '-I', str(args.source_root / 'src/connection'), str(generated), '-o', str(binary)], check=True)
-            for case in args.case or CASES:
+            defaults = RELAY_CASES + CASES if 'static void esb_receive_normal(' in source else CASES
+            for case in args.case or defaults:
                 subprocess.run([str(binary), case], check=True)
                 print(f'PASS diagnostics={int(diagnostics)} {case}', flush=True)
 

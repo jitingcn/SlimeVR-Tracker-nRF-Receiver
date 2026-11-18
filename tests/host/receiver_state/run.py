@@ -97,9 +97,7 @@ declarations += '\n#endif\n'
 if 'pairing' in cases:
     declarations += '\n' + extract_block(live, r'^struct pairing_event\s*\{', semicolon=True)
 
-names = ['esb_auto_loss_invalidate', 'relay_layout_stageable', 'relay_roster_eligible',
-         'relay_query_can_resume', 'relay_query_update_locked',
-         'tdma_shadow_observe', 'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
+names = ['esb_auto_loss_invalidate', 'tdma_shadow_observe', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
          'esb_send_remote_command_sens', 'esb_send_remote_command_sens_auto',
          'esb_send_remote_command_sens_auto_all']
 if re.search(r'^void esb_publish_remote_command_locked\(', source, re.M):
@@ -110,7 +108,7 @@ if 'slots' in cases or 'pairing' in cases:
 if 'slots' in cases:
     names += ['esb_pop_pair', 'esb_clear',
               'tdma_loss_reset_windows', 'tdma_sync_stats_reset', 'esb_rx_discontinuity',
-              'esb_reset_all_stats', 'tdma_staged_pong_mask', 'tdma_defer_wom_locked',
+              'esb_reset_all_stats',
               'esb_send_remote_wom_command', 'remote_wom_receive',
               'esb_get_remote_wom_result', 'esb_request_metadata']
 if 'pairing' in cases:
@@ -126,6 +124,14 @@ for name in names:
             r'(^[ \t]*tracker_slots\[[^\]\n]+\]\.(?:pending_sens_data(?:\[[^\]]+\])?|pending_sens_auto_axis|pending_sens_auto_revolutions|pending_cmd_arg|tracker_remote_command)\s*=[^\n;]*;)',
             r'\1 preempt();', body, flags=re.M)
     functions.append(body)
+
+# Walk from callers to their relay-only dependencies. A required helper
+# still raises if it is missing from the selected comparison source.
+for name in reversed(('relay_layout_stageable', 'relay_roster_eligible',
+                      'relay_query_can_resume', 'relay_query_update_locked',
+                      'tdma_admissible_mask', 'tdma_staged_pong_mask', 'tdma_defer_wom_locked')):
+    if any(re.search(rf'\b{name}\s*\(', body) for body in functions):
+        functions.insert(0, function(name))
 
 stat_slot_fields = {'stats', 'ping_counter_initialized', 'last_ping_counter',
                     'last_pong_queued_counter', 'tdma_prev_recv', 'tdma_prev_gaps',
