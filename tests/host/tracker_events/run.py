@@ -184,7 +184,8 @@ def main():
         (path/'zephyr/kernel.h').write_text(KERNEL)
         (path/'zephyr/logging/log.h').write_text(LOGGING)
         (path/'zephyr/sys/util.h').write_text('#include <zephyr/kernel.h>\n')
-        esb = select_relay((root/'src/connection/esb.c').read_text())
+        esb_source = (root/'src/connection/esb.c').read_text()
+        esb = select_relay(esb_source)
         extract_spec = importlib.util.spec_from_file_location(
             'tdma_loss_extract', Path(__file__).resolve().parent.parent / 'tdma_loss/run.py')
         extract = importlib.util.module_from_spec(extract_spec)
@@ -222,7 +223,10 @@ def main():
                        function(esb, 'relay_query_begin') + '\n#endif\n')
         lengths = function(esb, 'composite_body_length')
         composite = extract_block(esb, r'^struct composite_result\s*\{', True) + '\n' + '\n'.join(function(esb, n) for n in ('composite_validate', 'esb_execute_composite', 'esb_receive_composite'))
-        clear = function(esb, 'esb_clear')
+        clear = function(esb_source, 'esb_clear')
+        if 'tdma_revoke_pairings(' in clear:
+            clear = ('#if defined(CONFIG_RELAY)\n' +
+                     function(esb, 'tdma_revoke_pairings') + '\n#endif\n' + clear)
         (path/'esb_event_paths.inc').write_text(
             membership + '\n' + relay_helpers(esb) + lengths + '''
 static void tracked_tdma_shadow_observe(uint8_t tracker, enum tdma_shadow_evidence kind) {

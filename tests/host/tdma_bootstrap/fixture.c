@@ -74,6 +74,7 @@ static void k_mutex_unlock(int *lock)
     assert(!irq_depth && mutex_depth == 1);
     --mutex_depth;
 }
+static void k_msleep(unsigned ms) { assert(!irq_depth && mutex_depth == 1); now_ms += ms; }
 static int64_t k_uptime_get(void) { return (int64_t)now_ms; }
 static uint32_t k_uptime_get_32(void) { return (uint32_t)now_ms; }
 /* 32768 Hz kernel ticks, as on the receiver. */
@@ -1551,11 +1552,15 @@ static void relay_exit_pairing_change(bool off, bool replace)
 	assert(slot(announced) == 1 && total(announced) == 2);
 
 	now_ms += 900;
+	uint64_t removed_ms = now_ms;
+	uint64_t paired_ms = 0;
+	uint32_t generation = relay_layout_generation;
 	assert(esb_pop_pair() == 0 && stored_trackers == 3);
-	assert(relay_control_eligible());
+	assert(!relay_control_eligible() && relay_layout_generation != generation);
 	if (replace) {
 		now_ms += 100;
 		assert(esb_add_pair(987654, false) == 3 && stored_trackers == 4);
+		paired_ms = now_ms;
 	}
 	assert(!relay_coord_is_capable(&relay_coord, 3));
 	assert(tdma_staged.valid && tdma_staged.activation_ticks == exit_tick);
@@ -1579,6 +1584,7 @@ static void relay_exit_pairing_change(bool off, bool replace)
 	uint32_t fresh_tick = tdma_staged.activation_ticks;
 	assert(fresh_tick - exit_tick >= k_ms_to_ticks_ceil32(RELAY_LAYOUT_ACTIVATION_MS));
 	assert(tdma_staged.p.new_mask == (replace ? members : BIT(2)));
+	assert(tdma_staged.revoked_mask == BIT(3));
 	assert(slot(tdma_advertised_config(3, fresh_tick - 1)) == 0xff);
 	uint32_t fresh = tdma_advertised_config(3, fresh_tick);
 	assert(epoch_of(fresh) != epoch_of(announced));
@@ -1586,13 +1592,58 @@ static void relay_exit_pairing_change(bool off, bool replace)
 	service_at_tick(fresh_tick);
 	assert(!tdma_staged.valid && tracker_slots[3].tdma_config_packed == fresh);
 	assert(tdma_active_mask == (replace ? members : BIT(2)));
-	printf("PASS %s exit, %s: old slot withheld at activation, fresh layout after %u ms\n",
+	assert(tdma_staged.revoked_mask == (replace ? 0 : BIT(3)));
+	assert(now_ms - removed_ms >= RELAY_LAYOUT_GRANT_MS);
+	printf("PASS %s exit, %s: fresh layout %u ms after exit",
 	       off ? "off" : "auto", replace ? "pop and re-pair" : "pop",
 	       k_ticks_to_ms_ceil32(fresh_tick - exit_tick));
+	if (replace) {
+		printf(", replacement admitted %llu ms after pairing", (unsigned long long)(now_ms - paired_ms));
+	}
+	puts("");
+}
+
+static void native_pairing_reset_again(void)
+{
+	relay_profile = 0;
+	reset_fixture(4, 1000);
+	assert(tracker_store_restore() == 0);
+	esb_relay_set_mode(RELAY_MODE_OFF);
+	assert(ping(2, true) && ping(3, true));
+	now_ms += TDMA_MEMBERSHIP_COHORT_MS + 1;
+	service();
+	assert(!tdma_staged.valid && slot(tracker_slots[3].tdma_config_packed) == 1);
+
+	assert(esb_pop_pair() == 0 && esb_add_pair(987654, false) == 3);
+	assert(ping(3, true));
+	/* First retire the old native layout, then stage the first replacement. */
+	service_at_tick(tdma_staged.activation_ticks);
+	assert(tdma_staged.valid && tdma_staged.native_followup);
+	uint32_t stale_tick = tdma_staged.activation_ticks;
+	assert(slot(tdma_advertised_config(3, stale_tick)) == 1);
+
+	/* Reuse the ID again just before that stage is due. Its original lead
+	 * cannot authorize the second pairing. */
+	now_ms += k_ticks_to_ms_ceil32(stale_tick - ticks_at(now_ms)) - 50U;
+	assert(esb_pop_pair() == 0 && esb_add_pair(987655, false) == 3);
+	uint64_t paired_ms = now_ms;
+	assert(ping(3, true));
+	assert(slot(tdma_advertised_config(3, stale_tick)) == 0xff);
+	service_at_tick(stale_tick);
+	assert(slot(tracker_slots[3].tdma_config_packed) == 0xff);
+	assert(tdma_staged.valid && tdma_staged.native_followup);
+	uint32_t fresh = tdma_staged.activation_ticks;
+	assert(slot(tdma_advertised_config(3, fresh - 1U)) == 0xff);
+	service_at_tick(fresh);
+	assert(!tdma_staged.valid && slot(tracker_slots[3].tdma_config_packed) == 1);
+	assert(now_ms - paired_ms >= RELAY_LAYOUT_ACTIVATION_MS);
+	printf("PASS native off, second replacement admitted %llu ms after pairing\n",
+	       (unsigned long long)(now_ms - paired_ms));
 }
 
 static void relay_exit_pairing_changes(void)
 {
+	native_pairing_reset_again();
 	for (unsigned off = 0; off <= 1; off++) {
 		relay_exit_pairing_change(off, false);
 		relay_exit_pairing_change(off, true);

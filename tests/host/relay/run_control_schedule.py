@@ -73,7 +73,7 @@ static struct relay_control relay_grants;
 static bool esb_initialized, esb_radio_fault;
 static uint8_t relay_profile, relay_epoch;
 static uint32_t tdma_active_mask, relay_origin, relay_session, relay_layout_generation;
-static struct { bool valid; } tdma_staged;
+static struct { bool valid; uint16_t revoked_mask, readmit_mask; } tdma_staged;
 static uint32_t relay_frame_anchor, relay_start_anchor;
 static uint32_t relay_control_repeat_sent, relay_control_repeat_failed;
 static int relay_control_repeat_err;
@@ -122,6 +122,11 @@ static uint64_t k_uptime_ticks(void) { return clock_ticks; }
 static uint32_t k_uptime_get_32(void) { return (uint32_t)(clock_ticks * 1000U / 32768U); }
 static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return (uint64_t)ticks * 1000000U / 32768U; }
 static uint32_t k_ticks_to_us_ceil32(uint32_t ticks) { return ((uint64_t)ticks * 1000000U + 32767U) / 32768U; }
+static void k_msleep(uint32_t ms)
+{
+    assert(!irq_depth);
+    clock_ticks += ((uint64_t)ms * 32768U + 999U) / 1000U;
+}
 static void k_usleep(uint32_t us)
 {
     assert(!irq_depth);
@@ -226,7 +231,7 @@ names = (
     'relay_frame_repairs', 'relay_frame_announce',
     'relay_launch_margin', 'relay_arm_failure',
     'relay_freeze_demand', 'relay_freeze_arm', 'relay_repeat_encode', 'relay_repeat_arm',
-    'relay_freeze_callback', 'relay_repeat_callback',
+    'relay_freeze_callback', 'relay_repeat_callback', 'tdma_revoke_pairings',
     'relay_control_target', 'relay_control_compare_ready', 'relay_control_cancel', 'relay_control_schedule',
     'relay_control_plan', 'relay_control_eligible', 'relay_control_context_current',
     'relay_control_thread',
@@ -492,6 +497,39 @@ static void sdk_arm_timeout(bool repeat)
     relay_control_cancel(0, 1);
 }
 
+static void revoke_before_freeze(bool repeat)
+{
+    reset_device();
+    relay_profile = 1;
+    esb_initialized = true;
+    relay_epoch = 7;
+    relay_session = 123;
+    relay_layout_generation = 9;
+    tdma_active_mask = 3;
+    tdma_staged.revoked_mask = 0;
+    tdma_staged.readmit_mask = 2;
+    struct relay_control control = {.epoch = 7, .session = 123, .members = 3};
+    struct relay_control_work work = {
+        .control = &control, .generation = 9, .start_event = 1, .repeat = repeat,
+    };
+    uint64_t revoked_at = clock_ticks;
+    assert(relay_control_context_current(&control, relay_origin));
+    assert(!relay_control_schedule(0, 1, clock_ticks + 100U,
+        repeat ? relay_repeat_callback : relay_freeze_callback, &work));
+    tdma_revoke_pairings(2);
+    assert(clock_ticks - revoked_at == 33U);
+    assert(!tdma_staged.readmit_mask && !relay_control_context_current(&control, relay_origin));
+    k_sem_take(&relay_freeze_done, K_FOREVER);
+    assert(work.result == -ESTALE && relay_control_diag.stale_cancel == 1 && !radio_operation_busy);
+    relay_control_cancel(0, 1);
+    assert(!compares[0].armed && !compares[1].armed);
+
+    /* A clean relay publication resumes control while the removed bit stays revoked. */
+    tdma_active_mask = control.members = 1;
+    assert(relay_control_context_current(&control, relay_origin));
+    tdma_staged.revoked_mask = 0;
+}
+
 int main(void)
 {
     /* 120-Hz rational padding has both 273 and 274 tick frames. */
@@ -512,8 +550,10 @@ int main(void)
     failed_repeat_snapshot();
     sdk_arm_timeout(false);
     sdk_arm_timeout(true);
+    revoke_before_freeze(false);
+    revoke_before_freeze(true);
     for (enum thread_fault fault = LATE; fault <= GENERATION; ++fault) thread_case(fault);
-    puts("Control target, live repair phase, late setup, compare cleanup and future retry passed");
+    puts("Control target, live repair phase, late setup, compare cleanup, pairing revocation and future retry passed");
 }
 '''
 

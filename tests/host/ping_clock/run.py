@@ -28,7 +28,7 @@ from relay_support import relay_section, relay_query_helpers, staging_helpers
 CASES = ('maintenance', 'wrong-type', 'bad-crc', 'wrong-pipe', 'out-of-range', 'interleaved-pipe',
          'ota-status', 'ota-info', 'valid', 'valid-dirty', 'reacquire',
          'event-fallback', 'valid-after-invalid', 'duplicate', 'out-of-order', 'drain',
-         'detailed-warning', 'late-metadata', 'pairing-gate', 'status-admission')
+         'detailed-warning', 'late-metadata', 'pairing-gate', 'pairing-passive-pong', 'status-admission')
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source', type=Path, default=ROOT / 'src/connection/esb.c')
 parser.add_argument('--case', action='append', choices=CASES)

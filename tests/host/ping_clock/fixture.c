@@ -502,11 +502,83 @@ static void test_maintenance(void)
 	--now_ticks;
 	ack = ack_for(&p, &has_ack);
 	assert(has_ack && ack.length == ESB_PONG_LEN && ack.data[7] == ESB_PONG_FLAG_NORMAL);
-	assert(ack.data[9] == 0);
+	assert(ack.data[8] == 0xff && ack.data[9] == 0);
 	++now_ticks;
 	ack = ack_for(&p, &has_ack);
 	assert(has_ack && ack.length == ESB_PONG_LEN && ack.data[7] == ESB_PONG_FLAG_NORMAL);
 	assert(ack.data[8] == 0xff);
+}
+
+static void test_pairing_passive_pong(void)
+{
+	const uint8_t survivor = 2, retired = 3, higher = 4;
+	const uint16_t survivors = BIT(survivor);
+	const uint16_t old_members = survivors | BIT(retired);
+	tdma_active_mask = old_members;
+	tdma_staged.revoked_mask = BIT(retired);
+	relay_coord_note_caps(&relay_coord, survivor, RELAY_INFO_CAPS);
+	relay_coord_note_caps(&relay_coord, retired, RELAY_INFO_CAPS);
+	tracker_slots[survivor].tdma_config_packed = tdma_pack_config(0, 2, 64, 3);
+	tracker_slots[retired].tdma_config_packed = tdma_pack_config(1, 2, 64, 3);
+	now_ticks = 32768 * 5 / 2U;
+	struct esb_payload ping = packet(ESB_PING_TYPE, survivor, 3, 41, now_ticks, ESB_PONG_FLAG_NORMAL);
+	struct relay_pong_trailer trailer;
+	bool has_ack;
+
+	/* A relay exit stages native geometry while keeping the revoked slot vacant. */
+	relay_profile = RELAY_PROFILE_120HZ;
+	tdma_staged.valid = true;
+	tdma_staged.activation_ticks = 32768 * 3U;
+	tdma_staged.p = (struct tdma_publication){.new_mask = old_members, .active_count = 2,
+		.slot_ticks = 64, .epoch = 3};
+	struct esb_payload ack = ack_for(&ping, &has_ack);
+	assert(has_ack && relay_trailer_decode_len(ack.data + ESB_PONG_LEN, ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.member_mask == survivors && trailer.pending_member_mask == survivors);
+	assert(trailer.pending && trailer.pending_total == 2 && trailer.pending_slot_ticks == 64);
+
+	/* A profile trailer with a hole cannot describe valid v5 geometry. */
+	tdma_staged.p.profile = RELAY_PROFILE_120HZ;
+	tdma_staged.p.slot_ticks = 16;
+	ack = ack_for(&ping, &has_ack);
+	assert(has_ack && relay_trailer_decode_len(ack.data + ESB_PONG_LEN, ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.member_mask == survivors && !trailer.pending);
+	tdma_staged.valid = false;
+	ack = ack_for(&ping, &has_ack);
+	assert(has_ack && relay_trailer_decode_len(ack.data + ESB_PONG_LEN, ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.member_mask == survivors && !trailer.pending);
+
+	tracker_slots[survivor].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
+	ack = ack_for(&ping, &has_ack);
+	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
+	assert(relay_trailer_decode_len(ack.data + ESB_PONG_LEN, ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.member_mask == survivors && !trailer.pending);
+	tracker_slots[survivor].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
+
+	/* Replay the survivor's PONG 2.5 s into the native follow-up. Hide the
+	 * fresh assignment through activation, including a later-ranked joiner. */
+	relay_profile = 0;
+	tdma_staged.valid = true;
+	tdma_staged.native_followup = true;
+	tdma_staged.readmit_mask = BIT(retired);
+	tdma_staged.p = (struct tdma_publication){.new_mask = old_members | BIT(higher),
+		.active_count = 3, .slot_ticks = 48, .epoch = 4};
+	tdma_staged.activation_ticks = 103220U;
+	ack = ack_for(&ping, &has_ack);
+	assert(has_ack && relay_trailer_decode_len(ack.data + ESB_PONG_LEN, ack.length - ESB_PONG_LEN, &trailer));
+	assert(ack.data[8] == 0 && ack.data[9] == 2 && ack.data[10] == 64 && ack.data[11] == 3);
+	assert(trailer.member_mask == survivors && trailer.pending && trailer.pending_member_mask == survivors);
+	assert(trailer.pending_epoch == 4 && trailer.pending_total == 3 && trailer.pending_slot_ticks == 48);
+
+	struct esb_payload replacement = packet(ESB_PING_TYPE, retired, 4, 42, now_ticks, ESB_PONG_FLAG_NORMAL);
+	now_ticks = tdma_staged.activation_ticks - 1U;
+	ack = ack_for(&replacement, &has_ack);
+	assert(has_ack && ack.length == ESB_PONG_LEN && ack.data[8] == 0xff);
+	++now_ticks;
+	ack = ack_for(&replacement, &has_ack);
+	assert(has_ack && relay_pong_is_extended(ack.length) && ack.data[8] == 1 && ack.data[11] == 4);
+	ack = ack_for(&ping, &has_ack);
+	assert(has_ack && relay_trailer_decode_len(ack.data + ESB_PONG_LEN, ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.member_mask == (old_members | BIT(higher)) && !trailer.pending);
 }
 
 static void test_valid(void)
@@ -1070,6 +1142,11 @@ int main(int argc, char **argv)
 	}
 	if (strcmp(argv[1], "maintenance") == 0) {
 		test_maintenance();
+		printf("PASS %s\n", argv[1]);
+		return 0;
+	}
+	if (strcmp(argv[1], "pairing-passive-pong") == 0) {
+		test_pairing_passive_pong();
 		printf("PASS %s\n", argv[1]);
 		return 0;
 	}

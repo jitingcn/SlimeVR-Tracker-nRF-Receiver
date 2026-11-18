@@ -38,6 +38,9 @@ static unsigned irq_depth;
 static unsigned irq_lock(void) { return irq_depth++; }
 static void irq_unlock(unsigned key) { irq_depth=key; }
 static void k_sem_give(struct fixture_sem *sem) { assert(!irq_depth); sem->count=1; }
+#if defined(CONFIG_RELAY)
+static inline void k_msleep(unsigned ms) { assert(!irq_depth); host_now += ms; }
+#endif
 static void k_mutex_lock(int *lock, int timeout) { (void)lock; (void)timeout; }
 static void k_mutex_unlock(int *lock) { (void)lock; }
 static int tracker_roster_save(uint8_t count, const uint64_t *addresses) {

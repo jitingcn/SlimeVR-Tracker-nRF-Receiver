@@ -26,7 +26,7 @@ static struct relay_runtime_settings relay_applied_settings={16,RELAY_REPAIR_SLO
 static bool esb_initialized=true,esb_pairing,locked;
 static uint8_t relay_profile=1,relay_epoch=2;
 static uint16_t tdma_active_mask=0x7ff;
-static struct { bool valid; } tdma_staged;
+static struct { bool valid; uint16_t revoked_mask; } tdma_staged;
 static uint32_t relay_session=42,relay_origin=100;
 static unsigned locks, plans;
 static uint32_t relay_learn_lock_max;

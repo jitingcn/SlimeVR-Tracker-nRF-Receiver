@@ -129,7 +129,8 @@ for name in names:
 # still raises if it is missing from the selected comparison source.
 for name in reversed(('relay_layout_stageable', 'relay_roster_eligible',
                       'relay_query_can_resume', 'relay_query_update_locked',
-                      'tdma_admissible_mask', 'tdma_staged_pong_mask', 'tdma_defer_wom_locked')):
+                      'tdma_admissible_mask', 'tdma_staged_pong_mask', 'tdma_defer_wom_locked',
+                      'tdma_revoke_pairings')):
     if any(re.search(rf'\b{name}\s*\(', body) for body in functions):
         functions.insert(0, function(name))
 

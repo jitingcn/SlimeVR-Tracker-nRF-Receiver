@@ -100,6 +100,8 @@ functions = [function(name) for name in (
     'relay_control_eligible', 'esb_relay_blocks_ota', 'decision_accept',
     'packet_stats_refresh', 'packet_stats_count', 'check_packet_sequence',
 )]
+if 'tdma_revoke_pairings(' in function('esb_pop_pair'):
+    functions.insert(0, function('tdma_revoke_pairings'))
 functions.append('static uint32_t sys_get_be32(const uint8_t *p) {\n'
                  'return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | '
                  '((uint32_t)p[2] << 8) | p[3];\n}\n')

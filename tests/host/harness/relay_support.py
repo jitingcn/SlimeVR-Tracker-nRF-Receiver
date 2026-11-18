@@ -97,10 +97,11 @@ STAGING_RECALC = ("tdma_staged_pong_mask", "tdma_defer_wom_locked", "tdma_stagin
 def staging_helpers(esb, recalc=False):
     """Staged layout publication (needs tracker_slots, tdma_pack_config and
     tdma_membership_wake; with recalc, everything tdma_recalculate uses)."""
+    wire_members = _function(esb, "tdma_wire_members") if "tdma_wire_members(" in esb else ""
     if recalc:
         return "\n\n".join(_function(esb, name) for name in ("tdma_advertised_config",) + STAGING_RECALC) + "\n"
     # ACK-only fixtures have no stats thread: count wakeups instead.
-    return "\n".join((_function(esb, "tdma_pack_config"), _function(esb, "tdma_staged_pong_mask"),
+    return "\n".join((wire_members, _function(esb, "tdma_pack_config"), _function(esb, "tdma_staged_pong_mask"),
                       "static unsigned tdma_membership_wake_gives;",
                       "#define k_sem_give(sem) ((void)(sem), tdma_membership_wake_gives++)",
                       "#define tdma_membership_wake tdma_membership_wake_gives",
