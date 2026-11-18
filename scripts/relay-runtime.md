@@ -1,5 +1,12 @@
 # Runtime repair policy
 
+`relay auto` is the boot default and switches profiles based on direct-link
+quality. `relay force` keeps an eligible fleet in profile 1 through direct-link
+recovery. `relay off` returns to direct TDMA by staged activation. `relay on`
+remains an alias for `relay auto`. Mode selection lasts until reboot and
+`relay` reports it in the `permission` field. Layout settings have their own
+persistent record.
+
 Defaults are max_trackers=16, max_repairs=5, repair_floor=5, slot_ticks=16,
 tps_min=120 and tps_max=120. The member cap is capacity; the staged layout's
 actual member count T sets R=clamp(floor(32768/tps_min/slot_ticks)-T-1,1,max_repairs).

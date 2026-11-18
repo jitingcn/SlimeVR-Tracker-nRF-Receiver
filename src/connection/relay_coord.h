@@ -54,6 +54,7 @@
 _Static_assert(RC_HEAD_MIN_PERMILLE == 950U, "relay qualification threshold");
 #define RC_OTA_DIRECT_FRESH_MS 1500U
 
+enum relay_mode { RELAY_MODE_AUTO, RELAY_MODE_FORCE, RELAY_MODE_OFF };
 enum rc_path { RC_DIRECT, RC_RELAYED };
 
 /* check_packet_sequence() outcomes. */
@@ -246,6 +247,7 @@ bool relay_coord_direct_ready(const struct relay_coord *rc, uint8_t id, uint32_t
 bool relay_coord_is_capable(const struct relay_coord *rc, uint8_t id);
 void relay_coord_set_enabled(struct relay_coord *rc, bool enabled);
 bool relay_coord_ready(const struct relay_coord *rc, uint16_t members);
+bool relay_coord_requested(const struct relay_coord *rc, enum relay_mode mode, uint16_t members);
 /* Every member runs relay firmware, so an applied profile 1 can run. Permission does not gate an already applied profile; relay_coord_ready adds it. */
 bool relay_coord_capable(const struct relay_coord *rc, uint16_t members);
 

@@ -163,6 +163,7 @@ def production_bodies(source, header=''):
         snapshot += function(source, 'esb_auto_loss_fence', optional=True)
         snapshot += function(source, 'decision_accept', optional=True)
         snapshot += function(source, 'esb_auto_loss_invalidate')
+        snapshot += function(source, 'esb_loss_operations_idle')
         snapshot += function(source, 'esb_get_auto_loss_snapshot')
         snapshot += function(source, 'esb_rx_discontinuity')
         snapshot += function(source, 'esb_auto_loss_rebase', optional=True)
@@ -241,6 +242,7 @@ static void restart_ping(uint8_t tracker_id) {
         function(source, 'esb_receive_normal', optional=True),
         staging_helpers(source, recalc=True) if relay else '',
         *(function(source, name) for name in LATE_MEMBERSHIP),
+        function(source, 'relay_force_entry_allowed') if relay else '',
         function(source, 'tdma_recalculate'),
         admission,
     ))

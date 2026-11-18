@@ -2,6 +2,9 @@
 #include <zephyr/kernel.h>
 static bool esb_ota_relay_is_active(void) { return false; }
 static bool receiver_ota_is_active(void) { return false; }
+static bool esb_radio_fault;
+static bool esb_channel_is_busy(void) { return false; }
+static bool esb_ota_relay_abort_pending(uint8_t id) { (void)id; return false; }
 #define MAX_TRACKERS 16
 #define ESB_COMPOSITE_TYPE 0xfe
 #define TEST_ALL_JOIN_CONFIG_GRACE_MS 1500

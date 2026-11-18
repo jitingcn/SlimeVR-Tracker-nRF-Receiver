@@ -82,9 +82,9 @@ cadence=r'''
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include "relay_coord.h"
 ''' + constants + r'''
-struct coordinator { bool enabled, auto_engaged; };
-static struct coordinator relay_coord;
+static struct relay_coord relay_coord;
 static struct { uint32_t planned_power_down_mask; } relay_member_diag;
 static unsigned relay_profile=1, tdma_cap_level;
 static uint32_t relay_query_protected_mask=10;
@@ -92,7 +92,8 @@ static bool relay_query_recovering=true, relay_query_suspending=true;
 struct esb_auto_loss_snapshot { bool relay_eligible; };
 #define esb_get_auto_loss_snapshot(e) ((e)->relay_eligible=true)
 #define LOG_INF(...) ((void)0)
-static bool relay_user_enabled=true, locked;
+static enum relay_mode relay_user_mode = RELAY_MODE_AUTO;
+static bool locked;
 static unsigned tdma_active_mask=0x7ff, proof_updates, choice_updates, policy_updates, intent_reads;
 static uint32_t event_mask=8;
 static bool esb_ota_relay_is_active(void){return false;}
@@ -105,7 +106,7 @@ static uint32_t tracker_events_power_down_mask(uint32_t now, uint32_t tail)
         + TDMA_RECONFIG_MIN_MS + 2U * TPS_MONITOR_INTERVAL_MS);intent_reads++;return event_mask;
 }
 static bool relay_query_can_resume(void){assert(locked);return true;}
-static void relay_coord_auto_update(struct coordinator *c, uint16_t members, uint32_t now, bool profile, bool eligible)
+void relay_coord_auto_update(struct relay_coord *c, uint16_t members, uint32_t now, bool profile, bool eligible)
 {
  assert(locked && c==&relay_coord && members==(tdma_active_mask & ~event_mask));
  assert(now==500 && profile && eligible);policy_updates++;
@@ -133,6 +134,6 @@ int main(void){
 '''
 with tempfile.TemporaryDirectory() as d:
  p=Path(d);(p/'cadence.c').write_text(cadence)
- subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-fsanitize=address,undefined','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable',str(p/'cadence.c'),'-o',str(p/'cadence')],check=True)
+ subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-fsanitize=address,undefined','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-I',str(root/'src/connection'),str(p/'cadence.c'),'-o',str(p/'cadence')],check=True)
  subprocess.run([str(p/'cadence')],check=True)
 print('Every direct-proof update refreshes helper choices before TPS processing')

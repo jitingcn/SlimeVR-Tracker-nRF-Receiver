@@ -242,12 +242,20 @@ static void tdma_recalculate(bool forced);
 /* Peer relay coordinator (see the relay section below). */
 static struct relay_coord relay_coord;
 static bool relay_auto_ladder_paused(void);
+static bool relay_force_entry_allowed(void);
 static bool relay_query_can_resume(void);
 static void relay_query_update_locked(void);
 /* Profile 0 is held until this uptime after a tracker confirms QUERY_INFO:
  * the staged exit lead plus time for its reliable 66-byte reply. */
 static int64_t relay_query_until;
-static bool relay_user_enabled;
+#if defined(CONFIG_RELAY_DEFAULT_FORCE)
+#define RELAY_DEFAULT_MODE RELAY_MODE_FORCE
+#elif defined(CONFIG_RELAY_DEFAULT_OFF)
+#define RELAY_DEFAULT_MODE RELAY_MODE_OFF
+#else
+#define RELAY_DEFAULT_MODE RELAY_MODE_AUTO
+#endif
+static enum relay_mode relay_user_mode = RELAY_DEFAULT_MODE;
 #endif
 static void tdma_sync_stats_reset(void);
 
@@ -883,7 +891,7 @@ static struct {
 /* All query lease state is serialized with membership and layout publication. */
 static bool relay_query_can_resume(void)
 {
-	return relay_coord.auto_engaged && relay_coord_ready(&relay_coord, (uint16_t)tdma_active_mask);
+	return relay_coord_requested(&relay_coord, relay_user_mode, (uint16_t)tdma_active_mask);
 }
 
 /* Caller holds irq_lock. A missed native hold must not pin its roster. */
@@ -1192,9 +1200,14 @@ static void tdma_recalculate(bool forced)
 			tdma_cap_level = tdma_published_cap_level;
 		}
 #if defined(CONFIG_RELAY)
-		uint8_t profile = relay_control_ready && !atomic_get(&radio_operation_busy)
+		bool relay_requested = relay_control_ready && !atomic_get(&radio_operation_busy)
 			&& !esb_ota_relay_is_active() && !receiver_ota_is_active()
-			&& now >= relay_query_until && relay_coord.auto_engaged && relay_coord_ready(&relay_coord, (uint16_t)new_mask) ? RELAY_PROFILE_120HZ : 0;
+			&& now >= relay_query_until
+			&& relay_coord_requested(&relay_coord, relay_user_mode, (uint16_t)new_mask);
+		if (relay_requested && !relay_profile && relay_user_mode == RELAY_MODE_FORCE) {
+			relay_requested = relay_force_entry_allowed();
+		}
+		uint8_t profile = relay_requested ? RELAY_PROFILE_120HZ : 0;
 		uint8_t slot_ticks = profile ? relay_settings.slot_ticks : tdma_slot_ticks_for(active_count);
 #else
 		uint8_t slot_ticks = tdma_slot_ticks_for(active_count);
@@ -1504,6 +1517,31 @@ void esb_rx_discontinuity(void)
 	irq_unlock(key);
 }
 
+/* Caller holds irq_lock. This is shared by loss policy and forced entry. */
+static bool esb_loss_operations_idle(void)
+{
+	if (esb_radio_fault || esb_channel_is_busy() || esb_pairing || esb_clearing
+	    || esb_ota_relay_is_active() || receiver_ota_is_active()
+	    || data_collect_is_active() || data_collect_batch_is_active()
+	    || (atomic_get(&test_all_state_valid) && atomic_get(&test_all_enabled))) {
+		return false;
+	}
+	for (uint8_t i = 0; i < MAX_TRACKERS; ++i) {
+		if (esb_ota_relay_abort_pending(i)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+#if defined(CONFIG_RELAY)
+static bool relay_force_entry_allowed(void)
+{
+	return tdma_active_mask == tdma_admissible_mask((uint32_t)atomic_get(&tdma_shadow_desired_mask))
+		&& !atomic_get(&tdma_shadow_pending_join_mask) && esb_loss_operations_idle();
+}
+#endif
+
 void esb_get_auto_loss_snapshot(struct esb_auto_loss_snapshot *out)
 {
 	BUILD_ASSERT(MAX_TRACKERS == ESB_AUTO_LOSS_TRACKERS);
@@ -1522,10 +1560,7 @@ void esb_get_auto_loss_snapshot(struct esb_auto_loss_snapshot *out)
 	if (out->home == ESB_RF_CHANNEL_DEFAULT) {
 		out->home = RADIO_RF_CHANNEL;
 	}
-	out->eligible = !esb_radio_fault && !esb_channel_is_busy() && !esb_pairing
-		&& !esb_clearing && !esb_ota_relay_is_active() && !receiver_ota_is_active()
-		&& !data_collect_is_active() && !data_collect_batch_is_active()
-		&& !(atomic_get(&test_all_state_valid) && atomic_get(&test_all_enabled));
+	out->eligible = esb_loss_operations_idle();
 	out->relay_eligible = out->eligible
 #if defined(CONFIG_RELAY)
 		&& out->active_mask == tdma_admissible_mask((uint32_t)atomic_get(&tdma_shadow_desired_mask))
@@ -1537,11 +1572,6 @@ void esb_get_auto_loss_snapshot(struct esb_auto_loss_snapshot *out)
 		&& out->active_mask == (uint32_t)atomic_get(&tdma_shadow_desired_mask)
 		&& !atomic_get(&tdma_shadow_pending_join_mask)
 		&& !atomic_get(&tdma_shadow_pending_leave_mask);
-	for (uint8_t i = 0; i < MAX_TRACKERS; ++i) {
-		if (esb_ota_relay_abort_pending(i)) {
-			out->eligible = out->relay_eligible = false;
-		}
-	}
 	irq_unlock(key);
 }
 
@@ -2458,13 +2488,14 @@ static void esb_stats_thread(void)
 		 * up any change in forwarding slots. OTA runs on direct links only,
 		 * so the coordinator pauses (and releases every role) meanwhile. */
 		{
-			bool relay_enabled = relay_user_enabled && !esb_ota_relay_is_active();
 			uint32_t planned_power_down = tracker_events_power_down_mask(
 				k_uptime_get_32(), TDMA_SHADOW_LEAVE_GRACE_MS + 2U * RELAY_LAYOUT_ACTIVATION_MS
 					+ TDMA_RECONFIG_MIN_MS + 2U * TPS_MONITOR_INTERVAL_MS
 			);
 			unsigned int relay_key = irq_lock();
 			IRQ_PROBE_BEGIN(tick);
+			enum relay_mode mode = relay_user_mode;
+			bool relay_enabled = mode != RELAY_MODE_OFF && !esb_ota_relay_is_active();
 			if (relay_enabled != relay_coord.enabled) {
 				relay_coord_set_enabled(&relay_coord, relay_enabled);
 			}
@@ -2477,7 +2508,7 @@ static void esb_stats_thread(void)
 			bool engaged = relay_coord.auto_engaged;
 			IRQ_PROBE_END(tick);
 			irq_unlock(relay_key);
-			if (was_engaged != engaged) {
+			if (mode == RELAY_MODE_AUTO && was_engaged != engaged) {
 				LOG_INF("relay auto %s: direct quality, cap=%u",
 					engaged ? "ENTER" : "EXIT", tdma_cap_level);
 			}
@@ -2740,6 +2771,7 @@ static int relay_coord_init_once(void)
 	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 #endif
 	relay_coord_init(&relay_coord);
+	relay_coord_set_enabled(&relay_coord, relay_user_mode != RELAY_MODE_OFF);
 	return 0;
 }
 SYS_INIT(relay_coord_init_once, APPLICATION, 0);
@@ -6266,17 +6298,21 @@ static bool relay_auto_ladder_paused(void)
 		|| (tdma_staged.valid && tdma_staged.p.profile);
 }
 
-void esb_relay_set_enabled(bool enabled)
+void esb_relay_set_mode(enum relay_mode mode)
 {
 	unsigned int key = irq_lock();
-	relay_user_enabled = enabled;
-	relay_coord_set_enabled(&relay_coord, enabled && !esb_ota_relay_is_active());
+	bool changed = relay_user_mode != mode;
+	relay_user_mode = mode;
+	relay_coord_set_enabled(&relay_coord, mode != RELAY_MODE_OFF && !esb_ota_relay_is_active());
 	if (!relay_query_can_resume()) {
 		relay_query_protected_mask = 0;
 		relay_query_recovering = false;
 		relay_query_suspending = false;
 	}
 	irq_unlock(key);
+	if (changed) {
+		k_sem_give(&tdma_membership_wake);
+	}
 }
 
 void esb_relay_block(uint8_t id, uint8_t percent)
@@ -6462,9 +6498,10 @@ void esb_relay_print_status(void)
 #endif
 	unsigned int key = irq_lock();
 	struct relay_control control = relay_grants;
-	bool enabled = relay_coord.enabled;
+	enum relay_mode mode = relay_user_mode;
 	bool ready = relay_coord_ready(&relay_coord, (uint16_t)tdma_active_mask);
 	uint16_t members = (uint16_t)tdma_active_mask;
+	bool engaged = relay_profile != 0;
 
 	uint16_t block_mask = relay_block_mask;
 	int32_t block_left = (int32_t)(relay_block_deadline - k_uptime_get_32());
@@ -6493,8 +6530,11 @@ void esb_relay_print_status(void)
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 	printk("relay: diagnostics_overflow=%u\n", tdma_diag_overflow);
 #endif
-	printk("relay: permission=%s eligible=%u engaged=%u members=0x%04x\n", enabled ? "on" : "off",
-		ready, relay_profile != 0, members);
+	static const char *const modes[] = {
+		[RELAY_MODE_AUTO] = "auto", [RELAY_MODE_FORCE] = "force", [RELAY_MODE_OFF] = "off",
+	};
+	printk("relay: permission=%s eligible=%u engaged=%u members=0x%04x\n",
+		modes[mode], ready, engaged, members);
 	printk("relay: repair seen=%u invalid=%u phase=%u slot=%u record=%u\n",
 	relay_rx_stats.repair.seen, relay_rx_stats.repair.invalid, relay_rx_stats.repair.phase, relay_rx_stats.repair.slot, relay_rx_stats.repair.record);
 	if (relay_profile) {

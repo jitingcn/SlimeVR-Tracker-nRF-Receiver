@@ -268,7 +268,8 @@ static void print_help(void)
 		"Peer relay:\n"
 		"  relay                      Relay coordinator status\n"
 		"  relay diag                 Timing errors and live member leases\n"
-		"  relay on|off               Enable/disable relaying\n"
+		"  relay auto|force|off       Select relay mode (boot default: auto)\n"
+		"    relay on                 Alias for relay auto\n"
 		"  relay layout [field value]  Show or persist runtime limits\n"
 		"  relay blockmask <mask> <s> Test: block up to 3 children for at most 60 s\n"
 		"  relay block <id> <pct>     Test: drop pct%% of <id>'s direct uplink (0 = off)\n"
@@ -1057,11 +1058,14 @@ static void console_thread(void)
 				esb_relay_print_pool();
 			} else if (argc == 1) {
 				esb_relay_print_status();
-			} else if (argc == 2 && strcmp(arg, "on") == 0) {
-				esb_relay_set_enabled(true);
-				printk("Relay enabled\n");
+			} else if (argc == 2 && (strcmp(arg, "auto") == 0 || strcmp(arg, "on") == 0)) {
+				esb_relay_set_mode(RELAY_MODE_AUTO);
+				printk(strcmp(arg, "on") == 0 ? "Relay enabled\n" : "Relay auto\n");
+			} else if (argc == 2 && strcmp(arg, "force") == 0) {
+				esb_relay_set_mode(RELAY_MODE_FORCE);
+				printk("Relay force\n");
 			} else if (argc == 2 && strcmp(arg, "off") == 0) {
-				esb_relay_set_enabled(false);
+				esb_relay_set_mode(RELAY_MODE_OFF);
 				printk("Relay disabled\n");
 			} else if (argc == 4 && strcmp(arg, "blockmask") == 0) {
 				char *end;
@@ -1079,7 +1083,7 @@ static void console_thread(void)
 				esb_relay_block(id, pct);
 				printk("Direct uplink of tracker %u: %u%% dropped\n", id, pct);
 			} else {
-				printk("Usage: relay [on|off|block <id> <pct>]\n");
+				printk("Usage: relay [auto|force|off|block <id> <pct>]\n");
 			}
 #endif
 		} else if (strcmp(argv[0], command_health) == 0) {

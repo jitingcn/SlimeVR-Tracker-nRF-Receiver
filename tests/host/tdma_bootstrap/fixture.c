@@ -136,7 +136,11 @@ static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t length)
 }
 /* DIAGNOSTIC DECLARATIONS */
 static uint32_t decision_ready_mask, decision_fence_mask;
-static bool esb_ota_relay_is_active(void) { return false; }
+static bool tracker_ota, channel_busy, abort_pending;
+static bool esb_pairing, esb_clearing, esb_radio_fault;
+static bool esb_ota_relay_is_active(void) { return tracker_ota; }
+static bool esb_channel_is_busy(void) { return channel_busy; }
+static bool esb_ota_relay_abort_pending(uint8_t id) { (void)id; return abort_pending; }
 static bool self_ota;
 static bool receiver_ota_is_active(void) { return self_ota; }
 static atomic_t test_all_state_valid, test_all_confirmed_mask;
@@ -160,6 +164,8 @@ static void reset_fixture(uint8_t count, uint64_t time)
     assert(!irq_depth && !mutex_depth && count <= MAX_TRACKERS);
     now_ms = time; restore_error = 0; saved_count = count;
     tdma_active_mask = 0;
+    relay_user_mode = RELAY_DEFAULT_MODE;
+    relay_coord_set_enabled(&relay_coord, relay_user_mode != RELAY_MODE_OFF);
     unsigned int key = irq_lock();
     for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
         saved_addr[i] = i < count ? 1000 + i : 0;
@@ -864,13 +870,13 @@ static void permission_off_keeps_control_through_exit(void)
 	two_member_layout(2, true);
 	now_ms = 6000;
 	service();
-	esb_relay_set_enabled(true);
+	esb_relay_set_mode(RELAY_MODE_AUTO);
 	relay_coord.auto_engaged = true;
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
 	assert(relay_profile == 1 && relay_control_eligible());
 	for (unsigned reenable = 0; reenable < 2; reenable++) {
-		esb_relay_set_enabled(false);
+		esb_relay_set_mode(RELAY_MODE_OFF);
 		assert(!relay_coord.enabled && !relay_coord.auto_engaged);
 		assert(!relay_coord_ready(&relay_coord, (uint16_t)tdma_active_mask)); /* future entry stays gated */
 		assert(relay_control_eligible());
@@ -880,7 +886,7 @@ static void permission_off_keeps_control_through_exit(void)
 		for (unsigned step = 0; now_ms + 10 < activation; step++) {
 			/* Permission returning mid-exit is not an engagement: the exit stays staged. */
 			if (reenable && step == 100) {
-				esb_relay_set_enabled(true);
+				esb_relay_set_mode(RELAY_MODE_AUTO);
 			}
 			now_ms += 10; live(); service();
 			assert(tdma_staged.valid && relay_profile == 1 && relay_control_eligible());
@@ -889,7 +895,7 @@ static void permission_off_keeps_control_through_exit(void)
 		assert(!tdma_staged.valid && !relay_profile && !relay_control_eligible());
 		assert(relay_coord.enabled == (reenable != 0));
 		if (!reenable) {
-			esb_relay_set_enabled(true);
+			esb_relay_set_mode(RELAY_MODE_AUTO);
 			relay_coord.auto_engaged = true;
 			now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 			assert(tdma_staged.valid && tdma_staged.p.profile == 1 && !relay_control_eligible());
@@ -909,7 +915,7 @@ static void relay_off_and_pairing_keep_b(void)
 	two_member_layout(2, true);
 	now_ms = 6000;
 	service();
-	esb_relay_set_enabled(true);
+	esb_relay_set_mode(RELAY_MODE_AUTO);
 	relay_coord.auto_engaged = true;
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
@@ -924,7 +930,7 @@ static void relay_off_and_pairing_keep_b(void)
 	/* Native base from before entry; the tracker keeps counting in profile 1. */
 	tracker_slots[0].sequence_initialized = tracker_slots[1].sequence_initialized = true;
 	tracker_slots[0].last_packet_sequence = 10;
-	esb_relay_set_enabled(false);
+	esb_relay_set_mode(RELAY_MODE_OFF);
 	assert(!relay_coord_ready(&relay_coord, (uint16_t)tdma_active_mask));
 	assert(relay_control_eligible());
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
@@ -940,7 +946,7 @@ static void relay_off_and_pairing_keep_b(void)
 	 * re-anchor this and the next 58 packets would be dropped as old. */
 	assert(!tracker_slots[0].sequence_initialized && !tracker_slots[1].sequence_initialized);
 	assert(check_packet_sequence(0, 5) == 0 && check_packet_sequence(0, 6) == 0);
-	esb_relay_set_enabled(true);
+	esb_relay_set_mode(RELAY_MODE_AUTO);
 	relay_coord.auto_engaged = false;
 	relay_coord.enabled = false;
 	puts("PASS relay off and pairing: control frame maintains applied profile 1, exit re-anchors native sequence");
@@ -954,7 +960,7 @@ static void query_info_holds_profile0(void)
 	two_member_layout(2, true);
 	now_ms = 6000;
 	service();
-	esb_relay_set_enabled(true);
+	esb_relay_set_mode(RELAY_MODE_AUTO);
 	relay_coord.auto_engaged = true;
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
@@ -1030,7 +1036,7 @@ static void query_case_setup(uint64_t base, bool engage)
 	service();
 	now_ms = base + 101; service();
 	assert(tdma_active_mask == 7);
-	esb_relay_set_enabled(true);
+	esb_relay_set_mode(RELAY_MODE_AUTO);
 	if (engage) {
 		relay_coord.auto_engaged = true;
 		now_ms = base + 2000;
@@ -1047,6 +1053,104 @@ static void query_case_setup(uint64_t base, bool engage)
 		service();
 		assert(!relay_profile && !tdma_staged.valid);
 	}
+}
+
+static void relay_mode_service(void)
+{
+	for (uint8_t id = 0; id < 3; ++id) {
+		query_case_ping(id, ESB_PONG_FLAG_NORMAL);
+	}
+	service();
+}
+
+static void relay_mode_transitions(void)
+{
+	query_case_setup(0, false);
+	assert(relay_user_mode == RELAY_MODE_AUTO && relay_coord.enabled);
+	assert(!relay_coord.auto_engaged && !relay_profile && !tdma_staged.valid);
+
+	atomic_set(&radio_operation_busy, 1);
+	esb_relay_set_mode(RELAY_MODE_FORCE);
+	relay_mode_service();
+	assert(!relay_profile && !tdma_staged.valid);
+	atomic_set(&radio_operation_busy, 0);
+	tracker_ota = true;
+	relay_mode_service();
+	assert(!relay_profile && !tdma_staged.valid);
+	tracker_ota = false;
+	self_ota = true;
+	relay_mode_service();
+	assert(!relay_profile && !tdma_staged.valid);
+	self_ota = false;
+	abort_pending = true;
+	relay_mode_service();
+	assert(!relay_profile && !tdma_staged.valid);
+	abort_pending = false;
+	relay_coord_note_caps(&relay_coord, 2, 0);
+	relay_mode_service();
+	assert(!relay_profile && !tdma_staged.valid);
+	relay_coord_note_caps(&relay_coord, 2, RELAY_INFO_CAPS);
+	relay_mode_service();
+	assert(!relay_profile && tdma_staged.valid && tdma_staged.p.profile);
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1U;
+	relay_mode_service();
+	assert(relay_profile && !tdma_staged.valid && relay_control_eligible());
+
+	/* Clean quality can withdraw auto demand while forced relay stays applied. */
+	for (unsigned tick = 0; tick < 8; ++tick) {
+		now_ms += RC_WINDOW_MS;
+		live();
+		query_case_ping(2, ESB_PONG_FLAG_NORMAL);
+		for (uint8_t id = 0; id < 3; ++id) {
+			for (unsigned n = 0; n < 60; ++n) {
+				relay_coord_note_frame(&relay_coord, id, RC_DIRECT, RC_SEQ_NORMAL, 0, 60, now_ms);
+			}
+		}
+		relay_coord_tick(&relay_coord, tdma_active_mask, now_ms);
+		relay_coord_auto_update(&relay_coord, tdma_active_mask, now_ms, true, true);
+		service();
+		assert(relay_profile && !tdma_staged.valid);
+	}
+	assert(!relay_coord.auto_engaged);
+
+	self_ota = true;
+	relay_mode_service();
+	assert(relay_profile && tdma_staged.valid && !tdma_staged.p.profile);
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1U;
+	relay_mode_service();
+	assert(relay_user_mode == RELAY_MODE_FORCE && !relay_profile && !tdma_staged.valid);
+	self_ota = false;
+	relay_mode_service();
+	assert(tdma_staged.valid && tdma_staged.p.profile);
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1U;
+	relay_mode_service();
+	assert(relay_profile && !tdma_staged.valid);
+
+	esb_relay_set_mode(RELAY_MODE_AUTO);
+	service();
+	assert(relay_profile && tdma_staged.valid && !tdma_staged.p.profile && relay_control_eligible());
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1U;
+	relay_mode_service();
+	assert(!relay_profile && !tdma_staged.valid && relay_coord.enabled);
+
+	esb_relay_set_mode(RELAY_MODE_FORCE);
+	service();
+	assert(tdma_staged.valid && tdma_staged.p.profile);
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1U;
+	relay_mode_service();
+	assert(relay_profile && !tdma_staged.valid);
+	relay_coord.auto_engaged = true; /* Auto demand has returned during force. */
+	esb_relay_set_mode(RELAY_MODE_AUTO);
+	service();
+	assert(relay_profile && !tdma_staged.valid);
+	esb_relay_set_mode(RELAY_MODE_OFF);
+	service();
+	assert(!relay_coord.enabled && !relay_coord.auto_engaged);
+	assert(relay_profile && tdma_staged.valid && !tdma_staged.p.profile && relay_control_eligible());
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1U;
+	relay_mode_service();
+	assert(!relay_profile && !tdma_staged.valid && !relay_control_eligible());
+	puts("PASS relay modes: auto default, force holds, auto follows demand, off stages exit, OTA and channel exclusion");
 }
 
 /* Last modeled repair before the query-triggered native activation. */
@@ -1182,7 +1286,7 @@ static void query_forget_and_inability(void)
 		service();
 		query_case_live_until(13000);
 		if (reason == 0) {
-			esb_relay_set_enabled(false);
+			esb_relay_set_mode(RELAY_MODE_OFF);
 		} else if (reason == 1) {
 			relay_coord.auto_engaged = false;
 		} else {
@@ -1272,7 +1376,7 @@ static void query_single_setup(uint64_t base)
 	now_ms = base + 101;
 	service();
 	assert(tdma_active_mask == BIT(6) && !relay_profile);
-	esb_relay_set_enabled(true);
+	esb_relay_set_mode(RELAY_MODE_AUTO);
 	relay_coord.auto_engaged = true;
 	now_ms = base + 2000;
 	query_case_ping(6, ESB_PONG_FLAG_NORMAL);
@@ -1407,6 +1511,7 @@ int main(int argc, char **argv)
         return 0;
     }
     assert(argc == 1);
+    assert(relay_user_mode == RELAY_MODE_AUTO && relay_coord.enabled); /* production boot init */
     all_rosters(0);
     all_rosters((uint64_t)UINT32_MAX - 50U);
     invalid_and_stale_evidence();
@@ -1426,6 +1531,7 @@ int main(int argc, char **argv)
 	runtime_settings_publication();
 	member_cap_owner_blocks();
 	member_cap_relay_off();
+	relay_mode_transitions();
 	query_membership_recovery(0, false);
 	query_membership_recovery(0, true);
 	query_membership_recovery((uint64_t)UINT32_MAX - 20000U, true);

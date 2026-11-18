@@ -25,6 +25,9 @@
 
 #include <esb.h>
 #include <stdint.h>
+#if defined(CONFIG_RELAY)
+#include "relay_coord.h"
+#endif
 
 // Ping/Pong constants (shared protocol)
 #define ESB_PING_TYPE 0xF0
@@ -284,7 +287,9 @@ static inline void esb_request_all_shutdown(void)
 }
 
 /* Peer relay coordinator (relay_coord.c). */
-void esb_relay_set_enabled(bool enabled);
+#if defined(CONFIG_RELAY)
+void esb_relay_set_mode(enum relay_mode mode);
+#endif
 /* Test hook: drop percent% of id's direct uplink (pose and PINGs). */
 void esb_relay_block(uint8_t id, uint8_t percent);
 bool esb_relay_block_mask(uint16_t mask, uint8_t seconds);

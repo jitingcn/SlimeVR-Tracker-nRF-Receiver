@@ -210,7 +210,8 @@ def main():
             'tdma_loss_reset_windows', 'tdma_pack_config', 'relay_query_can_resume', 'relay_query_update_locked', 'tdma_shadow_observe',
             'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked',
             'tdma_slot_ticks_for', 'tdma_staging_supported_locked', 'tdma_apply_locked',
-            'tdma_apply_finish', 'relay_auto_ladder_paused', 'tdma_recalculate'))
+            'tdma_apply_finish', 'relay_auto_ladder_paused', 'esb_loss_operations_idle',
+            'relay_force_entry_allowed', 'tdma_recalculate'))
         membership += ('\n#if defined(CONFIG_RELAY)\n' +
                        function(esb, 'relay_auto_policy_update') +
                        function(esb, 'relay_query_begin') + '\n#endif\n')

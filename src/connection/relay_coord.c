@@ -351,6 +351,12 @@ bool relay_coord_ready(const struct relay_coord *rc, uint16_t members)
 	return rc->enabled && relay_coord_capable(rc, members);
 }
 
+bool relay_coord_requested(const struct relay_coord *rc, enum relay_mode mode, uint16_t members)
+{
+	return (mode == RELAY_MODE_FORCE || (mode == RELAY_MODE_AUTO && rc->auto_engaged))
+		&& relay_coord_ready(rc, members);
+}
+
 bool relay_coord_capable(const struct relay_coord *rc, uint16_t members)
 {
 	if (!members) {

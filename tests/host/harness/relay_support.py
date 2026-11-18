@@ -22,11 +22,13 @@ def _function(esb, name):
 def relay_declarations(esb, member_diagnostics=True):
     """Coordinator, published layout, test-hook state and RX statistics."""
     esb = select_relay(esb)
-    state = re.findall(r"^static (?:struct relay_coord relay_coord|bool relay_user_enabled|"
+    state = re.findall(r"^static (?:struct relay_coord relay_coord|enum relay_mode relay_user_mode|"
                        r"int64_t relay_query_until|uint(?:8|16|32)_t relay_block_(?:id|percent|mask|deadline))\b[^\n]*;",
                        esb, re.MULTILINE)
     if len(state) != 7:
         raise ValueError(f"relay state declarations changed: {state}")
+    default_mode = re.search(r"^#if defined\(CONFIG_RELAY_DEFAULT_FORCE\)\n.*?^#endif",
+                             esb, re.M | re.S).group()
     stats = re.search(r"^static struct \{\n\tuint32_t arrivals;.*?\} relay_rx_stats;", esb,
                       re.MULTILINE | re.DOTALL)
     if not stats:
@@ -53,7 +55,7 @@ def relay_declarations(esb, member_diagnostics=True):
         diagnostics.append(extract_block(esb, r"^struct relay_member_diagnostics\s*\{", semicolon=True))
         diagnostics.append(re.search(r"^static struct relay_member_diagnostics relay_member_diag;", esb, re.M).group())
     # The publication-to-tdma_staged slice already contains control diagnostics.
-    return "\n".join(['#include "relay_coord.c"', '#include "relay_demand.h"', defaults, runtime, *state, *diagnostics, stats.group(0), diag.group(0),
+    return "\n".join(['#include "relay_coord.c"', '#include "relay_demand.h"', defaults, runtime, default_mode, *state, *diagnostics, stats.group(0), diag.group(0),
                       publication.group(0), "static atomic_t radio_operation_busy;",
                       "#if defined(CONFIG_TDMA_DIAGNOSTICS)\nstatic uint32_t tdma_stats_generation[MAX_TRACKERS];\n#endif",
                       "#define relay_hid_packet hid_write_packet_n\n#define relay_defer_capture relay_coord_capture\n#define relay_defer_report relay_coord_report",
@@ -61,8 +63,9 @@ def relay_declarations(esb, member_diagnostics=True):
                       "#define DWT (&fixture_dwt)",
                       "static inline void relay_rx_measure(uint32_t start) { (void)start; }",
                       _function(esb, "tdma_staged_due_locked"),
+                      _function(esb, "relay_coord_init_once"),
                       "__attribute__((constructor)) static void relay_fixture_init(void)"
-                      " { relay_coord_init(&relay_coord); relay_control_ready = true;"
+                      " { relay_coord_init_once(); relay_control_ready = true;"
                       " (void)relay_control_diag; (void)relay_member_diag; }", ""])
 
 def relay_query_helpers(esb, membership=False):
