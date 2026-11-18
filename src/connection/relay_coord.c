@@ -202,6 +202,26 @@ static uint16_t rc_auto_sustained(struct relay_coord *rc, uint16_t poor, uint16_
 	return sustained;
 }
 
+/* Fence the last partial relay window at actual activation, including
+ * low-rate counts carried over from earlier judgements. */
+void relay_coord_auto_native(struct relay_coord *rc, uint32_t now)
+{
+	if (!rc->auto_exit_pending) {
+		return;
+	}
+	rc->auto_exit_pending = false;
+	rc->auto_native_since = rc_auto_since(now);
+	memset(rc->w, 0, sizeof(rc->w));
+	for (unsigned i = 0; i < RC_MAX; i++) {
+		struct rc_tracker *t = &rc->t[i];
+		t->acc_direct = 0;
+		t->acc_expected = 0;
+		t->acc_windows = 0;
+		t->weak_windows = 0;
+	}
+	(void)rc_auto_sustained(rc, 0U, 0U, now);
+}
+
 /* Called after the 500 ms quality judgement. No delivery statistic can
  * authorize exit: repaired frames remain missing from direct_permille. */
 void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
@@ -215,6 +235,9 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 	rc->auto_poor_members &= rc->auto_engaged ? members : 0U;
 	if (applied && !rc->auto_applied) rc->auto_applied_since = now;
 	rc->auto_applied = applied;
+	if (rc->auto_native_since && rc_after(now, rc->auto_native_since, RC_AUTO_REENTRY_MS)) {
+		rc->auto_native_since = 0;
+	}
 	if (!eligible || !ready) {
 		rc->auto_members = members;
 		rc_auto_restart(rc);
@@ -250,7 +273,7 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 		rc_auto_restart(rc);
 		rc->auto_good_since = rc_auto_since(now);
 	}
-	if (!rc->auto_engaged && sustained) {
+	if (!rc->auto_engaged && sustained && !rc->auto_exit_pending && !rc->auto_native_since) {
 		rc->auto_engaged = true;
 		rc->auto_poor_members = poor; /* the trigger set */
 		rc_auto_restart(rc);
@@ -267,6 +290,7 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 		} else if (!(rc->auto_poor_members & ~rc->auto_recovery_evidence)
 			   && applied && rc_after(now, rc->auto_applied_since, RC_AUTO_HOLD_MS)) {
 			rc->auto_engaged = false;
+			rc->auto_exit_pending = true;
 			rc->auto_poor_members = 0;
 			rc_auto_restart(rc);
 		}

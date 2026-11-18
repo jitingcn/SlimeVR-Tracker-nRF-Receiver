@@ -241,6 +241,50 @@ static void test_outage_cannot_inherit_another_members_weak_time(void) {
     assert(rc.auto_engaged && rc.auto_poor_members == (1U << 4));
 }
 
+static void test_reentry_uses_native_evidence(void) {
+    setup(); run(SUSTAIN_TICKS,1,false);
+    run(8,2,true);
+    assert(until_exit(0,4) <= 4 && rc.auto_exit_pending);
+    run(SUSTAIN_TICKS + 1,2,true); /* New loss during the staged exit. */
+    assert(!rc.auto_engaged && rc.t[3].weak_windows >= RC_WEAK_WINDOWS);
+    relay_coord_note_frame(&rc,3,RC_RELAYED,RC_SEQ_NORMAL,0,70,now);
+    relay_coord_auto_native(&rc,now);
+    assert(!rc.t[3].weak_windows && !rc.w[3].relayed);
+
+    run(RC_AUTO_REENTRY_MS / RC_WINDOW_MS - 1,1,false);
+    assert(!rc.auto_engaged);
+    run(1,1,false);
+    assert(rc.auto_engaged); /* Sustained loss in native still requests relay. */
+}
+
+static void test_periodic_loss_has_bounded_transitions(void) {
+    setup(); run(4,0,false);
+    uint32_t activation = 0, last_entry = 0;
+    unsigned transitions = 0;
+    bool applied = false, staged = false;
+    for (unsigned i = 0; i < 160; i++) {
+        if (activation && now + RC_WINDOW_MS >= activation) {
+            applied = staged;
+            if (applied) {
+                assert(!last_entry || activation - last_entry >= 12000U);
+                last_entry = activation;
+            } else {
+                relay_coord_auto_native(&rc,activation);
+            }
+            activation = 0;
+            transitions++;
+        }
+        /* 40% loss for 2 s, then 6 s clean. One member sees 10% overall. */
+        step(i % 16 < 4 ? 1 : 0,applied,true);
+        if (!activation && rc.auto_engaged != applied) {
+            activation = now + RELAY_LAYOUT_ACTIVATION_MS;
+            staged = rc.auto_engaged;
+        }
+    }
+    assert(transitions >= 2 && transitions <= 10);
+    printf("PASS 40%% loss for 2 s every 8 s: %u profile changes in 80 s\n", transitions);
+}
+
 /* A remembered child needs a recovery judgement, even when direct arrivals
  * break its silence before there are enough frames to judge. */
 static void test_recovery_needs_samples(void) {
@@ -261,6 +305,8 @@ static void test_recovery_needs_samples(void) {
 int main(void) {
     test_fast_switch_hysteresis();
     test_outage_cannot_inherit_another_members_weak_time();
+    test_reentry_uses_native_evidence();
+    test_periodic_loss_has_bounded_transitions();
     test_recovery_needs_samples();
     setup(); run(400,0,false); assert(!rc.auto_engaged);
     run(400,4,false); assert(!rc.auto_engaged); /* 10% loss stays direct */

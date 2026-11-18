@@ -23,6 +23,7 @@
 #define RC_AUTO_OUTAGE_ENTER_MS 1000U
 #define RC_AUTO_RECOVER_MS 1000U
 #define RC_AUTO_HOLD_MS 1500U
+#define RC_AUTO_REENTRY_MS 4000U
 #define RC_AUTO_QUALITY_MAX_MS (RC_JUDGE_MAX_WINDOWS * RC_WINDOW_MS)
 
 /* Weak: direct delivery below this share of expected frames (>= RC_MIN_EXPECTED
@@ -157,9 +158,9 @@ static inline const struct rc_watch *relay_plan_watch_const(const struct rc_gran
 }
 
 struct relay_coord {
-	bool auto_engaged, auto_applied;
+	bool auto_engaged, auto_applied, auto_exit_pending;
 	uint16_t auto_members, auto_poor_members, auto_recovery_evidence, auto_outage_members;
-	uint32_t auto_good_since, auto_applied_since;
+	uint32_t auto_good_since, auto_applied_since, auto_native_since;
 	/* Per member, over the recovery window: sum of 10 * direct - 9 * expected
 	 * frames of each judgement, clamped to int16. Until it first clamps,
 	 * >= 0 means exactly pooled >= 900; a clamped sum keeps its sign at the
@@ -239,6 +240,7 @@ void relay_coord_note_frame(struct relay_coord *rc, uint8_t id, enum rc_path pat
 	int seq_result, uint8_t gaps, uint8_t rssi, uint32_t now_ms);
 
 void relay_coord_auto_update(struct relay_coord *rc, uint16_t members, uint32_t now, bool applied, bool eligible);
+void relay_coord_auto_native(struct relay_coord *rc, uint32_t now);
 void relay_coord_tick(struct relay_coord *rc, uint16_t members, uint32_t now);
 
 /* Trailer for a capable recipient under the published layout. */

@@ -1069,6 +1069,7 @@ static void tdma_apply_locked(const struct tdma_publication *p, int64_t now)
 		relay_frame_announce(seed, relay_origin);
 	}
 	if (relay_profile && !p->profile) {
+		relay_coord_auto_native(&relay_coord, (uint32_t)now);
 		/* Profile 1 bypassed the native sequence check while trackers kept
 		 * counting; re-anchor it instead of judging against the old base. */
 		for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
@@ -2510,6 +2511,9 @@ static void esb_stats_thread(void)
 			bool was_engaged = relay_coord.auto_engaged;
 			relay_auto_policy_update((uint16_t)tdma_active_mask, planned_power_down,
 				k_uptime_get_32(), auto_evidence.relay_eligible);
+			if (mode != RELAY_MODE_AUTO) {
+				relay_coord.auto_exit_pending = false;
+			}
 			bool engaged = relay_coord.auto_engaged;
 			IRQ_PROBE_END(tick);
 			irq_unlock(relay_key);
@@ -6308,6 +6312,9 @@ void esb_relay_set_mode(enum relay_mode mode)
 	unsigned int key = irq_lock();
 	bool changed = relay_user_mode != mode;
 	relay_user_mode = mode;
+	if (mode != RELAY_MODE_AUTO) {
+		relay_coord.auto_exit_pending = false;
+	}
 	relay_coord_set_enabled(&relay_coord, mode != RELAY_MODE_OFF && !esb_ota_relay_is_active());
 	if (!relay_query_can_resume()) {
 		relay_query_protected_mask = 0;
