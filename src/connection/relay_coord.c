@@ -159,13 +159,14 @@ static struct rc_judgement rc_accumulate(struct rc_tracker *t, const struct rc_w
 /* Missed about RC_MIN_EXPECTED frames at the tracker's own rate. The rate is
  * learned from windows that carried frames, so it does not decay while the
  * tracker is obstructed; an unknown rate never counts as silence. */
-static bool rc_direct_quiet(const struct rc_tracker *t, uint32_t now)
+static bool rc_direct_quiet(const struct rc_tracker *t, uint32_t now, uint32_t native_age)
 {
-	if (!t->direct_seen || !rc_after(now, t->last_direct_ms, RC_SILENT_MIN_MS - 1U)) {
-		return false;
-	}
 	uint32_t gap = now - t->last_direct_ms;
-	return (uint64_t)gap * t->rate_x16 >= (uint64_t)RC_MIN_EXPECTED * 16U * RC_WINDOW_MS;
+	if (gap > native_age) {
+		gap = native_age;
+	}
+	return t->direct_seen && gap >= RC_SILENT_MIN_MS - 1U
+		&& (uint64_t)gap * t->rate_x16 >= (uint64_t)RC_MIN_EXPECTED * 16U * RC_WINDOW_MS;
 }
 
 /* Members weak by the entry streak rule on a fresh judgement. */
@@ -259,7 +260,10 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 	rc->auto_poor_members &= rc->auto_engaged ? members : 0U;
 	if (applied && !rc->auto_applied) rc->auto_applied_since = now;
 	rc->auto_applied = applied;
-	if (rc->auto_native_since && rc_after(now, rc->auto_native_since, RC_AUTO_REENTRY_MS)) {
+	uint32_t native_age = rc->auto_native_since ? now - rc->auto_native_since : UINT32_MAX;
+	/* After the slowest nonzero rate can qualify, the boundary no longer
+	 * changes the silence verdict. Drop it well before the clock wraps. */
+	if (native_age >= RC_MIN_EXPECTED * 16U * RC_WINDOW_MS) {
 		rc->auto_native_since = 0;
 	}
 	if (!eligible || !ready) {
@@ -273,7 +277,7 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 	for (unsigned i = 0; i < RC_MAX; i++) {
 		if (!(members & RC_BIT(i))) continue;
 		const struct rc_tracker *t = &rc->t[i];
-		if (rc_direct_quiet(t, now)) {
+		if (rc_direct_quiet(t, now, native_age)) {
 			outage |= RC_BIT(i);
 		}
 		fresh &= t->seen && !rc_after(now, t->quality_ms, RC_AUTO_QUALITY_MAX_MS);
@@ -297,7 +301,7 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 		rc_auto_restart(rc);
 		rc->auto_good_since = rc_auto_since(now);
 	}
-	if (!rc->auto_engaged && sustained && !rc->auto_exit_pending && !rc->auto_native_since) {
+	if (!rc->auto_engaged && sustained && !rc->auto_exit_pending && native_age >= RC_AUTO_REENTRY_MS) {
 		rc->auto_engaged = true;
 		rc->auto_poor_members = poor; /* the trigger set */
 		rc_auto_restart(rc);

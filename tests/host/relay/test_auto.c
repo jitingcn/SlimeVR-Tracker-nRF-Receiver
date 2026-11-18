@@ -257,6 +257,20 @@ static void test_reentry_uses_native_evidence(void) {
     assert(rc.auto_engaged); /* Sustained loss in native still requests relay. */
 }
 
+static void test_reentry_outage_counts_only_native_silence(void) {
+    setup(); run(SUSTAIN_TICKS,1,false);
+    run(8,2,true);
+    assert(until_exit(0,4) <= 4 && rc.auto_exit_pending);
+    run(6,3,true);
+    rc.t[3].rate_x16 = 32; /* 4 TPS, so 20 expected frames need 5 s. */
+    relay_coord_auto_native(&rc,now);
+
+    run(11,3,false);
+    assert(!rc.auto_engaged);
+    run(1,3,false); /* 5 s to qualify silence and 1 s of outage. */
+    assert(rc.auto_engaged);
+}
+
 static void test_periodic_loss_has_bounded_transitions(void) {
     setup(); run(4,0,false);
     uint32_t activation = 0, last_entry = 0;
@@ -306,6 +320,7 @@ int main(void) {
     test_fast_switch_hysteresis();
     test_outage_cannot_inherit_another_members_weak_time();
     test_reentry_uses_native_evidence();
+    test_reentry_outage_counts_only_native_silence();
     test_periodic_loss_has_bounded_transitions();
     test_recovery_needs_samples();
     setup(); run(400,0,false); assert(!rc.auto_engaged);
