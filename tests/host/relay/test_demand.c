@@ -1,4 +1,6 @@
 #include <assert.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "relay_coord.h"
@@ -282,6 +284,7 @@ static void simulate(unsigned members, unsigned mode, unsigned trace, unsigned f
 		}
 	}
 	relay_demand_reset(&d, 0, settings.repair_floor);
+	uint16_t failed_age[5] = {0}, repaired_age[5] = {0};
 	uint16_t received[5] = {0}, lost[5] = {0};
 	unsigned occupancy[6] = {0};
 	unsigned long delivered = 0, total = 0, ticks = 0, onset = 0;
@@ -316,18 +319,19 @@ static void simulate(unsigned members, unsigned mode, unsigned trace, unsigned f
 			c.backup_valid |= 1U << ch;
 			c.helpers[ch] = ((ch + 3) % members) | (((ch + 6) % members) << 4);
 		}
-		for (unsigned age = 0; age < ages; age++) {
+		for (unsigned age = 0; age < ages && age <= f; age++) {
 			unsigned wi = (f - age) % ages;
 			rc.watch[wi]
 				= (struct rc_watch){.frame = f - age, .members = mask, .primary_valid = mask, .backup_valid = mask};
 			memcpy(rc.watch[wi].helpers, c.helpers, sizeof(c.helpers));
 			rc.receipt[wi]
-				= (struct rc_receipt){.frame = f - age, .received = f >= age ? received[(f - age) % 5] : mask};
+				= (struct rc_receipt){.frame = f - age, .received = received[(f - age) % 5]};
 		}
 		rc.receipt[f % ages].received &= (1U << (members - 8U)) - 1U;
 		rc.learn_members = mask;
 		struct rc_grant_plan plan;
 		relay_coord_plan_grants(&rc, &c, &plan, f * 8);
+		if (!f) assert((plan.valid & 1U) && plan.watch[0].members == mask);
 		uint16_t debt = 0;
 		for (unsigned age = 0; age < ages; age++) {
 			relay_control_missing(&c, age) = mask & ~(f >= age ? received[(f - age) % 5] : mask);
@@ -375,6 +379,10 @@ static void simulate(unsigned members, unsigned mode, unsigned trace, unsigned f
 						selected[g->owner][age] |= 1U << ch;
 						included |= 1U << ch;
 						capacity--;
+						if (trace == 5 || trace == 6) {
+							if (delivered_packet) repaired_age[age] |= 1U << ch;
+							else failed_age[age] |= 1U << ch;
+						}
 						if (delivered_packet) {
 							received[(f - age) % 5] |= 1U << ch;
 						}
@@ -400,9 +408,18 @@ static void simulate(unsigned members, unsigned mode, unsigned trace, unsigned f
 		}
 	}
 	if (trace == 3 && mode < 2) {
-		assert(onset > 0 && delivered == total);
+		assert((frames <= 50 || onset > 0) && delivered == total);
 	}
 	if (trace == 5 || trace == 6) {
+		uint16_t targets = (1U << 3) | (1U << 9);
+		if (mode == 0) {
+			assert(failed_age[2] == targets && failed_age[3] == targets);
+			assert(!(repaired_age[0] | repaired_age[1] | repaired_age[2] | repaired_age[3]));
+			assert(repaired_age[4] == targets);
+		} else {
+			assert((repaired_age[0] | repaired_age[1]) == targets);
+			assert(!(failed_age[2] | failed_age[3]));
+		}
 		assert(delivered == total);
 	}
 	printf("%u,%u,%u,%.6f,%.9f", members, mode, trace, (double)frames * 32768 / ticks, (double)delivered / total);
@@ -413,6 +430,17 @@ static void simulate(unsigned members, unsigned mode, unsigned trace, unsigned f
 }
 int main(int argc, char **argv)
 {
+	unsigned frames = 0;
+	if (argc > 1) {
+		char *end;
+		errno = 0;
+		unsigned long count = strtoul(argv[1], &end, 10);
+		if (argc != 2 || argv[1][0] < '0' || argv[1][0] > '9' || *end || errno || !count || count > UINT_MAX - 5U) {
+			fprintf(stderr, "usage: %s [positive-frame-count]\n", argv[0]);
+			return 2;
+		}
+		frames = (unsigned)count;
+	}
 	for (unsigned mask = 0; mask <= UINT16_MAX; mask++) {
 		assert(relay_demand_count(mask) == relay_mask_count(mask));
 	}
@@ -425,10 +453,9 @@ int main(int argc, char **argv)
 	simulate(11, 1, 5, 200);
 	simulate(11, 0, 6, 200);
 	simulate(11, 1, 6, 200);
-	puts("PASS demand: simultaneous burst onset survives failed age-two and age-three attempts, delivered by age four");
+	puts("PASS demand: R0 retries at ages two and three, receives both at four; R1 receives both by age one");
 	if (argc > 1) {
-		unsigned frames = strtoul(argv[1], 0, 10);
-		puts("members,mode,trace,tps,within5,R0,R1,R2,R3,R4,R5");
+		puts("members,mode,trace,tps,radio_received_within5,R0,R1,R2,R3,R4,R5");
 		for (unsigned n = 11; n <= 16; n += 5) {
 			for (unsigned mode = 0; mode < 5; mode++) {
 				for (unsigned trace = 0; trace < 5; trace++) {
