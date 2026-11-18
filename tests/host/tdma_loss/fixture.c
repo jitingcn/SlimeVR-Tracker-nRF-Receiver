@@ -773,6 +773,10 @@ static void auto_excluded_live(void)
 	stored_trackers = 5;
 	relay_settings.max_trackers = 1;
 	tdma_shadow_desired_mask = BIT(3) | BIT(4);
+	struct esb_auto_loss_snapshot evidence;
+	esb_get_auto_loss_snapshot(&evidence);
+	assert(!evidence.relay_eligible); /* Native auto considers the full live roster. */
+	relay_user_mode = RELAY_MODE_FORCE;
 	for (unsigned tick = 0; tick < 90; tick++) {
 		now += 500;
 		unsigned direct = tick < 24 ? 30 : 50;
@@ -780,7 +784,6 @@ static void auto_excluded_live(void)
 			relay_coord_note_frame(&relay_coord, 3, RC_DIRECT, RC_SEQ_NORMAL,
 				n == 0 ? 50 - direct : 0, 70, now);
 		relay_coord_tick(&relay_coord, BIT(3), now);
-		struct esb_auto_loss_snapshot evidence;
 		esb_get_auto_loss_snapshot(&evidence);
 		assert(evidence.relay_eligible);
 		relay_coord_auto_update(&relay_coord, BIT(3), now, tick >= 24, evidence.relay_eligible);
@@ -788,7 +791,6 @@ static void auto_excluded_live(void)
 	}
 	assert(!relay_coord.auto_engaged);
 	tdma_shadow_pending_join_mask = BIT(4);
-	struct esb_auto_loss_snapshot evidence;
 	esb_get_auto_loss_snapshot(&evidence);
 	assert(!evidence.relay_eligible); /* true pending joins still fence policy */
 }

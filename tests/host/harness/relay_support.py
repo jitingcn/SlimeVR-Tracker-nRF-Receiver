@@ -86,7 +86,8 @@ def relay_query_helpers(esb, membership=False):
 
 
 
-STAGING_RECALC = ("tdma_staging_supported_locked", "tdma_apply_locked", "tdma_apply_finish")
+STAGING_RECALC = ("tdma_staging_supported_locked", "tdma_apply_locked", "tdma_apply_finish",
+                  "relay_auto_roster_eligible")
 
 
 def staging_helpers(esb, recalc=False):

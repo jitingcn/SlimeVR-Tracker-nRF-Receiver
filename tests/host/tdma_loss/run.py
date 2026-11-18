@@ -212,6 +212,7 @@ static void restart_ping(uint8_t tracker_id) {
         constants,
         "static bool relay_auto_ladder_paused(void);",
         "static uint32_t tdma_admissible_mask(uint32_t desired);",
+        'static bool relay_auto_roster_eligible(uint32_t desired);' if relay else '',
         ('static bool relay_query_can_resume(void);\nstatic void relay_query_update_locked(void);\nstatic void relay_query_begin(void);' if relay else ''),
         ping_constants,
         membership_declarations(source),

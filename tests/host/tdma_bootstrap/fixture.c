@@ -601,8 +601,15 @@ static void runtime_settings_publication(void)
 	relay_settings = (struct relay_runtime_settings){2, 1, 16, 100, 120};
 	relay_settings_generation++;
 	relay_coord.enabled = true;
-	relay_coord.auto_engaged = true; /* test-only forced profile request */
+	relay_coord.auto_engaged = true;
 	force_layout();
+	assert(!tdma_staged.valid && !relay_profile && tdma_active_mask == 7);
+	esb_relay_set_mode(RELAY_MODE_FORCE);
+	force_layout();
+	assert(!tdma_staged.valid && !relay_profile && tdma_active_mask == 3);
+	now_ms += TDMA_RECONFIG_MIN_MS;
+	assert(ping(0, true) && ping(1, true) && ping(2, true));
+	service();
 	assert(tdma_staged.valid && !relay_profile && tdma_staged.p.profile == 1);
 	assert(tdma_staged.p.new_mask == 3 && tdma_staged.p.geometry.direct == 2);
 	uint32_t requested = relay_settings_generation;
@@ -716,9 +723,12 @@ static void member_cap_owner_blocks(void)
 	assert(tdma_active_mask == 7 && !tdma_staged.valid);
 	relay_settings = (struct relay_runtime_settings){2, 1, 16, 100, 120, 0};
 	relay_settings_generation++;
-	relay_coord.enabled = true;
-	relay_coord.auto_engaged = true; /* test-only forced profile request */
+	esb_relay_set_mode(RELAY_MODE_FORCE);
 	force_layout();
+	assert(!tdma_staged.valid && !relay_profile && tdma_active_mask == 3);
+	now_ms += TDMA_RECONFIG_MIN_MS;
+	assert(ping(0, true) && ping(1, true) && ping(2, true));
+	service();
 	assert(tdma_staged.valid && tdma_staged.p.new_mask == 3);
 	for (unsigned ms = 0; ms + 10 < RELAY_LAYOUT_ACTIVATION_MS; ms += 10) {
 		now_ms += 10;
@@ -742,21 +752,21 @@ static void member_cap_owner_blocks(void)
 	puts("PASS member cap: owner sleeps while staged and with live members above max_trackers");
 }
 
-/* max_trackers caps private relay members only: with relay off, direct
- * TDMA keeps every stored live tracker. */
-static void member_cap_relay_off(void)
+static void member_cap_native_auto(void)
 {
 	relay_settings = (struct relay_runtime_settings){2, 1, 16, 100, 120, 0};
 	relay_settings_generation++;
-	two_member_layout(3, true);
-	relay_coord.enabled = false;
-	for (unsigned ms = 0; ms < 2 * RELAY_LAYOUT_ACTIVATION_MS; ms += 10) {
-		now_ms += 10;
-		assert(ping(0, true) && ping(1, true) && ping(2, true));
+	for (unsigned capable = 0; capable < 2; capable++) {
+		two_member_layout(3, capable);
+		now_ms = 6000;
 		service();
+		assert(tdma_active_mask == 7 && !relay_profile && slot(tracker_slots[2].tdma_config_packed) != 0xff);
+		relay_coord.enabled = true;
+		relay_coord.auto_engaged = true; /* Simulate pending demand from the first two trackers. */
+		service();
+		assert(tdma_active_mask == 7 && !relay_profile && !tdma_staged.valid);
 	}
-	assert(tdma_active_mask == 7 && !relay_profile && slot(tracker_slots[2].tdma_config_packed) != 0xff);
-	puts("PASS member cap: relay off keeps direct members above max_trackers");
+	puts("PASS member cap: auto keeps all three direct trackers with a cap of two, including a legacy joiner");
 }
 
 static void relay_entry_fences(void)
@@ -1577,7 +1587,7 @@ int main(int argc, char **argv)
 	query_info_holds_profile0();
 	runtime_settings_publication();
 	member_cap_owner_blocks();
-	member_cap_relay_off();
+	member_cap_native_auto();
 	relay_mode_transitions();
 	dense_relay_exit_announcement_lead();
 	query_membership_recovery(0, false);

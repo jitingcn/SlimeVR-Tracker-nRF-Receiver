@@ -14,6 +14,7 @@ prefix = '''
 static unsigned stored_trackers = 16;
 static struct relay_coord relay_coord;
 static unsigned char relay_profile;
+static enum relay_mode relay_user_mode = RELAY_MODE_AUTO;
 static struct relay_runtime_settings relay_settings = {.max_trackers = 16};
 '''
 cases = '''
@@ -30,6 +31,12 @@ int main(void) {
  }
  assert(tdma_admissible_mask(0xffff) == 0xffff);
  assert(relay_coord_ready(&relay_coord, 0xffff));
+ relay_settings.max_trackers = 2;
+ assert(tdma_admissible_mask(7) == 7);
+ relay_user_mode = RELAY_MODE_FORCE;
+ assert(tdma_admissible_mask(7) == 3);
+ relay_user_mode = RELAY_MODE_OFF;
+ assert(tdma_admissible_mask(7) == 7);
  return 0;
 }
 '''

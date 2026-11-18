@@ -88,7 +88,7 @@ declarations.append('static bool esb_initialized = true;')
 functions = [function(name) for name in (
     'tdma_loss_reset_windows', 'tdma_pack_config', 'relay_query_can_resume',
     'relay_query_update_locked', 'relay_query_begin', 'tdma_shadow_observe',
-    'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
+    'tdma_admissible_mask', 'relay_auto_roster_eligible', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
     'tdma_membership_wait_ms', 'tdma_slot_ticks_for', 'tdma_staging_supported_locked',
     'tdma_apply_locked', 'tdma_apply_finish', 'tdma_advertised_config', 'esb_loss_operations_idle',
     'relay_force_entry_allowed', 'tdma_recalculate',

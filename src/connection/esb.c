@@ -469,8 +469,7 @@ static uint32_t tdma_shadow_merge_locked(uint32_t now_ms)
 	atomic_set(&tdma_shadow_pending_join_mask, 0);
 	atomic_set(&tdma_shadow_pending_leave_mask, (atomic_val_t)pending_leave_mask);
 #if defined(CONFIG_RELAY)
-	/* Members beyond max_trackers stay desired but can never be admitted;
-	 * comparing the raw mask would re-arm an already expired deadline. */
+	/* A capped layout can leave members waiting in the desired roster. */
 	if (tdma_admissible_mask(desired_mask) == tdma_active_mask) {
 #else
 	if (desired_mask == tdma_active_mask) {
@@ -961,14 +960,14 @@ static bool tdma_staged_due_locked(uint32_t now_ticks)
 	return tdma_staged.valid && (int32_t)(now_ticks - tdma_staged.activation_ticks) >= 0;
 }
 
-/* Members the next layout can admit: stored slots, then, while relay is
- * permitted or still applied, only the first max_trackers of those. */
+/* Native auto/off uses the full live roster. An applied or forced relay
+ * layout can assign at most max_trackers slots. */
 static uint32_t tdma_admissible_mask(uint32_t desired)
 {
 	uint32_t stored_mask
 		= stored_trackers >= MAX_TRACKERS ? UINT32_MAX : (stored_trackers > 0 ? BIT(stored_trackers) - 1U : 0U);
 	uint32_t candidates = desired & stored_mask;
-	if (!relay_coord.enabled && !relay_profile) {
+	if (!relay_profile && relay_user_mode != RELAY_MODE_FORCE) {
 		return candidates;
 	}
 	uint32_t selected = 0;
@@ -978,6 +977,13 @@ static uint32_t tdma_admissible_mask(uint32_t desired)
 		candidates &= candidates - 1U;
 	}
 	return selected;
+}
+
+static bool relay_auto_roster_eligible(uint32_t desired)
+{
+	return relay_user_mode != RELAY_MODE_AUTO
+		|| (relay_mask_count((uint16_t)desired) <= relay_settings.max_trackers
+			&& relay_coord_capable(&relay_coord, (uint16_t)desired));
 }
 
 /* How long the stats owner may sleep while a membership change is pending.
@@ -1169,12 +1175,20 @@ static void tdma_recalculate(bool forced)
 			(void)tdma_shadow_merge_locked((uint32_t)now);
 		}
 		uint32_t old_mask = tdma_active_mask;
-#if defined(CONFIG_RELAY)
-		uint32_t new_mask = tdma_admissible_mask((uint32_t)atomic_get(&tdma_shadow_desired_mask));
-#else
 		uint32_t stored_mask = stored_trackers >= MAX_TRACKERS
 			? UINT32_MAX : (stored_trackers > 0 ? BIT(stored_trackers) - 1U : 0U);
 		uint32_t new_mask = (uint32_t)atomic_get(&tdma_shadow_desired_mask) & stored_mask;
+#if defined(CONFIG_RELAY)
+		uint32_t relay_mask = tdma_admissible_mask(new_mask);
+		bool relay_requested = relay_control_ready && !atomic_get(&radio_operation_busy)
+			&& !esb_ota_relay_is_active() && !receiver_ota_is_active()
+			&& now >= relay_query_until && relay_auto_roster_eligible(new_mask)
+			&& relay_coord_requested(&relay_coord, relay_user_mode, (uint16_t)relay_mask);
+		if (relay_user_mode == RELAY_MODE_FORCE) {
+			relay_requested = relay_requested && (relay_profile || relay_force_entry_allowed());
+			new_mask = relay_mask;
+		}
+		uint8_t profile = relay_requested ? RELAY_PROFILE_120HZ : 0;
 #endif
 		uint8_t active_count = 0;
 		for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
@@ -1194,14 +1208,6 @@ static void tdma_recalculate(bool forced)
 			tdma_cap_level = tdma_published_cap_level;
 		}
 #if defined(CONFIG_RELAY)
-		bool relay_requested = relay_control_ready && !atomic_get(&radio_operation_busy)
-			&& !esb_ota_relay_is_active() && !receiver_ota_is_active()
-			&& now >= relay_query_until
-			&& relay_coord_requested(&relay_coord, relay_user_mode, (uint16_t)new_mask);
-		if (relay_requested && !relay_profile && relay_user_mode == RELAY_MODE_FORCE) {
-			relay_requested = relay_force_entry_allowed();
-		}
-		uint8_t profile = relay_requested ? RELAY_PROFILE_120HZ : 0;
 		uint8_t slot_ticks = profile ? relay_settings.slot_ticks : tdma_slot_ticks_for(active_count);
 #else
 		uint8_t slot_ticks = tdma_slot_ticks_for(active_count);
@@ -1560,15 +1566,16 @@ void esb_get_auto_loss_snapshot(struct esb_auto_loss_snapshot *out)
 		out->home = RADIO_RF_CHANNEL;
 	}
 	out->eligible = esb_loss_operations_idle();
+	uint32_t desired = (uint32_t)atomic_get(&tdma_shadow_desired_mask);
 	out->relay_eligible = out->eligible
 #if defined(CONFIG_RELAY)
-		&& out->active_mask == tdma_admissible_mask((uint32_t)atomic_get(&tdma_shadow_desired_mask))
+		&& out->active_mask == tdma_admissible_mask(desired) && relay_auto_roster_eligible(desired)
 #else
-		&& out->active_mask == (uint32_t)atomic_get(&tdma_shadow_desired_mask)
+		&& out->active_mask == desired
 #endif
 		&& !atomic_get(&tdma_shadow_pending_join_mask);
 	out->eligible = out->eligible
-		&& out->active_mask == (uint32_t)atomic_get(&tdma_shadow_desired_mask)
+		&& out->active_mask == desired
 		&& !atomic_get(&tdma_shadow_pending_join_mask)
 		&& !atomic_get(&tdma_shadow_pending_leave_mask);
 	irq_unlock(key);
@@ -6296,8 +6303,9 @@ static void esb_thread(void)
  * ------------------------------------------------------------------------- */
 static bool relay_auto_ladder_paused(void)
 {
-	return relay_coord.auto_engaged || relay_profile
-		|| (tdma_staged.valid && tdma_staged.p.profile);
+	return relay_profile || (tdma_staged.valid && tdma_staged.p.profile)
+		|| (relay_coord.auto_engaged
+			&& relay_auto_roster_eligible((uint32_t)atomic_get(&tdma_shadow_desired_mask)));
 }
 
 void esb_relay_set_mode(enum relay_mode mode)
