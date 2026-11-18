@@ -132,6 +132,11 @@ static void echo(uint8_t tracker_id, uint8_t flag) {
 }
 """
 control = (ROOT / "src/rcv_cmd.c").read_text()
+production += extract.function(source, "esb_reserved_pong_ms")
+production += "\n" + re.search(r"^#define REMOTE_HID_CONFIRM_TIMEOUT_MS .*", control, re.M).group() + "\n"
+production += "\n".join(extract.function(select_relay(control), name) for name in (
+    "remote_hid_finish", "rcv_cmd_hid_stage_started", "remote_hid_arm_expected",
+    "remote_hid_timeout_handler", "on_remote_confirm"))
 production += "\n".join(extract.function(control, name) for name in (
     "rcv_cmd_collect_start", "rcv_cmd_collect_stop",
     "rcv_cmd_collect_batch_start", "rcv_cmd_collect_batch_stop"))

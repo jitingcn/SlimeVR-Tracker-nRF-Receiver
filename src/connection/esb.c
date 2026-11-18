@@ -24,6 +24,7 @@
 	THE SOFTWARE.
 */
 #include "esb.h"
+#include "rcv_cmd.h"
 #if defined(CONFIG_RELAY)
 #include "relay_demand.h"
 #endif
@@ -1011,6 +1012,20 @@ static inline uint32_t tdma_staged_pong_mask(uint32_t now_ticks)
 		? tdma_active_mask | tdma_staged.p.new_mask : 0;
 }
 
+/* Called with interrupts locked at HID admission and staged publication. */
+uint32_t esb_reserved_pong_ms(uint32_t targets)
+{
+	uint32_t now = (uint32_t)k_uptime_ticks();
+	uint32_t blocked = tdma_staged_pong_mask(now) & targets;
+	while (blocked) {
+		if (relay_coord_is_capable(&relay_coord, __builtin_ctz(blocked))) {
+			return k_ticks_to_ms_ceil32(tdma_staged.activation_ticks - now);
+		}
+		blocked &= blocked - 1U;
+	}
+	return 0;
+}
+
 static void tdma_defer_wom_locked(uint32_t targets)
 {
 	uint32_t now_ticks = (uint32_t)k_uptime_ticks();
@@ -1416,6 +1431,7 @@ static void tdma_recalculate(bool forced)
 			 * tick is the first start of the new membership's timeline. */
 			tdma_staged.valid = true;
 			tdma_defer_wom_locked(UINT32_MAX);
+			rcv_cmd_hid_stage_started();
 			irq_unlock(key);
 			LOG_INF("TDMA layout epoch %u staged: activates in %u ms", epoch, k_ticks_to_ms_ceil32(lead));
 #else

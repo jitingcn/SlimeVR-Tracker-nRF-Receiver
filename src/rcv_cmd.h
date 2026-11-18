@@ -11,6 +11,11 @@
 
 #include "rcv_hid_cmd.h"
 
+#if defined(CONFIG_RELAY)
+/* Called once per new stage under irq_lock. */
+void rcv_cmd_hid_stage_started(void);
+#endif
+
 /* Shared command core used by console and HID. Status codes match RCV_HID_ST_*. */
 
 uint8_t rcv_cmd_pair(uint8_t count);

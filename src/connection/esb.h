@@ -254,6 +254,10 @@ void esb_set_channel_change_done_cb(esb_channel_change_done_cb_t cb);
 
 /* Optional: called when a tracker confirms a remote PONG flag (event_handler). */
 typedef void (*esb_remote_confirm_cb_t)(uint8_t tracker_id, uint8_t flag);
+#if defined(CONFIG_RELAY)
+/* Caller holds irq_lock. Remaining NORMAL-only interval for this target mask. */
+uint32_t esb_reserved_pong_ms(uint32_t targets);
+#endif
 void esb_set_remote_confirm_cb(esb_remote_confirm_cb_t cb);
 
 // Local receiver channel management

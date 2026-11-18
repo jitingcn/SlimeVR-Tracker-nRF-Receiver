@@ -347,7 +347,7 @@ static atomic_t remote_hid_confirmed = ATOMIC_INIT(0);
 static bool remote_wom_console;
 static uint16_t remote_wom_token;
 static uint32_t remote_wom_failed;
-static int64_t remote_wom_deadline;
+static int64_t remote_hid_deadline;
 static uint16_t remote_wom_minutes;
 
 enum remote_hid_job {
@@ -401,15 +401,32 @@ static void remote_hid_finish(uint8_t status)
 	remote_hid_send_completion(status);
 }
 
+#if defined(CONFIG_RELAY)
+void rcv_cmd_hid_stage_started(void)
+{
+	if (!atomic_get(&remote_hid_pending) || remote_hid_job == REMOTE_HID_JOB_WOM_COMMAND
+	    || remote_hid_deadline <= k_uptime_get()) return;
+	uint32_t waiting = atomic_get(&remote_hid_expected) & ~atomic_get(&remote_hid_confirmed);
+	remote_hid_deadline += esb_reserved_pong_ms(waiting);
+}
+#endif
+
 static void remote_hid_arm_expected(uint32_t mask)
 {
-	atomic_set(&remote_hid_confirmed, 0);
-	atomic_set(&remote_hid_expected, (atomic_val_t)mask);
 	if (mask == 0) {
 		remote_hid_finish(RCV_HID_ST_ENOENT);
 		return;
 	}
-	(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(REMOTE_HID_CONFIRM_TIMEOUT_MS));
+	unsigned int key = irq_lock();
+	atomic_set(&remote_hid_confirmed, 0);
+	atomic_set(&remote_hid_expected, (atomic_val_t)mask);
+	uint32_t delay = REMOTE_HID_CONFIRM_TIMEOUT_MS;
+#if defined(CONFIG_RELAY)
+	delay += esb_reserved_pong_ms(mask);
+#endif
+	remote_hid_deadline = k_uptime_get() + delay;
+	(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(delay));
+	irq_unlock(key);
 }
 
 static void remote_wom_result(uint8_t id, uint16_t minutes, uint16_t error)
@@ -442,7 +459,7 @@ static void remote_wom_poll(void)
 {
 	uint32_t expected = (uint32_t)atomic_get(&remote_hid_expected);
 	uint32_t confirmed = (uint32_t)atomic_get(&remote_hid_confirmed);
-	bool expired = k_uptime_get() >= remote_wom_deadline;
+	bool expired = k_uptime_get() >= remote_hid_deadline;
 	for (uint8_t id = 0; id < MAX_TRACKERS; id++) {
 		uint32_t bit = BIT(id);
 		if (!(expected & bit) || ((confirmed | remote_wom_failed) & bit)) {
@@ -498,6 +515,15 @@ static void remote_hid_timeout_handler(struct k_work *work)
 		remote_wom_poll();
 		return;
 	}
+#if defined(CONFIG_RELAY)
+	unsigned int key = irq_lock();
+	int64_t left = remote_hid_deadline - k_uptime_get();
+	if (left > 0) {
+		(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(left));
+	}
+	irq_unlock(key);
+	if (left > 0) return;
+#endif
 	uint32_t expected = (uint32_t)atomic_get(&remote_hid_expected);
 	uint32_t confirmed = (uint32_t)atomic_get(&remote_hid_confirmed);
 	LOG_WRN("HID remote confirm timeout opcode=0x%02X confirmed=0x%08X expected=0x%08X",
@@ -530,7 +556,7 @@ static void remote_hid_job_handler(struct k_work *work)
 		mask = esb_send_remote_wom_command(RCV_HID_TARGET_ALL, remote_wom_minutes,
 						   &remote_wom_token);
 		atomic_set(&remote_hid_expected, mask);
-		remote_wom_deadline = k_uptime_get() + ESB_WOM_COMMAND_TIMEOUT_MS;
+		remote_hid_deadline = k_uptime_get() + ESB_WOM_COMMAND_TIMEOUT_MS;
 		(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(50));
 		return;
 	default:
@@ -605,7 +631,7 @@ static uint8_t remote_wom_begin(uint8_t seq, uint8_t target, uint16_t minutes, b
 		return RCV_HID_ST_ENOENT;
 	}
 	atomic_set(&remote_hid_expected, mask);
-	remote_wom_deadline = k_uptime_get() + ESB_WOM_COMMAND_TIMEOUT_MS;
+	remote_hid_deadline = k_uptime_get() + ESB_WOM_COMMAND_TIMEOUT_MS;
 	(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(50));
 	return RCV_HID_ST_STARTED;
 }

@@ -225,6 +225,19 @@ static void esb_ota_relay_fill_ack(uint8_t id, uint32_t pipe, struct esb_payload
     *has = ota_payload;
     if (*has) { p->length = 17; p->data[0] = 0xAB; }
 }
+/* The timer records its due time. Tests run the production work handler. */
+struct k_work { int unused; };
+enum { REMOTE_HID_JOB_NONE, REMOTE_HID_JOB_WOM_COMMAND };
+static int remote_hid_job, remote_hid_pending, remote_hid_expected, remote_hid_confirmed;
+static int remote_hid_flag, remote_hid_opcode, hid_status;
+static int64_t remote_hid_deadline, hid_timer_due;
+#define TEST_REMOTE_HID_STAGE
+#define K_MSEC(x) (x)
+#define k_work_reschedule(work, delay) (hid_timer_due = now + (delay))
+#define k_work_cancel_delayable(work) (hid_timer_due = 0)
+static void remote_wom_poll(void) { assert(false); }
+static void remote_hid_send_completion(unsigned status) { hid_status = status; }
+
 /* PRODUCTION BODIES */
 static unsigned completed;
 static bool succeeded;
@@ -878,7 +891,59 @@ static void test_wom_enter(void) {
     assert(esb_send_remote_wom_command(255, ESB_WOM_ENTER, &token) == (BIT(0) | BIT(2)));
     assert(tracker_slots[0].wom_minutes == ESB_WOM_ENTER && tracker_slots[2].wom_minutes == ESB_WOM_ENTER);
 }
+static void test_hid_reserved_pongs(bool arm_first)
+{
+    reset(16);
+    now = now_ticks = 0;
+    relay_profile = 1;
+    tdma_active_mask = UINT16_MAX;
+    relay_applied_settings = (struct relay_runtime_settings){16, 1, 16, 120, 120, 1, 0};
+    relay_coord_note_caps(&relay_coord, 0, RELAY_INFO_CAPS);
+    remote_confirm_cb = on_remote_confirm;
+    remote_hid_pending = 1;
+    remote_hid_flag = remote_hid_opcode = ESB_PONG_FLAG_SENS_SET;
+    hid_status = -1;
+    if (arm_first) {
+        remote_hid_arm_expected(BIT(0));
+        assert(hid_timer_due == 5000);
+    }
+    tdma_staged.valid = true;
+    tdma_staged.p = (struct tdma_publication){.new_mask = UINT16_MAX, .active_count = 16, .slot_ticks = 16};
+    tdma_staged.activation_ticks = relay_stage_lead_ticks(&relay_applied_settings, 16);
+    if (arm_first) rcv_cmd_hid_stage_started();
+    else remote_hid_arm_expected(BIT(0));
+    esb_send_remote_command_sens(0, 1, 2, 3);
+    for (unsigned ms = 500; ms <= 4500; ms += 1000) {
+        now = ms;
+        now_ticks = ms * 32768 / 1000;
+        uint8_t ping[ESB_PING_LEN] = {ESB_PING_TYPE, 0, 7};
+        ping[12] = crc8_ccitt(0x07, ping, 12);
+        struct esb_payload ack = {0};
+        bool has = false, suppress = false;
+        esb_ack_handler_cb(ping, sizeof(ping), 1, &ack, &has, &suppress);
+        assert(has && !suppress && ack.data[7] == (ms == 4500 ? ESB_PONG_FLAG_SENS_SET : ESB_PONG_FLAG_NORMAL));
+    }
+    now = 5000;
+    if (hid_timer_due == now) remote_hid_timeout_handler(NULL);
+    assert(hid_status == -1 && hid_timer_due == 5000 + k_ticks_to_ms_ceil32(tdma_staged.activation_ticks));
+    now = 5500;
+    echo(0, ESB_PONG_FLAG_SENS_SET);
+    assert(hid_status == RCV_HID_ST_OK && !remote_hid_pending);
+    tdma_staged.valid = false;
+    remote_hid_pending = 1;
+    remote_hid_arm_expected(BIT(0));
+    now += 5000;
+    remote_hid_timeout_handler(NULL);
+    assert(hid_status == RCV_HID_ST_ENOENT && !remote_hid_pending);
+    remote_confirm_cb = NULL;
+    tdma_active_mask = relay_profile = 0;
+    relay_coord_note_caps(&relay_coord, 0, 0);
+}
+
 int main(void) {
+    test_hid_reserved_pongs(false);
+    test_hid_reserved_pongs(true);
+    puts("PASS HID staging: four reserved PONGs, success at 5500 ms, ordinary timeout at 5000 ms");
     test_command_publication();
     test_wom_enter();
     test_wom_timeouts();

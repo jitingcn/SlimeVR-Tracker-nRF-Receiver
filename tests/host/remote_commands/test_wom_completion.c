@@ -42,7 +42,7 @@ static uint8_t remote_hid_seq, remote_hid_opcode, remote_hid_flag;
 static bool remote_wom_console;
 static uint16_t remote_wom_token, remote_wom_minutes;
 static uint32_t remote_wom_failed;
-static int64_t remote_wom_deadline;
+static int64_t remote_hid_deadline;
 enum { REMOTE_HID_JOB_NONE, REMOTE_HID_JOB_WOM_COMMAND };
 static int remote_hid_job;
 static uint8_t acks[20][16];
@@ -105,7 +105,7 @@ int main(void)
     assert(submitted == 1 && sends == before && remote_wom_minutes == 10);
     /* Drive the same post-scan state the deferred job publishes. */
     remote_hid_expected = esb_send_remote_wom_command(255, remote_wom_minutes, &remote_wom_token);
-    remote_wom_deadline = now + 5000;
+    remote_hid_deadline = now + 5000;
     reply(2, 0, EIO); remote_wom_poll();
     assert(ack_count == 3 && sys_get_le16(&acks[2][8]) == EIO && remote_hid_pending);
     now += 5000; remote_wom_poll();
@@ -128,7 +128,7 @@ int main(void)
     assert(remote_wom_begin(8, 255, ESB_WOM_TIMEOUT_CLEAR, false) == RCV_HID_ST_STARTED);
     assert(submitted == 2 && sends == before && remote_wom_minutes == ESB_WOM_TIMEOUT_CLEAR);
     remote_hid_expected = esb_send_remote_wom_command(255, remote_wom_minutes, &remote_wom_token);
-    remote_wom_deadline = now + 5000;
+    remote_hid_deadline = now + 5000;
     reply(2, 0, 0); reply(5, 0, EIO); remote_wom_poll();
     assert(ack_count == 10 && !remote_hid_pending);
     assert(acks[9][3] == RCV_HID_ST_ENOENT && acks[9][7] == BIT(2) && acks[9][11] == BIT(5));
@@ -155,7 +155,7 @@ int main(void)
     assert(remote_wom_begin(8, 255, ESB_WOM_ENTER, false) == RCV_HID_ST_STARTED);
     assert(submitted == 3 && sends == before && remote_wom_minutes == ESB_WOM_ENTER);
     remote_hid_expected = esb_send_remote_wom_command(255, remote_wom_minutes, &remote_wom_token);
-    remote_wom_deadline = now + 5000;
+    remote_hid_deadline = now + 5000;
     before = ack_count;
     reply(2, ESB_WOM_ENTER, 0); reply(5, 0, EBUSY); remote_wom_poll();
     assert(!remote_hid_pending && ack_count == before + 3);

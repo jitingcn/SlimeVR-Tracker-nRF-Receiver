@@ -45,7 +45,7 @@ def relay_declarations(esb, member_diagnostics=True):
     # the actual runtime geometry and announcement helpers without NVS mocks.
     load_start = runtime.index("static void relay_settings_load(")
     runtime = runtime[:load_start]
-    defaults = "\n".join(("#define CONFIG_RELAY_MAX_TRACKERS 16", "#define CONFIG_RELAY_MAX_REPAIRS 1", "#define CONFIG_RELAY_REPAIR_FLOOR 0",
+    defaults = "\n".join(("#ifndef TEST_REMOTE_HID_STAGE", "#define rcv_cmd_hid_stage_started() ((void)0)", "#endif", "#define CONFIG_RELAY_MAX_TRACKERS 16", "#define CONFIG_RELAY_MAX_REPAIRS 1", "#define CONFIG_RELAY_REPAIR_FLOOR 0",
                           "#define CONFIG_RELAY_SLOT_TICKS 16", "#define CONFIG_RELAY_TPS_MIN 100",
                           "#define CONFIG_RELAY_TPS_MAX 120"))
     diagnostics = []
