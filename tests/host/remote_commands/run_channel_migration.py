@@ -121,17 +121,21 @@ production += "\n" + extract.function(source, "esb_ack_handler_cb")
 production += "\n" + extract.diagnostic_function(source, "account_ping_clock")
 production += "\n" + extract.function(source, "esb_receive_ping")
 production += """
-static void echo(uint8_t tracker_id, uint8_t flag) {
+static void echo_at(uint8_t tracker_id, uint8_t flag, uint32_t rx_ticks) {
     struct esb_payload packet = {.length = ESB_PING_LEN, .pipe = 1 + tracker_id % 7};
     packet.data[0] = ESB_PING_TYPE;
     packet.data[1] = tracker_id;
     packet.data[2] = ++echo_counter[tracker_id];
     packet.data[7] = flag;
     packet.data[ESB_PING_LEN - 1] = crc8_ccitt(0x07, packet.data, ESB_PING_LEN - 1);
-    esb_receive_ping(&packet, (uint32_t)now);
+    esb_receive_ping(&packet, rx_ticks);
+}
+static void echo(uint8_t tracker_id, uint8_t flag) {
+    echo_at(tracker_id, flag, now_ticks);
 }
 """
 control = (ROOT / "src/rcv_cmd.c").read_text()
+production += extract.function(source, "esb_relay_block_mask")
 production += extract.function(source, "esb_reserved_pong_ms")
 production += "\n" + re.search(r"^#define REMOTE_HID_CONFIRM_TIMEOUT_MS .*", control, re.M).group() + "\n"
 production += "\n".join(extract.function(select_relay(control), name) for name in (

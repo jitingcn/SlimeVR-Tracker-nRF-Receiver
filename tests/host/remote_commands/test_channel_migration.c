@@ -458,8 +458,10 @@ static void test_query_confirmation(void)
     assert(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM).data[7] == ESB_PONG_FLAG_CHANNEL_CONFIRM);
     assert(!tracker_slots[0].query_advertised);
     now_ticks = (uint32_t)now;
+    uint32_t received = now_ticks;
     assert(test_pong(query).data[7] == query);
-    echo(0, query);
+    now_ticks = (uint32_t)++now;
+    echo_at(0, query, received);
     assert(!relay_query_until); /* This PING predates its own ACK. */
     now_ticks = (uint32_t)++now;
     struct esb_payload wrong_pipe = {.length = ESB_PING_LEN, .pipe = 2};
@@ -940,7 +942,32 @@ static void test_hid_reserved_pongs(bool arm_first)
     relay_coord_note_caps(&relay_coord, 0, 0);
 }
 
+static void test_blocked_pose_receipt(void)
+{
+    reset(2);
+    relay_profile = 1;
+    tdma_active_mask = BIT(0);
+    relay_origin = relay_frame_anchor = relay_start_anchor = 0;
+    now_ticks = RELAY_AIR_TICKS(17);
+    uint8_t pose[17] = {1, 0};
+    struct esb_payload ack = {0};
+    bool has = false, suppress = false;
+    relay_coord.receipt[0] = (struct rc_receipt){0};
+    assert(esb_relay_block_mask(BIT(0), 1));
+    esb_ack_handler_cb(pose, sizeof(pose), 1, &ack, &has, &suppress);
+    assert(!(relay_coord.receipt[0].received & BIT(0)));
+    uint32_t frame = 150; /* Same pose on a valid slot after the one-second block. */
+    now_ticks = relay_frame_start(relay_origin, frame) + RELAY_AIR_TICKS(sizeof(pose));
+    now += k_ticks_to_ms_ceil32(now_ticks);
+    esb_ack_handler_cb(pose, sizeof(pose), 1, &ack, &has, &suppress);
+    assert(relay_coord.receipt[frame % 3].frame == frame &&
+           (relay_coord.receipt[frame % 3].received & BIT(0)));
+    relay_profile = tdma_active_mask = 0;
+    assert(esb_relay_block_mask(0, 0));
+}
+
 int main(void) {
+    test_blocked_pose_receipt();
     test_hid_reserved_pongs(false);
     test_hid_reserved_pongs(true);
     puts("PASS HID staging: four reserved PONGs, success at 5500 ms, ordinary timeout at 5000 ms");

@@ -176,15 +176,27 @@ int main(void)
     staged_until = now + 6594;
     before = ack_count;
     now += ESB_WOM_COMMAND_TIMEOUT_MS;
+    scheduled = 0;
     remote_wom_poll();
     assert(ack_count == before && remote_hid_pending && scheduled == 50);
     now = staged_until + ESB_WOM_COMMAND_TIMEOUT_MS - 1;
+    scheduled = 0;
     remote_wom_poll();
-    assert(ack_count == before && remote_hid_pending);
+    assert(ack_count == before && remote_hid_pending && scheduled == 50);
     now++;
     remote_wom_poll();
     assert(ack_count == before + 2 && !remote_hid_pending);
     assert(sys_get_le16(&acks[before][8]) == ETIMEDOUT);
+    assert(hid_wom(request, 3) == RCV_HID_ST_STARTED);
+    staged_until = now + 6594;
+    now = staged_until + 1;
+    before = ack_count;
+    reply(2, ESB_WOM_ENTER, 0);
+    remote_wom_poll();
+    assert(!remote_hid_pending && ack_count == before + 2);
+    assert(acks[before][4] == RCV_HID_WOM_RESULT && acks[before][5] == 2 &&
+           sys_get_le16(&acks[before][8]) == 0 && acks[before+1][3] == RCV_HID_ST_OK &&
+           acks[before+1][4] == RCV_HID_WOM_SUMMARY && acks[before+1][7] == BIT(2));
     puts("WOM job: exact token, false ACK, busy, deferred all, errors, timeout, terminal-only");
     return 0;
 }

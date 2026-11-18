@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""HID parity: the receiver's actual RX path turns a relayed frame into the
-same HID packets as the same frame received directly, so an unmodified
-SlimeVR server sees nothing new. Runs the production functions extracted from
-esb.c (sequence check, normal/composite/repair processing, capability strip)
-against a recording HID FIFO writer."""
+"""Compare HID bytes constructed by the direct and relay RX handlers.
+The recording writer accepts every packet. run_deferred.py exercises queue
+admission and retry under backpressure."""
 from pathlib import Path as _RelayPath
 import sys as _relay_sys
 _relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))

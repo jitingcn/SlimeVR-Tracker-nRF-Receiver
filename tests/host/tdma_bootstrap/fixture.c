@@ -1143,17 +1143,18 @@ static void relay_mode_transitions(void)
 	assert(relay_profile && !tdma_staged.valid && relay_control_eligible());
 
 	/* Clean quality can withdraw auto demand while forced relay stays applied. */
-	for (unsigned tick = 0; tick < 8; ++tick) {
+	for (unsigned tick = 0; tick < 16; ++tick) {
 		now_ms += RC_WINDOW_MS;
 		live();
 		query_case_ping(2, ESB_PONG_FLAG_NORMAL);
 		for (uint8_t id = 0; id < 3; ++id) {
 			for (unsigned n = 0; n < 60; ++n) {
-				relay_coord_note_frame(&relay_coord, id, RC_DIRECT, RC_SEQ_NORMAL, 0, 60, now_ms);
+				relay_coord_note_frame(&relay_coord, id, RC_DIRECT, RC_SEQ_NORMAL, tick < 8 && id == 2 && n == 0 ? 40 : 0, 60, now_ms);
 			}
 		}
 		relay_coord_tick(&relay_coord, tdma_active_mask, now_ms);
 		relay_coord_auto_update(&relay_coord, tdma_active_mask, now_ms, true, true);
+		if (tick == 7) assert(relay_coord.auto_engaged);
 		service();
 		assert(relay_profile && !tdma_staged.valid);
 	}

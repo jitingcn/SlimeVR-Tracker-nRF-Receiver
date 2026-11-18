@@ -102,7 +102,9 @@ int main(void) {
  assert(status_counts[0] == 2 && status_counts[1] == 0);
  assert(stats->status_reported_received == 257 && stats->status_reported_gaps == 6);
 
- for(unsigned i=0;i<17;i++)relay_defer_capture(&relay_coord,1,2,50,100+i);
+ relay_defer_capture(&relay_coord,1,3,50,100);
+ for(unsigned i=1;i<17;i++)relay_defer_capture(&relay_coord,1,2,50,100+i);
+ assert(relay_coord.peer[1][3].evidence_ms==100);
  assert(relay_learning_overflow==1 && relay_coord.peer[1][2].evidence_ms==116);
  struct relay_control c={.session=42,.epoch=3,.members=2,.repair_count=5};
  c.grants[0].owner=1;

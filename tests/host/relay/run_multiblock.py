@@ -7,7 +7,6 @@ from relay_config import select_relay
 import os, shlex, subprocess, sys, tempfile
 from pathlib import Path
 here=Path(__file__).resolve().parent
-sys.path.insert(0,str(here.parents[3]/'tracker/tests/host/harness/python'))
 from c_extract import extract_block
 src=select_relay((here.parents[2]/'src/connection/esb.c').read_text())
 code='''
@@ -55,5 +54,4 @@ with tempfile.TemporaryDirectory() as d:
  p=Path(d);(p/'test.c').write_text(code)
  subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-Wall','-Wextra','-Werror','-I'+str(here.parents[2]/'src/connection'),str(p/'test.c'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],check=True)
-assert '&& !relay_multi_blocked(id)' in src
-print('Multi-block: mask bounds, timeout rollover, early-receipt exclusion and finally restoration passed')
+print('Multi-block: mask bounds, timeout rollover, and finally restoration passed')
