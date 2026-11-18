@@ -303,7 +303,7 @@ static unsigned periodic_transitions(unsigned length, unsigned phase) {
     return transitions;
 }
 
-static void test_periodic_loss_phase_sweep(void) {
+static void test_loss_switches_and_entry_decision(void) {
     const unsigned lengths[] = {1000, 2000, 4000};
     for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
         unsigned min = 0, max = 0;
@@ -335,6 +335,48 @@ static void test_periodic_loss_phase_sweep(void) {
     printf("Sustained 40%% loss: entry decision in %u-%u ms across 50 phases\n", earliest, latest);
 }
 
+/* At 12 TPS a full stats window carries just six expected frames.
+ * Report missing sequences only when the next packet arrives. */
+static unsigned sparse_loss_decision(unsigned start, unsigned length, unsigned phase) {
+    setup();
+    unsigned gaps = 0, frame = 0;
+    for (now = 1; now <= start + 10000; now++) {
+        if (now == 1 + frame * 1000 / 12) {
+            bool burst = now >= start && now - start < length;
+            unsigned drop = (frame++ + phase) % 12;
+            if (burst && drop < 9 && drop % 2 == 0) {
+                gaps++;
+            } else {
+                relay_coord_note_frame(&rc, 0, RC_DIRECT, RC_SEQ_NORMAL, gaps, 70, now);
+                gaps = 0;
+            }
+        }
+        if (now % RC_WINDOW_MS == 0) {
+            relay_coord_tick(&rc, 1, now);
+            relay_coord_auto_update(&rc, 1, now, false, true);
+            if (rc.auto_engaged) return now - start;
+        }
+    }
+    return 0;
+}
+
+static void test_sparse_loss_debounce(void) {
+    unsigned earliest = 7000, latest = 0;
+    /* Include the reported 2 s burst and vary the start relative to both
+     * stats ticks and the sequence-loss pattern. */
+    for (unsigned phase = 0; phase < 5; phase++) {
+        for (unsigned start = 8000; start < 12000; start += 10) {
+            assert(!sparse_loss_decision(start, 2000, phase));
+            unsigned delay = sparse_loss_decision(start, 10000, phase);
+            assert(delay && delay <= 7000);
+            if (delay < earliest) earliest = delay;
+            if (delay > latest) latest = delay;
+        }
+    }
+    puts("12 TPS: 2 s bursts never request relay (2000 cases)");
+    printf("12 TPS: sustained loss requests relay in %u-%u ms\n", earliest, latest);
+}
+
 /* A remembered child needs a recovery judgement, even when direct arrivals
  * break its silence before there are enough frames to judge. */
 static void test_recovery_needs_samples(void) {
@@ -357,7 +399,8 @@ int main(void) {
     test_outage_cannot_inherit_another_members_weak_time();
     test_reentry_uses_native_evidence();
     test_reentry_outage_counts_only_native_silence();
-    test_periodic_loss_phase_sweep();
+    test_loss_switches_and_entry_decision();
+    test_sparse_loss_debounce();
     test_recovery_needs_samples();
     setup(); run(400,0,false); assert(!rc.auto_engaged);
     run(400,4,false); assert(!rc.auto_engaged); /* 10% loss stays direct */

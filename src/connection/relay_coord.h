@@ -84,6 +84,7 @@ struct rc_tracker {
 	uint16_t acc_direct;      /* frames carried towards the next judgement */
 	uint16_t acc_expected;
 	uint8_t acc_windows;
+	bool direct_window_weak; /* latest stats window corroborates pooled weakness */
 	uint16_t rate_x16;        /* frames per window x16, from non-empty windows */
 	uint8_t rssi;             /* smoothed -dBm magnitude, 0 = unknown */
 	uint8_t weak_windows;   /* consecutive lossy judgements */

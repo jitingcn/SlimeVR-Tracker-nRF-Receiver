@@ -220,7 +220,10 @@ static uint16_t rc_auto_sustained(struct relay_coord *rc, uint16_t poor, uint16_
 			*since = 0;
 		} else if (!*since || (changed & RC_BIT(i))) {
 			*since = rc_auto_since(now);
-		} else if ((int32_t)(now - *since) >= (int32_t)threshold) {
+		} else if ((int32_t)(now - *since) >= (int32_t)threshold
+		    && ((outage & RC_BIT(i)) || rc->t[i].direct_window_weak)) {
+			/* Sparse windows may leave the pooled verdict unchanged for
+			 * several ticks. Require current loss before acting on it. */
 			sustained |= RC_BIT(i);
 		}
 	}
@@ -338,6 +341,7 @@ void relay_coord_tick(struct relay_coord *rc, uint16_t member_mask, uint32_t now
 			uint8_t avg = (uint8_t)(w->rssi_sum / w->rssi_count);
 			t->rssi = t->rssi ? (uint8_t)((3U * t->rssi + avg) / 4U) : avg;
 		}
+		t->direct_window_weak = j[i].permille < RC_WEAK_PERMILLE;
 		if (j[i].expected) {
 			uint32_t sample = 16U * j[i].expected;
 			uint32_t rate = t->rate_x16 ? (3U * t->rate_x16 + sample) / 4U : sample;
