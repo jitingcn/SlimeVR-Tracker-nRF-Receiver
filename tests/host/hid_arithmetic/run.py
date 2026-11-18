@@ -38,6 +38,7 @@ prefix = r'''
 #include <stdio.h>
 #include <string.h>
 #include <limits.h>
+#include "hid.h"
 #define MAX_TRACKERS 16
 #define RCV_HID_TYPE_CMD_ACK 251
 #define RCV_HID_TYPE_CMD 254
@@ -78,7 +79,7 @@ static uint32_t enqueued_generation;
 static unsigned int enqueued_count;
 static bool enqueue_stalled;
 static unsigned int dropped_count;
-static void hid_note_dropped(const uint8_t *data) { (void)data; dropped_count++; }
+void hid_note_dropped(const uint8_t *data) { (void)data; dropped_count++; }
 static bool hid_push_packet(const uint8_t data[16], uint32_t generation) {
     if(enqueue_stalled)return false;
     memcpy(enqueued_packet, data, sizeof(enqueued_packet));
@@ -273,5 +274,5 @@ with tempfile.TemporaryDirectory(prefix='receiver-hid-arithmetic-') as directory
     subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
         '-std=c11', '-O2', '-Wall', '-Wextra', '-Wno-unused-function',
         '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
-        str(fixture), '-o', str(executable)], check=True)
+        '-I'+str(ROOT/'src'), str(fixture), '-o', str(executable)], check=True)
     subprocess.run([str(executable), args.case], check=True)

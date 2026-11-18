@@ -156,6 +156,7 @@ hid = common + r'''
 #define RCV_HID_TYPE_CMD_ACK 251
 #define RCV_HID_TYPE_CMD 254
 #include "tracker_events.h"
+#include "hid.h"
 #include "connection/tracker_event_protocol.h"
 #define RCV_HID_TYPE_DEVICE_ADDR 255
 #define RCV_HID_CMD_LEN 16

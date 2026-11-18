@@ -3978,6 +3978,10 @@ static bool relay_hid_step(struct relay_hid_record *record, bool *pending)
 		if (k_msgq_get(&relay_hid_queue, record, K_NO_WAIT)) return false;
 		*pending = true;
 	}
+	if (hid_packet_is_filtered(record->data)) {
+		*pending = false;
+		return true;
+	}
 	if (!esb_forward_tracker_packet(record->data, record->rssi)) {
 		relay_hid_refused++;
 		return false;

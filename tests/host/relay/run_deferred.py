@@ -21,6 +21,7 @@ prefix = r'''
 #include <stdbool.h>
 #include <string.h>
 #include "relay_coord.h"
+#include "hid.h"
 #define ARG_UNUSED(x) (void)(x)
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define K_NO_WAIT 0
@@ -45,7 +46,7 @@ static struct { struct packet_stats stats; } tracker_slots[2];
 static unsigned hid_count, hid_drops;
 static bool check_status;
 static uint8_t status_counts[2];
-static void hid_note_dropped(const uint8_t *data){(void)data;hid_drops++;}
+void hid_note_dropped(const uint8_t *data){(void)data;hid_drops++;}
 static bool stalled;
 static bool hid_try_write_packet_n(const uint8_t *data, uint8_t rssi)
 {
@@ -65,7 +66,7 @@ prefix = prefix.replace('/* PACKET STATS */', extract_block(source, r'^struct pa
 cases = r'''
 int main(void) {
  relay_coord_init(&relay_coord);
- for(unsigned i=0;i<129;i++){uint8_t p[16]={i};relay_hid_packet(p,50);p[0]=0;}
+ for(unsigned i=0;i<129;i++){uint8_t p[16]={i,0,1};relay_hid_packet(p,50);p[0]=0;}
  assert(hid_count==0 && relay_hid_overflow==1 && relay_hid_dropped_output==1 && hid_drops==1 && relay_hid_queue.count==128);
  struct relay_hid_record output;bool pending=false;stalled=true;
  assert(!relay_hid_step(&output,&pending)&&pending&&output.data[0]==0);
@@ -75,6 +76,11 @@ int main(void) {
  for(unsigned i=0;i<129;i++)assert(relay_hid_step(&output,&pending));
  assert(hid_count==129 && relay_hid_enqueued==129 && relay_hid_refused==2 && hid_drops==1 && !pending);
  assert(!relay_hid_step(&output,&pending));
+
+ uint8_t zero_quat[16] = {1};
+ relay_hid_packet(zero_quat, 50);
+ assert(relay_hid_step(&output, &pending) && !pending);
+ assert(relay_hid_enqueued == 129);
 
  check_status = true;
  uint8_t status[16] = {3, 1};
@@ -86,13 +92,15 @@ int main(void) {
  assert(!relay_hid_step(&output, &pending) && pending);
  assert(!stats->status_reported_received && !stats->status_reported_gaps && hid_drops == 1);
  stats->total_received++;
+ stats->total_gaps++;
  stalled = false;
  assert(relay_hid_step(&output, &pending) && !pending);
- assert(status_counts[0] == 255 && status_counts[1] == 5);
+ assert(status_counts[0] == 255 && status_counts[1] == 6);
+ assert(!relay_hid_step(&output, &pending));
  relay_hid_packet(status, 50);
  assert(relay_hid_step(&output, &pending));
  assert(status_counts[0] == 2 && status_counts[1] == 0);
- assert(stats->status_reported_received == 257 && stats->status_reported_gaps == 5);
+ assert(stats->status_reported_received == 257 && stats->status_reported_gaps == 6);
 
  for(unsigned i=0;i<17;i++)relay_defer_capture(&relay_coord,1,2,50,100+i);
  assert(relay_learning_overflow==1 && relay_coord.peer[1][2].evidence_ms==116);
@@ -111,6 +119,6 @@ int main(void) {
 '''
 with tempfile.TemporaryDirectory() as tmp:
     c=Path(tmp)/'deferred.c';exe=Path(tmp)/'deferred';c.write_text(prefix+code+cases)
-    subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I'+str(here.parents[2]/'src/connection'),str(c),str(here.parents[2]/'src/connection/relay_coord.c'),'-o',str(exe)],check=True)
+    subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I'+str(here.parents[2]/'src/connection'),'-I'+str(here.parents[2]/'src'),str(c),str(here.parents[2]/'src/connection/relay_coord.c'),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
 print('Deferred HID and learning copies, overflow order and epoch fencing passed')

@@ -837,13 +837,9 @@ bool hid_write_tracker_event(const uint8_t record[16], uint32_t generation)
 
 static bool hid_write_packet_n_internal(const uint8_t *data, uint8_t rssi, bool retain_on_full)
 {
-	// Drop packets with all-zero quaternion (type 1 and 4: quat in bytes 2-9).
-	if (data[0] == 1 || data[0] == 4) {
-		if ((data[2] | data[3] | data[4] | data[5] |
-		     data[6] | data[7] | data[8] | data[9]) == 0) {
-			/* A deferred writer should move on from a filtered record. */
-			return retain_on_full;
-		}
+	if (hid_packet_is_filtered(data)) {
+		/* A deferred writer should move on from a filtered record. */
+		return retain_on_full;
 	}
 
 	uint8_t pkt[16];
