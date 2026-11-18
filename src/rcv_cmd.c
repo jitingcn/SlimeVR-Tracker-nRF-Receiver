@@ -346,7 +346,11 @@ static atomic_t remote_hid_expected = ATOMIC_INIT(0);
 static atomic_t remote_hid_confirmed = ATOMIC_INIT(0);
 static bool remote_wom_console;
 static uint16_t remote_wom_token;
-static uint32_t remote_wom_failed;
+/* A generic confirmation and a WOM poll cannot own the HID job together. */
+static union {
+	uint32_t wom_failed;
+	uint32_t stage_budget_ms;
+} remote_hid_wait;
 static int64_t remote_hid_deadline;
 static uint16_t remote_wom_minutes;
 
@@ -402,12 +406,21 @@ static void remote_hid_finish(uint8_t status)
 }
 
 #if defined(CONFIG_RELAY)
+/* Charge reservations at arm and publication against one maximum stage. */
+static uint32_t remote_hid_charge_stage(uint32_t targets)
+{
+	uint32_t reserved = esb_reserved_pong_ms(targets);
+	uint32_t extension = MIN(reserved, remote_hid_wait.stage_budget_ms);
+	remote_hid_wait.stage_budget_ms -= extension;
+	return extension;
+}
+
 void rcv_cmd_hid_stage_started(void)
 {
 	if (!atomic_get(&remote_hid_pending) || remote_hid_job == REMOTE_HID_JOB_WOM_COMMAND
 	    || remote_hid_deadline <= k_uptime_get()) return;
 	uint32_t waiting = atomic_get(&remote_hid_expected) & ~atomic_get(&remote_hid_confirmed);
-	remote_hid_deadline += esb_reserved_pong_ms(waiting);
+	remote_hid_deadline += remote_hid_charge_stage(waiting);
 }
 #endif
 
@@ -422,7 +435,8 @@ static void remote_hid_arm_expected(uint32_t mask)
 	atomic_set(&remote_hid_expected, (atomic_val_t)mask);
 	uint32_t delay = REMOTE_HID_CONFIRM_TIMEOUT_MS;
 #if defined(CONFIG_RELAY)
-	delay += esb_reserved_pong_ms(mask);
+	remote_hid_wait.stage_budget_ms = RC_LAYOUT_MAX_ACTIVATION_MS;
+	delay += remote_hid_charge_stage(mask);
 #endif
 	remote_hid_deadline = k_uptime_get() + delay;
 	(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(delay));
@@ -462,7 +476,7 @@ static void remote_wom_poll(void)
 	bool expired = k_uptime_get() >= remote_hid_deadline;
 	for (uint8_t id = 0; id < MAX_TRACKERS; id++) {
 		uint32_t bit = BIT(id);
-		if (!(expected & bit) || ((confirmed | remote_wom_failed) & bit)) {
+		if (!(expected & bit) || ((confirmed | remote_hid_wait.wom_failed) & bit)) {
 			continue;
 		}
 		uint16_t minutes = 0, error = 0;
@@ -473,14 +487,14 @@ static void remote_wom_poll(void)
 			error = ETIMEDOUT;
 		}
 		if (error) {
-			remote_wom_failed |= bit;
+			remote_hid_wait.wom_failed |= bit;
 		} else {
 			confirmed |= bit;
 		}
 		remote_wom_result(id, minutes, error);
 	}
 	atomic_set(&remote_hid_confirmed, confirmed);
-	if ((confirmed | remote_wom_failed) != expected) {
+	if ((confirmed | remote_hid_wait.wom_failed) != expected) {
 		(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(50));
 		return;
 	}
@@ -490,15 +504,15 @@ static void remote_wom_poll(void)
 			printk("WOM command: no active trackers found\n");
 		}
 		printk("WOM command complete: success mask 0x%08X, failure mask 0x%08X\n",
-		       confirmed, remote_wom_failed);
+		       confirmed, remote_hid_wait.wom_failed);
 	} else if (async_ack_fn) {
 		uint8_t ack[RCV_HID_CMD_LEN];
 		fill_ack(ack, remote_hid_seq, remote_hid_opcode,
-			 remote_wom_failed || !expected ? RCV_HID_ST_ENOENT : RCV_HID_ST_OK);
+			 remote_hid_wait.wom_failed || !expected ? RCV_HID_ST_ENOENT : RCV_HID_ST_OK);
 		ack[4] = RCV_HID_WOM_SUMMARY;
 		sys_put_le16(remote_wom_token, &ack[5]);
 		sys_put_le32(confirmed, &ack[7]);
-		sys_put_le32(remote_wom_failed, &ack[11]);
+		sys_put_le32(remote_hid_wait.wom_failed, &ack[11]);
 		async_ack_fn(ack);
 	}
 	remote_hid_job = REMOTE_HID_JOB_NONE;
@@ -618,7 +632,7 @@ static uint8_t remote_wom_begin(uint8_t seq, uint8_t target, uint16_t minutes, b
 	}
 	remote_hid_job = REMOTE_HID_JOB_WOM_COMMAND;
 	remote_wom_console = console;
-	remote_wom_failed = 0;
+	remote_hid_wait.wom_failed = 0;
 	remote_wom_token = 0;
 	if (target == RCV_HID_TARGET_ALL) {
 		remote_wom_minutes = minutes;

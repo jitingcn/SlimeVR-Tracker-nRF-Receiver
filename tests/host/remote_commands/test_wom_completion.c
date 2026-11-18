@@ -41,7 +41,7 @@ static atomic_t remote_hid_pending, remote_hid_expected, remote_hid_confirmed;
 static uint8_t remote_hid_seq, remote_hid_opcode, remote_hid_flag;
 static bool remote_wom_console;
 static uint16_t remote_wom_token, remote_wom_minutes;
-static uint32_t remote_wom_failed;
+static union { uint32_t wom_failed; } remote_hid_wait;
 static int64_t remote_hid_deadline;
 enum { REMOTE_HID_JOB_NONE, REMOTE_HID_JOB_WOM_COMMAND };
 static int remote_hid_job;

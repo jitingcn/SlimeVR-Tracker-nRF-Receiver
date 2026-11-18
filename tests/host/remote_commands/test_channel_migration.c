@@ -229,6 +229,10 @@ static void esb_ota_relay_fill_ack(uint8_t id, uint32_t pipe, struct esb_payload
 struct k_work { int unused; };
 enum { REMOTE_HID_JOB_NONE, REMOTE_HID_JOB_WOM_COMMAND };
 static int remote_hid_job, remote_hid_pending, remote_hid_expected, remote_hid_confirmed;
+#define RCV_HID_ST_STARTED 7
+#define RCV_HID_TARGET_ALL 0xff
+static union { uint32_t stage_budget_ms; } remote_hid_wait;
+static uint8_t remote_hid_seq;
 static int remote_hid_flag, remote_hid_opcode, hid_status;
 static int64_t remote_hid_deadline, hid_timer_due;
 #define TEST_REMOTE_HID_STAGE
@@ -942,6 +946,45 @@ static void test_hid_reserved_pongs(bool arm_first)
     relay_coord_note_caps(&relay_coord, 0, 0);
 }
 
+static void test_consecutive_hid_stages(void)
+{
+    reset(16);
+    now = now_ticks = 0;
+    relay_profile = 1;
+    tdma_active_mask = UINT16_MAX;
+    relay_coord_note_caps(&relay_coord, 0, RELAY_INFO_CAPS);
+    relay_applied_settings = (struct relay_runtime_settings){16, 1, 16, 120, 120, 1, 0};
+    uint32_t lead = relay_stage_lead_ticks(&relay_applied_settings, 16);
+    uint32_t bound = REMOTE_HID_CONFIRM_TIMEOUT_MS + RC_LAYOUT_MAX_ACTIVATION_MS;
+    tdma_staged.valid = true;
+    tdma_staged.p = (struct tdma_publication){.new_mask = UINT16_MAX, .profile = 1};
+    tdma_staged.activation_ticks = lead;
+    hid_status = -1;
+    assert(rcv_cmd_remote_sens_set_hid(1, ESB_PONG_FLAG_SENS_SET, 0, 1, 2, 3) == RCV_HID_ST_STARTED);
+    /* Start another stage at each activation and service the timer when due. */
+    for (uint32_t ms = 1; ms <= bound; ++ms) {
+        now = ms;
+        now_ticks = ms * 32768 / 1000;
+        if (now_ticks >= tdma_staged.activation_ticks) {
+            tdma_staged.activation_ticks = now_ticks + lead;
+            unsigned key = irq_lock();
+            rcv_cmd_hid_stage_started();
+            irq_unlock(key);
+        }
+        if (hid_timer_due == now) remote_hid_timeout_handler(NULL);
+        if (now < bound) assert(remote_hid_pending && hid_status == -1);
+    }
+    assert(!remote_hid_pending && hid_status == RCV_HID_ST_ENOENT);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_SENS_SET);
+    assert(rcv_cmd_remote_sens_set_hid(2, ESB_PONG_FLAG_SENS_SET, 0, 4, 5, 6) == RCV_HID_ST_STARTED);
+    assert(hid_timer_due == now + REMOTE_HID_CONFIRM_TIMEOUT_MS + esb_reserved_pong_ms(BIT(0)));
+    remote_hid_abort();
+    tdma_staged.valid = false;
+    tdma_active_mask = relay_profile = 0;
+    relay_coord_note_caps(&relay_coord, 0, 0);
+    printf("PASS consecutive HID stages: ENOENT at %u ms, next command STARTED\n", bound);
+}
+
 static void test_blocked_pose_receipt(void)
 {
     reset(2);
@@ -968,6 +1011,7 @@ static void test_blocked_pose_receipt(void)
 
 int main(void) {
     test_blocked_pose_receipt();
+    test_consecutive_hid_stages();
     test_hid_reserved_pongs(false);
     test_hid_reserved_pongs(true);
     puts("PASS HID staging: four reserved PONGs, success at 5500 ms, ordinary timeout at 5000 ms");

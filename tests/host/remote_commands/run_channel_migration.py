@@ -139,8 +139,9 @@ production += extract.function(source, "esb_relay_block_mask")
 production += extract.function(source, "esb_reserved_pong_ms")
 production += "\n" + re.search(r"^#define REMOTE_HID_CONFIRM_TIMEOUT_MS .*", control, re.M).group() + "\n"
 production += "\n".join(extract.function(select_relay(control), name) for name in (
-    "remote_hid_finish", "rcv_cmd_hid_stage_started", "remote_hid_arm_expected",
-    "remote_hid_timeout_handler", "on_remote_confirm"))
+    "remote_hid_begin", "remote_hid_abort", "remote_hid_finish", "remote_hid_charge_stage",
+    "rcv_cmd_hid_stage_started", "remote_hid_arm_expected",
+    "remote_hid_timeout_handler", "on_remote_confirm", "rcv_cmd_remote_sens_set_hid"))
 production += "\n".join(extract.function(control, name) for name in (
     "rcv_cmd_collect_start", "rcv_cmd_collect_stop",
     "rcv_cmd_collect_batch_start", "rcv_cmd_collect_batch_stop"))
