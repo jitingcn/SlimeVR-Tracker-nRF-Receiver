@@ -886,7 +886,7 @@ static struct {
 	uint32_t activation_ticks;
 	bool valid;
 	bool native_followup;
-	/* Revoked IDs stay off the wire through the lead of their fresh stage. */
+	/* Keep revoked IDs out of PONG masks through the lead of their fresh stage. */
 	uint16_t revoked_mask;
 	uint16_t readmit_mask;
 	int64_t native_guard_until_ms;
@@ -1399,8 +1399,8 @@ static void tdma_recalculate(bool forced)
 		 * Legacy members get the new tuple on their next PONG, as in native TDMA. */
 		bool native_guard = now < tdma_staged.native_guard_until_ms;
 		bool native_followup = !relay_profile && !profile && native_guard;
-		/* A fresh stage starts after revocation. Its full lead drains old grants
-		 * before any revoked ID, or a slot vacated by one, can be reused. */
+		/* After revocation, reserve a full lead before reusing an ID
+		 * or assigning a slot vacated by it. */
 		bool pairing_followup = (old_mask | new_mask) & tdma_staged.revoked_mask;
 		native_followup |= !relay_profile && !profile && pairing_followup;
 		if (active_count && (native_followup || pairing_followup || ((!forced || relay_profile || profile)

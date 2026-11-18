@@ -112,6 +112,12 @@ static unsigned change_after_failure;
 static uint32_t original_frame, original_start;
 static jmp_buf stop_thread;
 static uint8_t dma[72];
+static unsigned stop_after_controls = 1;
+static unsigned revoke_at_freeze;
+static uint64_t launch_ticks[8];
+static unsigned launch_count;
+
+static void tdma_revoke_pairings(uint16_t removed);
 
 static unsigned irq_lock(void) { return irq_depth++; }
 static void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth = key; }
@@ -124,13 +130,13 @@ static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return (uint64_t)ticks *
 static uint32_t k_ticks_to_us_ceil32(uint32_t ticks) { return ((uint64_t)ticks * 1000000U + 32767U) / 32768U; }
 static void k_msleep(uint32_t ms)
 {
-    assert(!irq_depth);
-    clock_ticks += ((uint64_t)ms * 32768U + 999U) / 1000U;
+    assert(!irq_depth && ms == 1U);
+    /* Only the pairing thread sleeps. The RTC callback remains scheduled. */
 }
 static void k_usleep(uint32_t us)
 {
     assert(!irq_depth);
-    if (relay_control_sent) longjmp(stop_thread, 1);
+    if (relay_control_sent >= stop_after_controls) longjmp(stop_thread, 1);
     if (change_after_failure && prepare_count == 1) {
         assert(!compares[0].armed && !compares[1].armed);
         if (change_after_failure == 1) ++relay_session;
@@ -204,6 +210,13 @@ static int esb_prx_tx_arm_event(uint32_t delay, uint32_t event)
 static int esb_prx_tx_wait(uint32_t timeout)
 {
     assert(timeout && compares[0].armed);
+    if (stop_after_controls > 1) {
+        assert(launch_count < sizeof(launch_ticks) / sizeof(launch_ticks[0]));
+        struct relay_control decoded;
+        assert(relay_control_decode(dma, RELAY_CONTROL_LEN, &decoded));
+        assert(decoded.members == 3 && relay_member_slot(decoded.members, 0) == 0);
+        launch_ticks[launch_count++] = compares[0].tick;
+    }
     clock_ticks = compares[0].tick + 1U;
     compares[0] = (struct compare_slot){0};
     int err = fail_wait;
@@ -218,6 +231,9 @@ static void k_sem_take(int *sem, int timeout)
     struct compare_slot callback = compares[1];
     compares[1] = (struct compare_slot){0};
     struct relay_control_work *work = callback.context;
+    if (revoke_at_freeze && launch_count + 1 == revoke_at_freeze) {
+        tdma_revoke_pairings(2);
+    }
     clock_ticks = work->freeze_rtc + (fail_freeze ? -1 : (int)freeze_lag);
     rtc.COUNTER = (uint32_t)clock_ticks & 0x00ffffffU;
     fail_freeze = false;
@@ -257,6 +273,8 @@ static void reset_device(void)
     fail_prepare = fail_freeze = false;
     fail_begin = fail_arm = fail_wait = 0;
     change_after_failure = 0;
+    stop_after_controls = 1;
+    revoke_at_freeze = launch_count = 0;
 }
 
 static void setup_geometry(uint32_t frame, uint32_t start, uint8_t direct, uint8_t repairs)
@@ -497,36 +515,43 @@ static void sdk_arm_timeout(bool repeat)
     relay_control_cancel(0, 1);
 }
 
-static void revoke_before_freeze(bool repeat)
+static void revocation_cadence(unsigned freeze, uint64_t expected[6])
 {
     reset_device();
-    relay_profile = 1;
-    esb_initialized = true;
-    relay_epoch = 7;
-    relay_session = 123;
-    relay_layout_generation = 9;
+    const uint32_t frame = 14, start = 10000;
+    setup_geometry(frame, start, 2, 2);
+    assert(relay_geometry_make_control(&geometry, 2, 2, 16, 120, 1));
+    relay_applied_settings.control_repeat_mode = 1;
+    relay_frame_announce(frame, start);
+    relay_coord_init(&relay_coord);
+    relay_coord.enabled = true;
+    relay_coord.cache_frames = 5;
+    relay_coord_note_caps(&relay_coord, 0, RELAY_INFO_CAPS);
+    relay_coord_note_caps(&relay_coord, 1, RELAY_INFO_CAPS);
     tdma_active_mask = 3;
+    esb_initialized = true;
+    relay_profile = 1; relay_epoch = 7; relay_session = 123; relay_layout_generation = 9;
     tdma_staged.revoked_mask = 0;
     tdma_staged.readmit_mask = 2;
-    struct relay_control control = {.epoch = 7, .session = 123, .members = 3};
-    struct relay_control_work work = {
-        .control = &control, .generation = 9, .start_event = 1, .repeat = repeat,
-    };
-    uint64_t revoked_at = clock_ticks;
-    assert(relay_control_context_current(&control, relay_origin));
-    assert(!relay_control_schedule(0, 1, clock_ticks + 100U,
-        repeat ? relay_repeat_callback : relay_freeze_callback, &work));
-    tdma_revoke_pairings(2);
-    assert(clock_ticks - revoked_at == 33U);
-    assert(!tdma_staged.readmit_mask && !relay_control_context_current(&control, relay_origin));
-    k_sem_take(&relay_freeze_done, K_FOREVER);
-    assert(work.result == -ESTALE && relay_control_diag.stale_cancel == 1 && !radio_operation_busy);
-    relay_control_cancel(0, 1);
-    assert(!compares[0].armed && !compares[1].armed);
+    clock_ticks = start;
+    stop_after_controls = 3;
+    revoke_at_freeze = freeze;
 
-    /* A clean relay publication resumes control while the removed bit stays revoked. */
-    tdma_active_mask = control.members = 1;
-    assert(relay_control_context_current(&control, relay_origin));
+    if (!setjmp(stop_thread)) relay_control_thread();
+    assert(relay_control_sent == 3 && !relay_control_failed);
+    assert(relay_control_repeat_sent == 3 && !relay_control_repeat_failed);
+    assert(!relay_control_diag.stale_cancel && relay_layout_generation == 9);
+    assert(!irq_depth && !compares[0].armed && !compares[1].armed);
+    assert(launch_count == 6);
+    if (freeze) {
+        assert(tdma_staged.revoked_mask == 2 && !tdma_staged.readmit_mask);
+        assert(!memcmp(launch_ticks, expected, 6 * sizeof(*expected)));
+    } else {
+        memcpy(expected, launch_ticks, 6 * sizeof(*expected));
+        printf("Primary control intervals: %llu and %llu RTC ticks\n",
+            (unsigned long long)(launch_ticks[2] - launch_ticks[0]),
+            (unsigned long long)(launch_ticks[4] - launch_ticks[2]));
+    }
     tdma_staged.revoked_mask = 0;
 }
 
@@ -550,8 +575,10 @@ int main(void)
     failed_repeat_snapshot();
     sdk_arm_timeout(false);
     sdk_arm_timeout(true);
-    revoke_before_freeze(false);
-    revoke_before_freeze(true);
+    uint64_t baseline[6];
+    revocation_cadence(0, baseline);
+    revocation_cadence(3, baseline); /* Primary freeze. */
+    revocation_cadence(4, baseline); /* Repeat freeze. */
     for (enum thread_fault fault = LATE; fault <= GENERATION; ++fault) thread_case(fault);
     puts("Control target, live repair phase, late setup, compare cleanup, pairing revocation and future retry passed");
 }

@@ -1556,7 +1556,7 @@ static void relay_exit_pairing_change(bool off, bool replace)
 	uint64_t paired_ms = 0;
 	uint32_t generation = relay_layout_generation;
 	assert(esb_pop_pair() == 0 && stored_trackers == 3);
-	assert(!relay_control_eligible() && relay_layout_generation != generation);
+	assert(relay_control_eligible() && relay_layout_generation == generation);
 	if (replace) {
 		now_ms += 100;
 		assert(esb_add_pair(987654, false) == 3 && stored_trackers == 4);
@@ -1641,8 +1641,49 @@ static void native_pairing_reset_again(void)
 	       (unsigned long long)(now_ms - paired_ms));
 }
 
+static void applied_relay_pop(bool force)
+{
+	const uint32_t before = BIT(2) | BIT(3);
+	const uint32_t survivors = BIT(2);
+	relay_exit_setup(false);
+	if (force) {
+		relay_user_mode = RELAY_MODE_FORCE;
+	}
+	relay_coord.auto_engaged = true;
+	relay_coord.auto_exit_pending = false;
+	assert(relay_control_eligible() && !tdma_staged.valid && tdma_active_mask == before);
+	uint32_t generation = relay_layout_generation;
+	uint32_t start = (uint32_t)k_uptime_ticks();
+
+	assert(esb_pop_pair() == 0 && stored_trackers == 3);
+	assert(tdma_staged.valid && tdma_staged.p.profile && tdma_staged.p.new_mask == survivors);
+	uint32_t due = tdma_staged.activation_ticks;
+	assert(slot(tdma_advertised_config(2, due - 1U)) == 0);
+
+	/* The applied context stays valid through the lead, including the
+	 * last tick before the clean private layout takes over. */
+	assert(relay_control_eligible() && tdma_active_mask == before);
+	assert(relay_layout_generation == generation);
+	now_ms += 3000U;
+	service();
+	assert(tdma_staged.valid && tdma_staged.activation_ticks == due);
+	assert(relay_control_eligible() && relay_layout_generation == generation);
+	service_at_tick(due - 1U);
+	assert(tdma_staged.valid && relay_control_eligible() && tdma_active_mask == before);
+	assert(relay_layout_generation == generation);
+	exact_ticks = due;
+	service();
+	exact_ticks = 0;
+	assert(!tdma_staged.valid && relay_control_eligible() && tdma_active_mask == survivors);
+	assert(relay_layout_generation != generation && slot(tracker_slots[2].tdma_config_packed) == 0);
+	printf("PASS %s applied relay pop: control eligible through %u ms lead and activation\n",
+	       force ? "force" : "auto", k_ticks_to_ms_ceil32(due - start));
+}
+
 static void relay_exit_pairing_changes(void)
 {
+	applied_relay_pop(false);
+	applied_relay_pop(true);
 	native_pairing_reset_again();
 	for (unsigned off = 0; off <= 1; off++) {
 		relay_exit_pairing_change(off, false);
