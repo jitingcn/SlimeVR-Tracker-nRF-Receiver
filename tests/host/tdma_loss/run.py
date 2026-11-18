@@ -100,10 +100,11 @@ def diagnostic_function(source, name):
             function(source, name) + '\n#endif\n')
 
 
-def membership_declarations(source):
+def membership_declarations(source, relay=True):
     start = source.index('#define PING_TIMEOUT_MS')
     end = source.index('static void tdma_shadow_observe', start)
     return '\n'.join((
+        '#include "relay_coord.h"' if relay else '',
         declaration(source, 'tdma_last_reconfig_time'),
         declaration(source, 'tdma_last_reconfig_valid'),
         source[start:end],
@@ -209,13 +210,13 @@ static void restart_ping(uint8_t tracker_id) {
 '''
     return '\n'.join((
         constants,
-        '#define TEST_RELAY_SOURCE 1\n#include "relay_coord.h"' if relay else '',
+        "#define TEST_RELAY_SOURCE 1" if relay else '',
         "static bool relay_auto_ladder_paused(void);" if relay else '',
         "static uint32_t tdma_admissible_mask(uint32_t desired);" if relay else '',
         'static bool relay_roster_eligible(uint32_t desired);' if relay else '',
         ('static bool relay_query_can_resume(void);\nstatic void relay_query_update_locked(void);\nstatic void relay_query_begin(void);' if relay else ''),
         ping_constants,
-        membership_declarations(source),
+        membership_declarations(source, relay),
         declarations,
         *structures,
         declaration(source, 'tracker_slots'),
