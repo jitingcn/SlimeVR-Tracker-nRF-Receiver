@@ -93,7 +93,10 @@ if 'pairing' in cases:
 names = ['esb_auto_loss_invalidate',
          'tdma_shadow_observe', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
          'esb_send_remote_command_sens', 'esb_send_remote_command_sens_auto',
-         'esb_send_remote_command_sens_auto_all', 'esb_send_remote_command_arg']
+         'esb_send_remote_command_sens_auto_all']
+if re.search(r'^void esb_publish_remote_command_locked\(', source, re.M):
+    names.append('esb_publish_remote_command_locked')
+names.append('esb_send_remote_command_arg')
 if 'slots' in cases or 'pairing' in cases:
     names += ['tracker_slot_reset', 'esb_add_pair']
 if 'slots' in cases:
@@ -109,7 +112,7 @@ if 'pairing' in cases:
 functions = []
 for name in names:
     body = function(name)
-    if name.startswith('esb_send_remote_command_'):
+    if name.startswith('esb_send_remote_command_') or name == 'esb_publish_remote_command_locked':
         body = re.sub(
             r'(^[ \t]*tracker_slots\[[^\]\n]+\]\.(?:pending_sens_data(?:\[[^\]]+\])?|pending_sens_auto_axis|pending_sens_auto_revolutions|pending_cmd_arg|tracker_remote_command)\s*=[^\n;]*;)',
             r'\1 preempt();', body, flags=re.M)

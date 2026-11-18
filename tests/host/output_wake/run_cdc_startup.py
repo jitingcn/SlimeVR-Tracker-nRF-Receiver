@@ -14,11 +14,13 @@ import tempfile
 
 HERE = Path(__file__).resolve().parent
 parser = argparse.ArgumentParser()
+timeout_cases = ('timeout-rx', 'timeout-batch-rx', 'timeout-same-single', 'timeout-same-batch',
+                 'timeout-replace', 'timeout-after-commit', 'timeout-forget')
 parser.add_argument('--source-root', type=Path, default=HERE.parents[2])
 parser.add_argument('--case', choices=(
     'raw-only', 'single-console', 'batch-console', 'raw-reopen', 'early-vbus',
     'device-not-ready', 'callback-failure', 'disabled', 'dedicated-hid',
-))
+) + timeout_cases)
 args = parser.parse_args()
 src = args.source_root.resolve() / 'src'
 
@@ -43,6 +45,7 @@ def declaration(source, name):
 usb = (src / 'usb.c').read_text()
 console = (src / 'console.c').read_text()
 collect = (src / 'data_collect.c').read_text()
+collect_hid = (src / 'data_collect_hid.c').read_text()
 command = (src / 'rcv_cmd.c').read_text()
 hid = (src / 'hid.c').read_text()
 esb = (src / 'connection/esb.c').read_text()
@@ -67,14 +70,20 @@ else:
     raw_state = '\n'.join(declaration(esb, name) for name in
                           ('last_raw_seq', 'last_raw_valid', 'tracker_remote_command'))
 
-production = '#if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)\n'
+production = '#if defined(TEST_RAW_HID)\n'
+production += collect_hid[collect_hid.index('LOG_MODULE_REGISTER'):]
+production += '\n#elif defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)\n'
 production += collect[collect.index('LOG_MODULE_REGISTER'):]
+production += '\n#endif\n#if defined(TEST_RAW_HID) || (defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID))\n'
 production += '\n' + '\n'.join(function(command, name) for name in (
     'rcv_cmd_collect_start', 'rcv_cmd_collect_stop', 'rcv_cmd_collect_batch_start',
-    'rcv_cmd_collect_batch_stop', 'fill_ack', 'rcv_cmd_process_hid'))
+    'rcv_cmd_collect_batch_stop'))
+production += '\n#ifndef TEST_RAW_HID\n'
+production += function(command, 'fill_ack') + function(command, 'rcv_cmd_process_hid')
 production += '\n' + hid[hid.index('static void handle_output_report('):hid.index('static void int_in_ready_cb(')]
 production += '\n' + function(hid, 'set_report_cb')
 production += '\n' + console_declarations + '\n' + console_functions
+production += '\n#endif\n'
 production += '''\nstatic void receive_raw(uint8_t tracker, uint16_t sequence)
 {
     struct raw_payload rx_payload = {
@@ -87,16 +96,19 @@ production += '''\nstatic void receive_raw(uint8_t tracker, uint16_t sequence)
 }
 #endif
 '''
+production += '\n#ifndef TEST_RAW_HID\n'
 production += '\n'.join(function(usb, name) for name in (
     'receiver_usb_set_configured', 'usbd_add_string_descriptors', 'usbd_setup',
     'usb_vbus_present', 'usb_enable_device', 'usb_close_serial', 'status_cb',
     'usb_init_thread'))
+production += '\n#endif\n'
 
 cases = {
     'cdc': ('raw-only', 'single-console', 'batch-console', 'raw-reopen',
-            'early-vbus', 'device-not-ready', 'callback-failure'),
+            'early-vbus', 'device-not-ready', 'callback-failure') + timeout_cases,
     'disabled': ('disabled',),
     'hid': ('dedicated-hid',),
+    'raw-hid': timeout_cases,
 }
 with tempfile.TemporaryDirectory(prefix='receiver-cdc-startup-') as directory:
     temp = Path(directory)
@@ -111,6 +123,7 @@ with tempfile.TemporaryDirectory(prefix='receiver-cdc-startup-') as directory:
             'cdc': ['-DCONFIG_DATA_COLLECT'],
             'disabled': [],
             'hid': ['-DCONFIG_DATA_COLLECT', '-DCONFIG_DATA_COLLECT_HID'],
+            'raw-hid': ['-DCONFIG_DATA_COLLECT', '-DCONFIG_DATA_COLLECT_HID', '-DTEST_RAW_HID'],
         }[variant]
         binary = temp / variant
         subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [

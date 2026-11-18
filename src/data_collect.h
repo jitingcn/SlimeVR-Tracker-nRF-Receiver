@@ -33,19 +33,19 @@
  * Opening the console does not reinitialize either backend. */
 int data_collect_init(void);
 
-/* Write a raw data packet.
- * Called from ESB event handler when a raw packet arrives.
+/* Write an accepted raw data packet from the ESB EVENT ISR.
  * data: raw ESB payload, len: payload length, rssi: received signal strength */
 void data_collect_write(const uint8_t *data, uint8_t len, uint8_t rssi);
 
-/* Runtime control: start/stop data collection for a specific tracker */
+/* Thread control: start replaces any session; stop affects only single mode.
+ * The local transition publishes the corresponding remote flags atomically. */
 void data_collect_start(uint8_t tracker_id);
 void data_collect_stop(void);
 void data_collect_forget_tracker(uint8_t tracker_id);
 bool data_collect_is_active(void);
 uint8_t data_collect_get_target_id(void);
 
-/* Runtime control for simultaneous raw collection from selected trackers. */
+/* Thread control for simultaneous collection. Stop affects only batch mode. */
 void data_collect_batch_start(uint32_t mask, uint16_t rate_hz);
 void data_collect_batch_stop(void);
 bool data_collect_batch_is_active(void);

@@ -26,6 +26,7 @@
 #include "globals.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/irq.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/byteorder.h>
@@ -49,15 +50,19 @@ static volatile uint32_t dc_buf_tail;
 static uint32_t dc_frames_sent;
 static uint32_t dc_frames_dropped;
 
-/* Runtime state */
-static bool dc_active;
-static uint8_t dc_target_tracker_id;
-static bool dc_batch_active;
-static uint32_t dc_batch_mask;
+#include "data_collect_session.h"
 
-/* Timeout: auto-stop if no raw data received for this long */
-#define DC_TIMEOUT_MS 60000
-static int64_t dc_last_rx_time;
+/* CDC drains already queued bytes on stop/replacement; only HID resets its queue. */
+static void dc_reset_output_locked(void)
+{
+}
+
+static void dc_reset_stats_locked(int64_t now)
+{
+	ARG_UNUSED(now);
+	dc_frames_sent = 0;
+	dc_frames_dropped = 0;
+}
 
 static inline uint32_t buf_used(void)
 {
@@ -188,44 +193,11 @@ static void dc_tx_kick_work_handler(struct k_work *work)
 static void dc_timer_handler(struct k_timer *timer);
 static K_TIMER_DEFINE(dc_timer, dc_timer_handler, NULL);
 
-/* Timeout work: stop collection and notify tracker (runs in workqueue context) */
-static void dc_timeout_work_handler(struct k_work *work);
-static K_WORK_DEFINE(dc_timeout_work, dc_timeout_work_handler);
-
-static void dc_timeout_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	if (!dc_active && !dc_batch_active) {
-		return;
-	}
-	if (dc_batch_active) {
-		uint32_t mask = dc_batch_mask;
-		data_collect_batch_stop();
-		for (uint8_t tid = 0; tid < MAX_TRACKERS; tid++) {
-			if (mask & BIT(tid)) {
-				esb_send_remote_command(tid, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF);
-			}
-		}
-		LOG_WRN("Batch data collection timed out (no data for %d s), sent OFF to trackers 0x%08x",
-			DC_TIMEOUT_MS / 1000, (unsigned int)mask);
-		return;
-	}
-	uint8_t tid = dc_target_tracker_id;
-	data_collect_stop();
-	esb_send_remote_command(tid, ESB_PONG_FLAG_DATA_COLLECT_OFF);
-	LOG_WRN("Data collection timed out (no data for %d s), sent OFF to tracker %u",
-		DC_TIMEOUT_MS / 1000, tid);
-}
-
 static void dc_timer_handler(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
 
-	/* Check for data collection timeout */
-	if ((dc_active || dc_batch_active) && dc_last_rx_time > 0 &&
-	    (k_uptime_get() - dc_last_rx_time) > DC_TIMEOUT_MS) {
-		k_work_submit(&dc_timeout_work);
-	}
+	dc_timeout_check();
 }
 
 int data_collect_init(void)
@@ -251,45 +223,6 @@ int data_collect_init(void)
 
 	LOG_INF("Data collection subsystem initialized");
 	return 0;
-}
-
-void data_collect_start(uint8_t tracker_id)
-{
-	dc_batch_active = false;
-	dc_batch_mask = 0;
-	dc_target_tracker_id = tracker_id;
-	dc_active = true;
-	dc_frames_sent = 0;
-	dc_frames_dropped = 0;
-	dc_last_rx_time = k_uptime_get();
-	LOG_INF("Data collection STARTED for tracker %u", tracker_id);
-}
-
-void data_collect_stop(void)
-{
-	dc_active = false;
-	LOG_INF("Data collection STOPPED (sent: %u, dropped: %u)",
-		dc_frames_sent, dc_frames_dropped);
-}
-
-void data_collect_batch_start(uint32_t mask, uint16_t rate_hz)
-{
-	dc_active = false;
-	dc_batch_mask = mask;
-	dc_batch_active = mask != 0;
-	dc_frames_sent = 0;
-	dc_frames_dropped = 0;
-	dc_last_rx_time = k_uptime_get();
-	LOG_INF("Batch data collection STARTED mask=0x%08x rate=%u Hz",
-		(unsigned int)mask, rate_hz);
-}
-
-void data_collect_batch_stop(void)
-{
-	dc_batch_active = false;
-	dc_batch_mask = 0;
-	LOG_INF("Batch data collection STOPPED (sent: %u, dropped: %u)",
-		dc_frames_sent, dc_frames_dropped);
 }
 
 void data_collect_forget_tracker(uint8_t tracker_id)
@@ -338,7 +271,7 @@ void data_collect_write(const uint8_t *data, uint8_t len, uint8_t rssi)
 {
 	if (!cdc_ready) return;
 
-	dc_last_rx_time = k_uptime_get();
+	dc_note_rx();
 
 	/* Frame: [0xAA][0x55][length][payload...][rssi][rx_ticks(4)][CRC-8]
 	 * Total overhead: 2 sync + 1 len + 1 rssi + 4 ticks + 1 crc = 9 bytes */

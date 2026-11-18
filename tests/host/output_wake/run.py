@@ -304,6 +304,8 @@ cdc = common + r'''
 #define UART_LINE_CTRL_DTR 1
 #define ESB_PONG_FLAG_DATA_COLLECT_OFF 1
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF 2
+#define ESB_PONG_FLAG_DATA_COLLECT_ON 3
+#define ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON 4
 static void (*uart_callback)(const struct device *, void *);
 static bool dtr=true, tx_enabled, uart_ready=true;
 static unsigned space=65536;
@@ -325,7 +327,12 @@ static int uart_fifo_fill(const struct device *d, const uint8_t *p, int n) {
 }
 static void sys_put_be32(uint32_t v, uint8_t *p) { p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p[3]=v; }
 static unsigned off_commands;
-static void esb_send_remote_command(uint8_t id, int flag) { off_commands++; }
+static void esb_send_remote_command(uint8_t id, int flag) {
+    if (flag==ESB_PONG_FLAG_DATA_COLLECT_OFF || flag==ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF) off_commands++;
+}
+static void esb_publish_remote_command_locked(uint8_t id, uint8_t flag, uint8_t arg) {
+    esb_send_remote_command(id, flag);
+}
 void data_collect_stop(void);
 void data_collect_batch_stop(void);
 ''' + cdc_crc + cdc_body + r'''
@@ -362,7 +369,8 @@ int main(int argc, char **argv) {
         data_collect_start(3); publish(); space=0; advance(1); data_collect_stop();
         data_collect_batch_start(BIT(3),400); publish(); data_collect_batch_stop();
         space=65536; drain(3); assert(output_len==2*(sizeof(payload)+9) && buf_used()==0); verify_frame(0); verify_frame(sizeof(payload)+9);
-        data_collect_start(3); advance(61000); assert(!data_collect_is_active() && off_commands==1);
+        unsigned before=off_commands;
+        data_collect_start(3); advance(61000); assert(!data_collect_is_active() && off_commands==before+1);
     } else if (!strcmp(argv[1],"cdc-wrap")) {
         dc_buf_head=DATA_COLLECT_BUF_SIZE-4; dc_buf_tail=dc_buf_head;
         publish(); drain(3); assert(buf_used()==0 && output_len==sizeof(payload)+9); verify_frame(0);

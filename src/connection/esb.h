@@ -216,6 +216,10 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
 /* Clear only a pending OTA abort command; preserves unrelated commands. */
 void esb_clear_remote_ota_abort(uint8_t tracker_id);
 void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8_t arg);
+/* Publish a validated target/flag with IRQs already locked by the caller.
+ * Stores only: no blocking or logging. Used to commit raw session flags with
+ * the matching local session transition. */
+void esb_publish_remote_command_locked(uint8_t tracker_id, uint8_t command_flag, uint8_t arg);
 /* Active-scan then queue. Returns bitmask of targeted tracker ids. Blocks ~1s. */
 uint32_t esb_send_remote_command_all(uint8_t command_flag);
 /* Targeted test commands: publish TPS, then queue the flag. Return the

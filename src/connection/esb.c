@@ -3918,6 +3918,19 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 	esb_send_remote_command_arg(tracker_id, command_flag, 0);
 }
 
+void esb_publish_remote_command_locked(uint8_t tracker_id, uint8_t command_flag, uint8_t arg)
+{
+	if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON ||
+	    command_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
+		tracker_slots[tracker_id].last_raw_valid = false;
+	}
+	if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON) {
+		raw_arq_reset();
+	}
+	tracker_slots[tracker_id].pending_cmd_arg = arg;
+	tracker_slots[tracker_id].tracker_remote_command = command_flag;
+}
+
 void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8_t arg)
 {
 	if (command_flag == ESB_PONG_FLAG_SET_CHANNEL || command_flag == ESB_PONG_FLAG_CLEAR_CHANNEL ||
@@ -3928,15 +3941,7 @@ void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8
 	}
 	if (tracker_id < MAX_TRACKERS) {
 		unsigned int key = irq_lock();
-		if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON ||
-		    command_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
-			tracker_slots[tracker_id].last_raw_valid = false;
-		}
-		if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON) {
-			raw_arq_reset();
-		}
-		tracker_slots[tracker_id].pending_cmd_arg = arg;
-		tracker_slots[tracker_id].tracker_remote_command = command_flag;
+		esb_publish_remote_command_locked(tracker_id, command_flag, arg);
 		irq_unlock(key);
 		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", esb_pong_flag_name(command_flag),
 			command_flag, tracker_id);

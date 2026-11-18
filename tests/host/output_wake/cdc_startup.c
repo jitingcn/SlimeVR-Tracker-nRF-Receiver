@@ -66,15 +66,67 @@ static int k_work_schedule(struct k_work *work, int delay)
 }
 static int k_work_submit(struct k_work *work) { return k_work_schedule(work, 0); }
 static void k_timer_start(struct k_timer *timer, int delay, int period) { timer->active = true; }
-static int64_t k_uptime_get(void) { return 1234; }
+static int64_t uptime_ms = 1234;
+static int64_t k_uptime_get(void) { return uptime_ms; }
 static int64_t k_uptime_ticks(void) { return 0x01020304; }
-static unsigned int irq_lock(void) { return 0; }
-static void irq_unlock(unsigned int key) {}
+static unsigned int irq_depth;
+static void (*after_irq_unlock)(void);
+static unsigned int irq_lock(void) { return irq_depth++; }
+static void irq_unlock(unsigned int key)
+{
+    assert(irq_depth == key + 1);
+    irq_depth = key;
+    if (!irq_depth && after_irq_unlock) {
+        void (*run)(void) = after_irq_unlock;
+        after_irq_unlock = NULL;
+        run();
+    }
+}
 
 typedef int atomic_t;
 static int atomic_get(const atomic_t *value) { return *value; }
 static int atomic_set(atomic_t *value, int next) { int old = *value; *value = next; return old; }
 static int atomic_inc(atomic_t *value) { return (*value)++; }
+
+#ifdef TEST_RAW_HID
+#define ATOMIC_DEFINE(name, bits) atomic_t name[1]
+typedef int atomic_val_t;
+static void atomic_clear_bit(atomic_t *value, unsigned bit) { *value &= ~BIT(bit); }
+static bool atomic_test_and_set_bit(atomic_t *value, unsigned bit)
+{
+    return (atomic_set(value, *value | BIT(bit)) & BIT(bit)) != 0;
+}
+#define HID_USAGE(...) 0
+#define HID_COLLECTION(...) 0
+#define HID_REPORT_SIZE(...) 0
+#define HID_REPORT_COUNT(...) 0
+#define HID_INPUT(...) 0
+#define HID_END_COLLECTION 0
+#define HID_REPORT_TYPE_INPUT 1
+#define SYS_INIT(...)
+static const struct device hid_dev_1 = {4};
+struct hid_device_ops {
+    void (*iface_ready)(const struct device *, bool);
+    int (*get_report)(const struct device *, uint8_t, uint8_t, uint16_t, uint8_t *);
+    void (*input_report_done)(const struct device *, const uint8_t *);
+};
+static int hid_device_register(const struct device *dev, const uint8_t *desc,
+                               size_t size, const struct hid_device_ops *ops)
+{
+    assert(!irq_depth && dev == &hid_dev_1);
+    return 0;
+}
+static int hid_device_submit_report(const struct device *dev, size_t size, const uint8_t *data)
+{
+    assert(!irq_depth && dev == &hid_dev_1);
+    return 0;
+}
+static void k_work_init(struct k_work *work, void (*handler)(struct k_work *))
+{
+    work->handler = handler;
+}
+#endif
+
 struct k_spinlock { bool held; };
 typedef int k_spinlock_key_t;
 static k_spinlock_key_t k_spin_lock(struct k_spinlock *lock)
@@ -196,7 +248,7 @@ static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t len)
 }
 
 #include "protocol.inc"
-#if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)
+#if defined(TEST_RAW_HID) || (defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID))
 #include "data_collect.h"
 #include "raw_state.inc"
 static uint8_t stored_trackers = 4;
@@ -208,11 +260,19 @@ static void esb_send_remote_command_arg(uint8_t tracker, uint8_t flag, uint8_t a
 {
     assert(tracker < MAX_TRACKERS && radio_count < 32);
     radio_commands[radio_count++] = (struct command_record){tracker, flag, arg};
+    bool start = flag == ESB_PONG_FLAG_DATA_COLLECT_ON || flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON;
 #ifdef FIXTURE_TRACKER_SLOTS
+    if (start) tracker_slots[tracker].last_raw_valid = false;
     tracker_slots[tracker].tracker_remote_command = flag;
 #else
+    if (start) last_raw_valid[tracker] = false;
     tracker_remote_command[tracker] = flag;
 #endif
+}
+static void esb_publish_remote_command_locked(uint8_t tracker, uint8_t flag, uint8_t arg)
+{
+    assert(irq_depth);
+    esb_send_remote_command_arg(tracker, flag, arg);
 }
 static void esb_send_remote_command(uint8_t tracker, uint8_t flag)
 {
@@ -334,6 +394,169 @@ static void log_backend_disable(const struct log_backend *value) {}
 
 #include "production.inc"
 
+#if defined(TEST_RAW_HID) || (defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID))
+static void tick(struct k_timer *timer, int64_t elapsed)
+{
+    assert(timer->active && !irq_depth);
+    uptime_ms += elapsed;
+    timer->handler(timer);
+}
+
+static void run_timeout_work(void)
+{
+    assert(dc_timeout_work.queued && !irq_depth);
+    dc_timeout_work.queued = false;
+    dc_timeout_work.handler(&dc_timeout_work);
+}
+
+static void expect_radio(size_t index, uint8_t tracker, uint8_t flag, uint8_t arg)
+{
+    assert(index < radio_count);
+    assert(radio_commands[index].tracker == tracker);
+    assert(radio_commands[index].flag == flag);
+    assert(radio_commands[index].arg == arg);
+}
+
+static void expire(struct k_timer *timer)
+{
+    tick(timer, DC_TIMEOUT_MS + 1);
+    run_timeout_work();
+    assert(!data_collect_is_active() && !data_collect_batch_is_active());
+    tick(timer, DC_TIMEOUT_MS + 1);
+    assert(!dc_timeout_work.queued);
+}
+
+static void start_same_batch(void)
+{
+    assert(rcv_cmd_collect_batch_start(120) == RCV_HID_ST_OK);
+}
+
+static void test_timeout(const char *name, struct k_timer *timer)
+{
+    uptime_ms = 0; /* A valid session may start at boot before the first tick. */
+    bool batch_rx = !strcmp(name, "timeout-batch-rx");
+    if (batch_rx || !strcmp(name, "timeout-rx")) {
+        if (batch_rx) start_same_batch();
+        else assert(rcv_cmd_collect_start(2) == RCV_HID_ST_OK);
+        tick(timer, DC_TIMEOUT_MS);
+        assert(!dc_timeout_work.queued);
+        tick(timer, 1);
+        assert(dc_timeout_work.queued);
+#ifndef TEST_RAW_HID
+        /* Make the next packet drop at the USB buffer, not at ESB admission. */
+        dc_buf_tail = 0;
+        dc_buf_head = DATA_COLLECT_BUF_SIZE - 1;
+#endif
+        receive_raw(2, 10); /* Dedicated HID is still not ready. */
+        assert(dc_frames_dropped == 1);
+        run_timeout_work();
+        assert(batch_rx ? data_collect_batch_is_target(2) && data_collect_batch_is_target(3)
+                        : data_collect_is_target(2));
+        assert(radio_count == (batch_rx ? 2 : 1));
+        tick(timer, DC_TIMEOUT_MS);
+        assert(!dc_timeout_work.queued);
+        tick(timer, 1);
+        receive_raw(2, 10); /* Duplicate must not refresh the deadline. */
+        receive_raw(1, 11); /* Neither may a non-target packet. */
+        run_timeout_work();
+        tick(timer, DC_TIMEOUT_MS + 1);
+        assert(!dc_timeout_work.queued);
+        assert(!data_collect_is_active() && !data_collect_batch_is_active());
+        if (batch_rx) {
+            assert(radio_count == 4);
+            expect_radio(2, 2, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, 0);
+            expect_radio(3, 3, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, 0);
+        } else {
+            assert(radio_count == 2);
+            expect_radio(1, 2, ESB_PONG_FLAG_DATA_COLLECT_OFF, 0);
+        }
+    } else if (!strcmp(name, "timeout-same-single")) {
+        assert(rcv_cmd_collect_start(2) == RCV_HID_ST_OK);
+        tick(timer, DC_TIMEOUT_MS + 1);
+        assert(rcv_cmd_collect_stop() == RCV_HID_ST_OK);
+        assert(rcv_cmd_collect_start(2) == RCV_HID_ST_OK);
+        /* Force even the replacement's deadline to pass before worker runs.
+         * Without a new timer observation, the old claim is still stale. */
+        uptime_ms += DC_TIMEOUT_MS + 1;
+        run_timeout_work();
+        assert(data_collect_is_target(2) && radio_count == 3);
+        expect_radio(1, 2, ESB_PONG_FLAG_DATA_COLLECT_OFF, 0);
+        expect_radio(2, 2, ESB_PONG_FLAG_DATA_COLLECT_ON, 0);
+        expire(timer);
+        assert(radio_count == 4);
+        expect_radio(3, 2, ESB_PONG_FLAG_DATA_COLLECT_OFF, 0);
+    } else if (!strcmp(name, "timeout-same-batch")) {
+        start_same_batch();
+        tick(timer, DC_TIMEOUT_MS + 1);
+        assert(rcv_cmd_collect_batch_stop() == RCV_HID_ST_OK);
+        start_same_batch();
+        run_timeout_work();
+        assert(data_collect_batch_is_target(2) && data_collect_batch_is_target(3));
+        assert(radio_count == 6);
+        expect_radio(2, 2, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, 0);
+        expect_radio(3, 3, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, 0);
+        expect_radio(4, 2, ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, 120);
+        expect_radio(5, 3, ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, 120);
+        expire(timer);
+        assert(radio_count == 8);
+        expect_radio(6, 2, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, 0);
+        expect_radio(7, 3, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, 0);
+    } else if (!strcmp(name, "timeout-replace")) {
+        assert(rcv_cmd_collect_start(2) == RCV_HID_ST_OK);
+        tick(timer, DC_TIMEOUT_MS + 1);
+        assert(rcv_cmd_collect_start(3) == RCV_HID_ST_OK);
+        run_timeout_work();
+        assert(data_collect_is_target(3) && radio_count == 3);
+        expect_radio(1, 2, ESB_PONG_FLAG_DATA_COLLECT_OFF, 0);
+        expect_radio(2, 3, ESB_PONG_FLAG_DATA_COLLECT_ON, 0);
+        tick(timer, DC_TIMEOUT_MS + 1);
+        start_same_batch();
+        run_timeout_work();
+        assert(data_collect_batch_is_target(2) && data_collect_batch_is_target(3));
+        assert(radio_count == 6);
+        expect_radio(3, 3, ESB_PONG_FLAG_DATA_COLLECT_OFF, 0);
+        expect_radio(4, 2, ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, 120);
+        expect_radio(5, 3, ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, 120);
+        tick(timer, DC_TIMEOUT_MS + 1);
+        assert(rcv_cmd_collect_start(3) == RCV_HID_ST_OK);
+        run_timeout_work();
+        assert(data_collect_is_target(3) && radio_count == 9);
+        expect_radio(6, 2, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, 0);
+        expect_radio(7, 3, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, 0);
+        expect_radio(8, 3, ESB_PONG_FLAG_DATA_COLLECT_ON, 0);
+        expire(timer);
+        assert(radio_count == 10);
+        expect_radio(9, 3, ESB_PONG_FLAG_DATA_COLLECT_OFF, 0);
+    } else if (!strcmp(name, "timeout-after-commit")) {
+        start_same_batch();
+        tick(timer, DC_TIMEOUT_MS + 1);
+        /* A higher-priority command runs at the first point the timeout
+         * worker can be preempted. No old OFF may follow its new ON. */
+        after_irq_unlock = start_same_batch;
+        run_timeout_work();
+        assert(!after_irq_unlock && radio_count == 6);
+        assert(data_collect_batch_is_target(2) && data_collect_batch_is_target(3));
+        expect_radio(2, 2, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, 0);
+        expect_radio(3, 3, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, 0);
+        expect_radio(4, 2, ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, 120);
+        expect_radio(5, 3, ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, 120);
+    } else {
+        assert(!strcmp(name, "timeout-forget"));
+        start_same_batch();
+        tick(timer, DC_TIMEOUT_MS + 1);
+        data_collect_forget_tracker(2);
+        run_timeout_work();
+        assert(!data_collect_batch_is_active() && radio_count == 3);
+        expect_radio(2, 3, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, 0);
+        assert(rcv_cmd_collect_start(3) == RCV_HID_ST_OK);
+        tick(timer, DC_TIMEOUT_MS + 1);
+        data_collect_forget_tracker(3);
+        run_timeout_work();
+        assert(!data_collect_is_active() && radio_count == 4);
+    }
+}
+#endif
+
 #if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)
 static void console_thread(void) {}
 static void run_work(void)
@@ -398,7 +621,17 @@ static void sample(uint8_t tracker, uint16_t seq)
 int main(int argc, char **argv)
 {
     assert(argc == 2);
-#if defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)
+#ifdef TEST_RAW_HID
+    assert(data_collect_init() == 0);
+    test_timeout(argv[1], &dc_timeout_timer);
+    printf("raw HID %s\n", argv[1]);
+#elif defined(CONFIG_DATA_COLLECT) && !defined(CONFIG_DATA_COLLECT_HID)
+    if (!strncmp(argv[1], "timeout-", sizeof("timeout-") - 1)) {
+        assert(data_collect_init() == 0);
+        test_timeout(argv[1], &dc_timer);
+        printf("raw CDC %s\n", argv[1]);
+        return 0;
+    }
     const uint8_t frame2_11[] = {0xaa,0x55,0x0b,0x10,0x02,0x00,0x0b,0x55,0x66,0xd7,0x01,0x02,0x03,0x04,0x3f};
     const uint8_t frame2_12[] = {0xaa,0x55,0x0b,0x10,0x02,0x00,0x0c,0x55,0x66,0xd7,0x01,0x02,0x03,0x04,0x46};
     const uint8_t two_single[] = {
