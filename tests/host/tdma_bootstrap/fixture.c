@@ -1229,31 +1229,51 @@ static void relay_admission_requires_a_representable_exit(void)
 static void legacy_join_waits_for_relay_exit(void)
 {
 	for (unsigned cap = 2; cap <= 3; cap++) {
-		two_member_layout(2, true);
+		reset_fixture(3, 0);
+		assert(tracker_store_restore() == 0);
+		relay_coord_init(&relay_coord);
 		relay_settings = (struct relay_runtime_settings){cap, 1, 16, 100, 120, 0};
 		relay_settings_generation++;
+		relay_coord_note_caps(&relay_coord, 0, RELAY_INFO_CAPS);
+		relay_coord_note_caps(&relay_coord, 2, RELAY_INFO_CAPS);
+		assert(ping(0, true) && ping(2, true));
+		service();
+		now_ms = 101;
+		service();
+		const uint32_t v5_mask = BIT(0) | BIT(2);
+		assert(tdma_active_mask == v5_mask && !tdma_staged.valid);
 		relay_coord.enabled = true;
 		relay_coord.auto_engaged = true;
+		now_ms += TDMA_RECONFIG_MIN_MS;
 		service();
 		assert(tdma_staged.valid && tdma_staged.p.profile);
 		now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1;
 		service();
-		assert(relay_profile && tdma_active_mask == 3);
+		assert(relay_profile && tdma_active_mask == v5_mask);
 
-		stored_trackers = 3;
 		now_ms += TDMA_RECONFIG_MIN_MS;
 		assert(ping(0, true) && ping(1, true) && ping(2, true));
 		service();
-		assert(tdma_staged.valid && !tdma_staged.p.profile && tdma_staged.p.new_mask == 3);
-		assert(relay_profile && relay_control_eligible() && tdma_active_mask == 3);
-		assert(slot(tdma_advertised_config(2, tdma_staged.activation_ticks - 1)) == 0xff);
-		now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1;
-		assert(ping(2, true));
+		now_ms += TDMA_MEMBERSHIP_COHORT_MS;
+		service();
+		assert(tdma_staged.valid && !tdma_staged.p.profile && tdma_staged.p.new_mask == 7);
+		assert(relay_profile && relay_control_eligible() && tdma_active_mask == v5_mask);
+		uint32_t activation = tdma_staged.activation_ticks;
+		assert(slot(tdma_advertised_config(1, activation - 1)) == 0xff);
+		assert(slot(tdma_advertised_config(2, activation - 1)) == 1);
+		uint32_t v5_config = tdma_advertised_config(2, activation);
+		uint32_t legacy_config = tdma_advertised_config(1, activation);
+		assert(slot(v5_config) == 2 && slot(legacy_config) == 1);
+		assert(total(v5_config) == 3 && total(legacy_config) == 3);
+		assert(epoch_of(v5_config) == epoch_of(legacy_config));
+		now_ms += k_ticks_to_ms_ceil32(activation - ticks_at(now_ms));
 		service();
 		assert(!tdma_staged.valid && !relay_profile && !relay_control_eligible());
-		assert(tdma_active_mask == 7 && slot(tracker_slots[2].tdma_config_packed) == 2);
+		assert(tdma_active_mask == 7 && tdma_config_epoch == epoch_of(v5_config));
+		assert(tracker_slots[1].tdma_config_packed == legacy_config);
+		assert(tracker_slots[2].tdma_config_packed == v5_config);
 	}
-	puts("PASS legacy join: relay roster gets its staged exit before native admits the legacy tracker");
+	puts("PASS legacy join: lower ID remains unassigned until the announced native roster activates");
 }
 
 /* Last modeled repair before the query-triggered native activation. */

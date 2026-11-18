@@ -1200,14 +1200,6 @@ static void tdma_recalculate(bool forced)
 			new_mask = relay_mask;
 		}
 		uint8_t profile = relay_requested ? RELAY_PROFILE_120HZ : 0;
-		uint32_t continuing = old_mask & desired_mask;
-		if (relay_profile && !profile && continuing && (new_mask & ~old_mask)
-		    && !tdma_staging_supported_locked(old_mask, new_mask)
-		    && relay_coord_capable(&relay_coord, (uint16_t)old_mask)) {
-			/* A legacy joiner cannot follow a staged publication. Return the
-			 * remaining applied members to native before publishing the join. */
-			new_mask = continuing;
-		}
 #endif
 		uint8_t active_count = 0;
 		for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
@@ -1325,7 +1317,11 @@ static void tdma_recalculate(bool forced)
 		tdma_last_reconfig_time = now;
 		tdma_last_reconfig_valid = true;
 #if defined(CONFIG_RELAY)
-		if ((!forced || relay_profile || profile) && active_count && tdma_staging_supported_locked(old_mask, new_mask)) {
+		/* Stage the final native tuple for the current relay roster. Legacy
+		 * joiners see their old unassigned tuple until the same activation. */
+		uint32_t announce_mask = relay_profile && !profile && (old_mask & new_mask) ? old_mask : new_mask;
+		if ((!forced || relay_profile || profile) && active_count
+		    && tdma_staging_supported_locked(old_mask, announce_mask)) {
 			/* The applied layout carries the announcements. */
 			uint32_t lead = relay_profile ? relay_stage_lead_ticks(&relay_applied_settings, tdma_dynamic_active_count)
 				: k_ms_to_ticks_ceil32(RELAY_LAYOUT_ACTIVATION_MS);
