@@ -1678,6 +1678,21 @@ static void applied_relay_pop(bool force)
 	assert(relay_layout_generation != generation && slot(tracker_slots[2].tdma_config_packed) == 0);
 	printf("PASS %s applied relay pop: control eligible through %u ms lead and activation\n",
 	       force ? "force" : "auto", k_ticks_to_ms_ceil32(due - start));
+
+	assert(esb_add_pair(987654, false) == 3);
+	relay_coord_note_caps(&relay_coord, 3, RELAY_INFO_CAPS);
+	assert(ping(3, true));
+	now_ms += TDMA_RECONFIG_MIN_MS;
+	service();
+	assert(tdma_staged.valid && tdma_staged.p.profile && tdma_staged.p.new_mask == before);
+	assert(tdma_staged.readmit_mask == BIT(3) && tdma_active_mask == survivors && relay_control_eligible());
+	uint32_t readmit = tdma_staged.activation_ticks;
+	assert(slot(tdma_advertised_config(3, readmit - 1U)) == 0xff);
+	assert(slot(tdma_advertised_config(3, readmit)) == 1);
+	service_at_tick(readmit);
+	assert(!tdma_staged.valid && !tdma_staged.revoked_mask && relay_profile && tdma_active_mask == before);
+	assert(relay_control_eligible() && slot(tracker_slots[3].tdma_config_packed) == 1);
+	printf("PASS %s private readmission: replacement assigned at fresh activation\n", force ? "force" : "auto");
 }
 
 static void relay_exit_pairing_changes(void)
