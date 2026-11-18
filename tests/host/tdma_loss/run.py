@@ -192,6 +192,7 @@ static void restart_ping(uint8_t tracker_id) {
         membership_bodies(source),
         diagnostic_function(source, 'account_ping_clock'),
         function(source, 'esb_receive_ping'),
+        function(source, 'esb_forward_tracker_packet', optional=True),
         function(source, 'esb_receive_composite'),
         function(source, 'tdma_recalculate'),
         admission,

@@ -26,7 +26,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-void hid_write_packet_n(const uint8_t *data, uint8_t rssi);
+/* True only when the report is admitted to the HID FIFO. */
+bool hid_write_packet_n(const uint8_t *data, uint8_t rssi);
 /* Nonzero subscription generation; false means the FIFO did not accept it. */
 bool hid_write_tracker_event(const uint8_t record[16], uint32_t generation);
 uint32_t hid_get_current_tps(void);

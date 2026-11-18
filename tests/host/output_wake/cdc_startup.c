@@ -252,10 +252,12 @@ static int channel_completion_lock;
 static const struct device *hdev = &hid_device;
 static uint8_t last_ack[16];
 static unsigned ack_count;
-static void hid_write_packet_n(const uint8_t *packet, int rssi)
+static bool hid_write_packet_n(const uint8_t *packet, uint8_t rssi)
 {
+    (void)rssi;
     memcpy(last_ack, packet, sizeof(last_ack));
     ack_count++;
+    return true;
 }
 static uint32_t tracker_events_usb_generation(void) { return 7; }
 #define RECEIVER_OTA_ID 0xff

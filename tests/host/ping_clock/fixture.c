@@ -6,10 +6,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "hid.h"
 #include "connection/tracker_event_protocol.h"
 
 #define MAX_TRACKERS 16
 #define BIT(n) (1u << (n))
+#define ATOMIC_INIT(x) (x)
+#define BUILD_ASSERT(c, m) _Static_assert(c, m)
 #define ARG_UNUSED(x) ((void)(x))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -95,11 +98,11 @@ static bool incoming_ready;
 static uint32_t now_ticks;
 static unsigned shadow_count, shadow_ping_count, shadow_data_count, ota_count, confirmations;
 static unsigned tick_reads, radio_tick_reads, event_tick_reads, pong_tick_reads;
-static unsigned sequence_calls, slot_count, pose_count, raw_count, event_count, private_count;
+static unsigned sequence_calls, slot_count, raw_count, event_count, private_count;
 enum tick_context { TICK_RADIO, TICK_EVENT };
 static enum tick_context tick_context;
 static uint32_t slot_ticks[16];
-static uint8_t poses[16][16], raw_packets[16][64], raw_lengths[16], event_packets[16][17];
+static uint8_t raw_packets[16][64], raw_lengths[16], event_packets[16][17];
 static uint8_t ota_packets[16][64], ota_lengths[16];
 static uint8_t sequence_last[MAX_TRACKERS];
 static bool sequence_seen[MAX_TRACKERS], raw_target;
@@ -218,12 +221,6 @@ static int check_packet_sequence(uint8_t id, uint8_t sequence)
     sequence_last[id] = sequence;
     return 0;
 }
-static void hid_write_packet_n(const uint8_t *packet, int8_t rssi)
-{
-    (void)rssi;
-    assert(pose_count < 16);
-    memcpy(poses[pose_count++], packet, 16);
-}
 static void data_collect_write(const uint8_t *packet, uint8_t length, int8_t rssi)
 {
     (void)rssi;
@@ -252,6 +249,17 @@ static int k_msgq_get(void *queue, void *item, int timeout)
     return -ENOMSG;
 }
 /* ACTUAL AUTO CHANNEL */
+static bool atomic_cas(atomic_t *p, atomic_val_t old, atomic_val_t next)
+{
+    if (*p != old) return false;
+    *p = next;
+    return true;
+}
+struct tracker_report { uint8_t data[16]; };
+#define REPORT_PERIOD 1
+static int report_send;
+static void k_work_schedule(int *work, int delay) { (void)work; (void)delay; }
+/* ACTUAL HID FIFO */
 
 
 /* ACTUAL PRODUCTION FUNCTIONS */
@@ -738,8 +746,6 @@ static void test_drain(void)
     struct esb_payload p = {0};
     esb_pairing = true;
     raw_target = true;
-    tracker_slots[2].stats.status_received = 7;
-    tracker_slots[2].stats.status_lost = 3;
     tracker_slots[2].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
     remote_confirm_cb = confirm;
 
@@ -840,9 +846,12 @@ static void test_drain(void)
            tracker_slots[2].last_ping_counter, tracker_slots[3].last_ping_counter,
            shadow_ping_count, shadow_data_count, confirmations,
            ota_count, raw_count, event_count, sequence_calls, sequence_last[2], error_count);
+    struct tracker_report poses[4];
+    uint32_t generations[4];
+    size_t pose_count = hid_fifo_peek_batch(poses, generations, 4);
     for (unsigned i = 0; i < pose_count; ++i) {
         printf("PROTOCOL pose data=");
-        for (unsigned j = 0; j < 16; ++j) printf("%02x", poses[i][j]);
+        for (unsigned j = 0; j < 16; ++j) printf("%02x", poses[i].data[j]);
         putchar('\n');
     }
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
@@ -850,12 +859,66 @@ static void test_drain(void)
 #else
     assert(slot_count == 0);
 #endif
-    assert(pose_count == 3 && poses[0][0] == 3 && poses[0][1] == 2);
-    assert(poses[0][2] == 0x11 && poses[0][3] == 0x22 && poses[0][4] == 7 && poses[0][5] == 3);
-    assert(poses[1][0] == 1 && poses[1][2] == 0x33);
-    assert(poses[2][0] == 5 && poses[2][2] == 0x44);
-    assert(tracker_slots[2].stats.status_received == 0 && tracker_slots[2].stats.status_lost == 0);
+    assert(pose_count == 3 && poses[0].data[0] == 3 && poses[0].data[1] == 2);
+    assert(poses[0].data[2] == 0x11 && poses[0].data[3] == 0x22);
+    assert(poses[0].data[4] == 0 && poses[0].data[5] == 0);
+    assert(poses[1].data[0] == 1 && poses[1].data[2] == 0x33);
+    assert(poses[2].data[0] == 5 && poses[2].data[2] == 0x44);
     assert(error_count == 2);
+}
+
+static void test_status_admission(void)
+{
+    struct packet_stats *stats = &tracker_slots[2].stats;
+    stats->total_received = 260;
+    stats->total_gaps = 516;
+    struct esb_payload legacy = {.length = 17, .pipe = 3, .rssi = -41,
+        .data = {3, 2, 0x11, 0x22, 0xff, 0xff, 0xff, 0xff}};
+    struct esb_payload composite = {.length = 7, .pipe = 3, .rssi = -41,
+        .data = {ESB_COMPOSITE_TYPE, 2, 1, 3, 0x11, 0x22, 2}};
+
+    const uint8_t stream[16] = {5, 0};
+    const uint8_t ack[16] = {RCV_HID_TYPE_CMD_ACK};
+    const uint8_t ota_status[16] = {0xf0};
+    for (unsigned i = 0; i < MAX_REPORTS - HID_FIFO_PRIORITY_RESERVE; ++i)
+        assert(hid_write_packet_n(stream, 0));
+    legacy.data[16] = 1;
+    dispatch(&legacy); /* Stream capacity exhausted; reserve stays available. */
+    assert(hid_write_packet_n(ack, 0) && hid_write_packet_n(ota_status, 0));
+    dispatch(&composite); /* Physically full. */
+    assert(total_dropped_reports == 2 && total_tracker_drops[2] == 2);
+    assert(atomic_get(&hid_fifo_write_pos) == MAX_REPORTS);
+    hid_fifo_consume(MAX_REPORTS);
+
+    composite.rssi = legacy.rssi = -70;
+    static const uint8_t expected[][2] = {{255, 255}, {5, 255}, {0, 6}, {0, 0}};
+    for (unsigned i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+        if (i % 2 == 0) {
+            composite.data[6] = 3 + i;
+            dispatch(&composite);
+        } else {
+            legacy.data[16] = 3 + i;
+            dispatch(&legacy);
+        }
+    }
+    struct tracker_report reports[4];
+    uint32_t generations[4];
+    assert(hid_fifo_peek_batch(reports, generations, 4) == 4);
+    for (unsigned i = 0; i < 4; ++i) {
+        const uint8_t record[16] = {3, 2, 0x11, 0x22, expected[i][0], expected[i][1],
+                                    [15] = (uint8_t)-70};
+        assert(generations[i] == 0 && !memcmp(reports[i].data, record, sizeof(record)));
+    }
+    assert(stats->total_received == 260 && stats->total_gaps == 516);
+    hid_fifo_consume(4);
+    assert(hid_fifo_peek_batch(reports, generations, 4) == 0);
+
+    stats->total_received += UINT16_MAX + 1u;
+    stats->total_gaps += UINT16_MAX + 2u;
+    legacy.data[16] = 7;
+    dispatch(&legacy);
+    assert(hid_fifo_peek_batch(reports, generations, 4) == 1);
+    assert(reports[0].data[4] == UINT8_MAX && reports[0].data[5] == UINT8_MAX);
 }
 
 static void test_pairing_gate(void)
@@ -910,6 +973,7 @@ static void assert_tick_reads(void)
 int main(int argc, char **argv)
 {
     assert(argc == 2);
+    hid_fifo_init();
     tick_context = TICK_EVENT;
     tracker_slots[2].tdma_config_packed = 2u | (3u << 8) | (48u << 16) | (7u << 24);
     if (strcmp(argv[1], "detailed-warning") == 0) {
@@ -920,6 +984,11 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "drain") == 0) {
         test_drain();
         assert_tick_reads();
+        printf("PASS %s\n", argv[1]);
+        return 0;
+    }
+    if (strcmp(argv[1], "status-admission") == 0) {
+        test_status_admission();
         printf("PASS %s\n", argv[1]);
         return 0;
     }

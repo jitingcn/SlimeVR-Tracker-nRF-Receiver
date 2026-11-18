@@ -197,10 +197,11 @@ def main():
             'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked',
             'tdma_slot_ticks_for', 'tdma_recalculate'))
         lengths = function(esb, 'composite_body_length')
+        forward = extract.function(esb, 'esb_forward_tracker_packet', optional=True)
         composite = function(esb, 'esb_receive_composite')
         clear = function(esb, 'esb_clear')
         (path/'esb_event_paths.inc').write_text(
-            membership + '\n' + lengths + '''
+            membership + '\n' + lengths + '\n' + forward + '''
 static void tracked_tdma_shadow_observe(uint8_t tracker, enum tdma_shadow_evidence kind) {
     assert(tracker==2 && kind==TDMA_SHADOW_EVIDENCE_DATA);
     evidence_calls++;

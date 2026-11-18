@@ -52,7 +52,7 @@ event = "\n\n".join(
     ("#if defined(CONFIG_TDMA_DIAGNOSTICS)\n" + function(esb, name) + "\n#endif\n")
     if name == "account_ping_clock" else function(esb, name)
     for name in ("composite_body_length", "account_ping_clock", "esb_receive_ping",
-                 "esb_receive_composite", "event_handler"))
+                 "esb_forward_tracker_packet", "esb_receive_composite", "event_handler"))
 common = function(auto, "auto_channel_is_beacon")
 receive_on = function(auto, "auto_channel_receive")
 receive_off = function(auto, "auto_channel_receive", 1)

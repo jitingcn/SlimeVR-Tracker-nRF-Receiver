@@ -146,7 +146,7 @@ static const char *esb_pong_flag_name(uint8_t flag) { return "command"; }
 static void tdma_check_slot(uint8_t id, uint32_t ticks, int8_t rssi) {}
 static bool tracker_events_receive(const uint8_t *data, uint8_t length, uint32_t at) { return false; }
 static unsigned fixture_pose_count;
-static void hid_write_packet_n(const uint8_t *packet, int8_t rssi) { ++fixture_pose_count; }
+static bool hid_write_packet_n(const uint8_t *packet, uint8_t rssi) { ++fixture_pose_count; return true; }
 
 
 /* PRODUCTION BODIES */

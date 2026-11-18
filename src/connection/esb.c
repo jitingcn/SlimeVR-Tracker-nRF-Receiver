@@ -132,9 +132,9 @@ struct packet_stats {
 	uint32_t packets_in_last_second; // Number of packets in the last second
 	uint64_t last_tps_time;          // Last TPS calculation timestamp
 	uint32_t current_tps;            // Current TPS (packets per second)
-	// Per-status-period counters (filled into status packet data[4]/data[5], reset after each status packet)
-	uint16_t status_received; // Packets received since last status packet
-	uint16_t status_lost;     // Packets lost (gaps) since last status packet
+	/* Cumulative cursor for counts already admitted in type-3 records. */
+	uint32_t status_reported_received;
+	uint32_t status_reported_gaps;
 };
 
 struct tracker_slot {
@@ -1431,7 +1431,6 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		stats->normal_packets++;
 		stats->last_sequence = received_seq;
 		stats->first_packet = false;
-		stats->status_received++;
 		decision_accept(tracker_id, 0);
 		LOG_DBG("First packet: tracker=%d, seq=%d", tracker_id, received_seq);
 		return 0;
@@ -1454,7 +1453,6 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		tracker_slots[tracker_id].last_packet_sequence = received_seq;
 		stats->normal_packets++;
 		stats->last_sequence = received_seq;
-		stats->status_received++;
 		decision_accept(tracker_id, 0);
 		LOG_DBG("Normal packet: tracker=%d, seq=%d", tracker_id, received_seq);
 		return 0;
@@ -1498,7 +1496,6 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		decision_fence_mask |= BIT(tracker_id);
 		tracker_slots[tracker_id].last_packet_sequence = received_seq;
 		stats->last_sequence = received_seq;
-		stats->status_received++;
 		// Restart events are kept at WARNING level because this is important information
 		LOG_WRN(
 			"Tracker restart detected: tracker=%d, last_seq=%d, new_seq=%d, jump=%d",
@@ -1516,8 +1513,6 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		stats->gap_events++;
 		uint8_t gaps = diff_forward - 1;
 		stats->total_gaps += gaps; // Estimate number of lost packets
-		stats->status_received++;
-		stats->status_lost += gaps;
 		decision_accept(tracker_id, gaps);
 		tracker_slots[tracker_id].last_packet_sequence = received_seq;
 		stats->last_sequence = received_seq;
@@ -2505,6 +2500,29 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 	tracker_slots[tracker_id].last_pong_queued_counter = counter;
 }
 
+static void esb_forward_tracker_packet(uint8_t pkt[16], uint8_t rssi)
+{
+	if (pkt[0] != 3) {
+		hid_write_packet_n(pkt, rssi);
+		return;
+	}
+
+	struct packet_stats *stats = &tracker_slots[pkt[1]].stats;
+	/* Unsigned deltas also handle wrap of the cumulative RF totals. */
+	uint32_t received = stats->total_received - stats->status_reported_received;
+	uint32_t gaps = stats->total_gaps - stats->status_reported_gaps;
+	pkt[4] = MIN(received, UINT8_MAX);
+	pkt[5] = MIN(gaps, UINT8_MAX);
+	pkt[6] = 0; /* windows_hit (not implemented) */
+	pkt[7] = 0; /* windows_missed (not implemented) */
+
+	/* Retain any counts that did not fit or were not admitted to the FIFO. */
+	if (hid_write_packet_n(pkt, rssi)) {
+		stats->status_reported_received += pkt[4];
+		stats->status_reported_gaps += pkt[5];
+	}
+}
+
 static void esb_receive_composite(const struct esb_payload *payload, uint32_t event_ticks)
 {
 	/* Composite packet (type ESB_COMPOSITE_TYPE): variable length.
@@ -2622,18 +2640,7 @@ static void esb_receive_composite(const struct esb_payload *payload, uint32_t ev
 		pkt[1] = tracker_id;
 		memcpy(&pkt[2], &payload->data[pos], MIN(sub_len, 14));
 
-		/* For status packets (type 3), fill packet loss stats */
-		if (sub_type == 3) {
-			struct packet_stats *stats = &tracker_slots[tracker_id].stats;
-			pkt[4] = stats->status_received;
-			pkt[5] = stats->status_lost;
-			pkt[6] = 0;
-			pkt[7] = 0;
-			stats->status_received = 0;
-			stats->status_lost = 0;
-		}
-
-		hid_write_packet_n(pkt, payload->rssi);
+		esb_forward_tracker_packet(pkt, payload->rssi);
 		pos += sub_len;
 	}
 }
@@ -2837,18 +2844,7 @@ static void event_handler(struct esb_evt const *event)
 				}
 
 				// Forward packet for other cases (normal, potential loss, reboot)
-				// For status packets (type 3), fill in packet loss statistics before forwarding
-				if (rx_payload.data[0] == 3) {
-					struct packet_stats *stats = &tracker_slots[tracker_id].stats;
-					rx_payload.data[4] = stats->status_received;
-					rx_payload.data[5] = stats->status_lost;
-					rx_payload.data[6] = 0; // windows_hit (not implemented)
-					rx_payload.data[7] = 0; // windows_missed (not implemented)
-					stats->status_received = 0;
-					stats->status_lost = 0;
-				}
-				hid_write_packet_n(rx_payload.data,
-								   rx_payload.rssi); // write to hid endpoint
+				esb_forward_tracker_packet(rx_payload.data, rx_payload.rssi);
 			} break;
 			default: {
 				/* OTA packets from tracker (status, firmware info) */

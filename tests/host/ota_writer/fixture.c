@@ -70,9 +70,11 @@ static uint32_t crc32_ieee_update(uint32_t c,const uint8_t *p,size_t n) {
 static uint8_t last_status[16];
 static void (*status_observer)(const uint8_t *);
 static void (*status_entry_hook)(void);
-static void hid_write_packet_n(const uint8_t *p,int n) {
+static bool hid_write_packet_n(const uint8_t *p, uint8_t rssi) {
+    (void)rssi;
     memcpy(last_status,p,16);
     if(status_observer) status_observer(p);
+    return true;
 }
 struct k_sem { pthread_mutex_t lock; pthread_cond_t available; int count; };
 static unsigned slot_resets, fail_sem_take;

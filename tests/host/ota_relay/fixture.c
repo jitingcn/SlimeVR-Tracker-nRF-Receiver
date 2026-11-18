@@ -242,11 +242,12 @@ void esb_radio_operation_end(void)
     radio_ends++;
 }
 void esb_auto_loss_invalidate(void) { external_call(); loss_invalidations++; }
-void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
+bool hid_write_packet_n(const uint8_t *data, uint8_t rssi)
 {
     external_call();
     assert(rssi == 0 && report_count < sizeof(reports) / sizeof(reports[0]));
     memcpy(reports[report_count++], data, 16);
+    return true;
 }
 
 static void *watched_copy;
