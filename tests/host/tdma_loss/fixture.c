@@ -705,7 +705,7 @@ static void auto_policy_ladder(void)
 	relay_coord.enabled = true;
 	relay_coord_note_caps(&relay_coord, 3,
 		(RELAY_PROTOCOL_VERSION << RELAY_CAP_VERSION_SHIFT) | RELAY_CAP_HELPER);
-	tdma_cap_level = tdma_published_cap_level = 0;
+	tdma_cap_level = tdma_published_cap_level = 2;
 	for (unsigned second = 0; second < 15; second++) {
 		now += 1000;
 		for (unsigned n = 0; n < 60; n++)
@@ -717,11 +717,8 @@ static void auto_policy_ladder(void)
 		tracker_slots[3].decision_gaps += 80;
 		decision_ready_mask = tdma_active_mask;
 		tdma_loss_controller_tick(now);
-		if (second == 4) {
-			assert(tdma_cap_level == 1); /* ladder acts first */
-			tdma_published_cap_level = tdma_cap_level;
-		}
-		if (second < 11) assert(!relay_coord.auto_engaged);
+		assert(relay_coord.auto_engaged == (second >= 2));
+		assert(tdma_cap_level == 2); /* relay acts before the ladder's fifth loss tick */
 	}
 	assert(relay_coord.auto_engaged && tdma_cap_level == 2);
 	tdma_published_cap_level = tdma_cap_level;
@@ -753,15 +750,16 @@ static void auto_outage_pending(void)
 		relay_coord_tick(&relay_coord, tdma_active_mask, now);
 		struct esb_auto_loss_snapshot evidence;
 		esb_get_auto_loss_snapshot(&evidence);
-		if (tdma_shadow_pending_leave_mask) {
-			assert(!evidence.eligible && evidence.relay_eligible);
-		}
+		/* Start the policy with a native leave already pending. */
+		if (!tdma_shadow_pending_leave_mask) continue;
+		assert(!evidence.eligible && evidence.relay_eligible);
 		relay_coord_auto_update(&relay_coord, tdma_active_mask, now, false, evidence.relay_eligible);
 		if (relay_coord.auto_engaged) {
 			assert(tdma_shadow_pending_leave_mask == BIT(3));
 			assert(tdma_active_mask == BIT(3));
-			assert(now - relay_coord.t[3].last_direct_ms < 11000);
-			return; /* leaves the 3500 ms staging margin before 15 s eviction */
+			assert(now - relay_coord.t[3].last_direct_ms + RELAY_LAYOUT_ACTIVATION_MS
+				< TDMA_SHADOW_LEAVE_GRACE_MS);
+			return;
 		}
 	}
 	assert(false);

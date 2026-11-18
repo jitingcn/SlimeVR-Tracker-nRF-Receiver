@@ -56,7 +56,8 @@ static void receive(struct tracker_event e)
 static void clear_output(void) { count=0; }
 #if defined(CONFIG_RELAY)
 /* The caller supplies RF grace plus up to two staged layouts and owner slack. */
-#define RELAY_TEST_TAIL_MS (15000U + 2U * 3500U + 1000U + 2U * 500U)
+#include "connection/relay_protocol.h"
+#define RELAY_TEST_TAIL_MS (15000U + 2U * RELAY_LAYOUT_ACTIVATION_MS + 1000U + 2U * 500U)
 static uint32_t relay_mask(uint32_t now) {
     return tracker_events_power_down_mask(now, RELAY_TEST_TAIL_MS);
 }
@@ -683,9 +684,11 @@ static void relay_policy_outage(void)
     struct tracker_event suspended=state(1,TRACKER_EVENT_KIND_TRACKER_REST);
     suspended.phase=TRACKER_REST_UNKNOWN; suspended.detail=TRACKER_REST_SUSPENDED;
     receive(suspended); assert(relay_mask(host_now)==0);
-    for(unsigned n=0;n<10;n++) relay_policy_step(BIT(0)|BIT(1));
-    assert(!relay_coord.auto_engaged);
-    for(unsigned n=0;n<3;n++) relay_policy_step(BIT(0)|BIT(1));
+    for(unsigned n=0;n<RC_AUTO_OUTAGE_ENTER_MS/RC_WINDOW_MS;n++) {
+        relay_policy_step(BIT(0)|BIT(1));
+        assert(!relay_coord.auto_engaged);
+    }
+    relay_policy_step(BIT(0)|BIT(1));
     assert(relay_coord.auto_engaged && (relay_coord.auto_poor_members & BIT(2)));
 }
 

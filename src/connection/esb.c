@@ -7073,9 +7073,9 @@ static void relay_control_plan(struct relay_control *control, struct rc_grant_pl
 }
 
 /* The control frame maintains an applied profile 1 until its staged exit activates:
- * trackers' control frame-derived direct anchors last ~25 ms, far shorter than the 3.5 s
- * exit lead. `relay off` and OTA stage that exit; pairing
- * only pauses automatic decisions, so the fleet keeps running meanwhile. */
+ * trackers' control frame-derived direct anchors last ~25 ms.
+ * `relay off` and OTA stage that exit. Pairing pauses automatic decisions
+ * while the fleet keeps running. */
 static bool relay_control_eligible(void)
 {
 	return esb_initialized && relay_profile

@@ -14,17 +14,15 @@
 #define RELAY_RAMFUNC
 #endif
 #define RC_WINDOW_MS 500U
-/* Profile policy: the direct TPS ladder gets its five 1 s loss ticks first.
- * Any poor member can engage. Leaving needs RC_AUTO_RECOVER_MS with no member
+/* Any poor member can engage. Leaving needs RC_AUTO_RECOVER_MS with no member
  * weak or silent, and every member remembered as poor during the engagement
- * pooled at RC_GOOD_PERMILLE or better across that window. A member joins the
+ * observed at RC_GOOD_PERMILLE or better across that window. A member joins the
  * remembered set when poor on the engaging tick, or once weak continuously
  * for RC_AUTO_ENTER_MS while engaged. */
-#define RC_AUTO_ENTER_MS 10000U
-/* Leave time for the staged activation before 15 s membership eviction. */
-#define RC_AUTO_OUTAGE_ENTER_MS 5000U
-#define RC_AUTO_RECOVER_MS 20000U
-#define RC_AUTO_HOLD_MS 30000U
+#define RC_AUTO_ENTER_MS 750U
+#define RC_AUTO_OUTAGE_ENTER_MS 1000U
+#define RC_AUTO_RECOVER_MS 1000U
+#define RC_AUTO_HOLD_MS 1500U
 #define RC_AUTO_QUALITY_MAX_MS (RC_JUDGE_MAX_WINDOWS * RC_WINDOW_MS)
 
 /* Weak: direct delivery below this share of expected frames (>= RC_MIN_EXPECTED
@@ -156,7 +154,7 @@ static inline const struct rc_watch *relay_plan_watch_const(const struct rc_gran
 
 struct relay_coord {
 	bool auto_engaged, auto_applied;
-	uint16_t auto_members, auto_poor_members;
+	uint16_t auto_members, auto_poor_members, auto_recovery_evidence;
 	uint32_t auto_poor_since, auto_good_since, auto_applied_since;
 	/* Per member, over the recovery window: sum of 10 * direct - 9 * expected
 	 * frames of each judgement, clamped to int16. Until it first clamps,

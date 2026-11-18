@@ -101,7 +101,8 @@ static void irq_unlock(unsigned key){assert(!key && locked);locked=false;}
 static uint32_t k_uptime_get_32(void){return 500;}
 static uint32_t tracker_events_power_down_mask(uint32_t now, uint32_t tail)
 {
- assert(!locked && now==500 && tail==24000);intent_reads++;return event_mask;
+ assert(!locked && now==500 && tail == TDMA_SHADOW_LEAVE_GRACE_MS + 2U * RELAY_LAYOUT_ACTIVATION_MS
+        + TDMA_RECONFIG_MIN_MS + 2U * TPS_MONITOR_INTERVAL_MS);intent_reads++;return event_mask;
 }
 static bool relay_query_can_resume(void){assert(locked);return true;}
 static void relay_coord_auto_update(struct coordinator *c, uint16_t members, uint32_t now, bool profile, bool eligible)

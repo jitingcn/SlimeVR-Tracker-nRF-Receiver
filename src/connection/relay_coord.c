@@ -170,7 +170,15 @@ static void rc_auto_pool(int16_t *balance, struct rc_judgement j)
 static void rc_auto_restart(struct relay_coord *rc)
 {
 	rc->auto_good_since = 0;
+	rc->auto_recovery_evidence = 0;
 	memset(rc->auto_balance, 0, sizeof(rc->auto_balance));
+}
+
+/* Zero is reserved for an inactive window. Preserve the duration on ordinary
+ * ticks, including even timestamps. At rollover the error is one millisecond. */
+static uint32_t rc_auto_since(uint32_t now)
+{
+	return now ? now : UINT32_MAX;
 }
 
 /* Track each member's weak streak; return members weak continuously for the
@@ -180,7 +188,7 @@ static uint16_t rc_auto_sustained(struct relay_coord *rc, uint16_t weak, uint32_
 	uint16_t sustained = 0;
 	for (unsigned i = 0; i < RC_MAX; i++) {
 		if (!(weak & RC_BIT(i))) rc->auto_weak_since[i] = 0;
-		else if (!rc->auto_weak_since[i]) rc->auto_weak_since[i] = now | 1U;
+		else if (!rc->auto_weak_since[i]) rc->auto_weak_since[i] = rc_auto_since(now);
 		else if ((int32_t)(now - rc->auto_weak_since[i]) >= (int32_t)RC_AUTO_ENTER_MS)
 			sustained |= RC_BIT(i);
 	}
@@ -233,9 +241,14 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 	uint16_t sustained = rc_auto_sustained(rc, weak, now);
 	if (rc->auto_engaged) rc->auto_poor_members |= sustained;
 	if (!poor) rc->auto_poor_since = 0;
-	else if (!rc->auto_poor_since) rc->auto_poor_since = now | 1U;
-	if (poor || !fresh) rc_auto_restart(rc);
-	else if (!rc->auto_good_since) rc->auto_good_since = now | 1U;
+	else if (!rc->auto_poor_since) rc->auto_poor_since = rc_auto_since(now);
+	if (poor || !fresh) {
+		rc_auto_restart(rc);
+	} else if (!rc->auto_good_since) {
+		/* The opening judgement covers time before this recovery window. */
+		rc_auto_restart(rc);
+		rc->auto_good_since = rc_auto_since(now);
+	}
 	uint32_t enter_ms = outage ? RC_AUTO_OUTAGE_ENTER_MS : RC_AUTO_ENTER_MS;
 	if (!rc->auto_engaged && rc->auto_poor_since
 	    && (int32_t)(now - rc->auto_poor_since) >= (int32_t)enter_ms) {
@@ -252,7 +265,8 @@ void relay_coord_auto_update(struct relay_coord *rc, uint16_t members,
 		if (owed) {
 			/* Consecutive windows: early loss is not averaged away. */
 			rc_auto_restart(rc);
-		} else if (applied && rc_after(now, rc->auto_applied_since, RC_AUTO_HOLD_MS)) {
+		} else if (!(rc->auto_poor_members & ~rc->auto_recovery_evidence)
+			   && applied && rc_after(now, rc->auto_applied_since, RC_AUTO_HOLD_MS)) {
 			rc->auto_engaged = false;
 			rc->auto_poor_since = 0;
 			rc->auto_poor_members = 0;
@@ -283,7 +297,10 @@ void relay_coord_tick(struct relay_coord *rc, uint16_t member_mask, uint32_t now
 		if (jd[i].expected) {
 			t->direct_permille = jd[i].permille;
 			t->quality_ms = now;
-			if (rc->auto_engaged) rc_auto_pool(&rc->auto_balance[i], jd[i]);
+			if (rc->auto_engaged) {
+				rc_auto_pool(&rc->auto_balance[i], jd[i]);
+				rc->auto_recovery_evidence |= RC_BIT(i);
+			}
 			if (jd[i].permille < RC_WEAK_PERMILLE) {
 				if (t->weak_windows < UINT8_MAX) {
 					t->weak_windows++;
