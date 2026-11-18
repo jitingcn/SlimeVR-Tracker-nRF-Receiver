@@ -1523,6 +1523,36 @@ static void query_single_owner(bool eligible)
 	service();
 }
 
+static void query_force_unstageable_reentry_releases_member(void)
+{
+	query_single_setup(0);
+	esb_relay_set_mode(RELAY_MODE_FORCE);
+	now_ms = 6000;
+	query_case_ping(6, ESB_PONG_FLAG_OTA_QUERY_INFO);
+	service();
+	assert(relay_query_suspending && relay_query_protected_mask == BIT(6));
+	assert(relay_profile && tdma_staged.valid && !tdma_staged.p.profile);
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1;
+	service();
+	assert(!relay_profile && !tdma_staged.valid && tdma_active_mask == BIT(6));
+
+	/* Settings can change while the receiver is in the query's native hold. */
+	relay_settings.tps_min = relay_settings.tps_max = 1;
+	relay_settings_generation++;
+	assert(relay_runtime_validate(&relay_settings, false));
+	assert(!relay_roster_eligible((uint32_t)atomic_get(&tdma_shadow_desired_mask)));
+	force_layout();
+	now_ms = 6000 + TDMA_SHADOW_LEAVE_GRACE_MS - 1;
+	service();
+	assert(tdma_active_mask == BIT(6) && !relay_profile);
+	now_ms++;
+	service();
+	assert(!(atomic_get(&tdma_shadow_desired_mask) & BIT(6)));
+	assert(!tdma_active_mask && !tdma_staged.valid);
+	assert(!relay_query_protected_mask && !relay_query_suspending && !relay_query_recovering);
+	puts("PASS force query: unstageable re-entry releases the silent member at ordinary expiry");
+}
+
 static uint64_t query_single_missed_hold(uint64_t base, bool eligible)
 {
 	query_single_setup(base);
@@ -1668,6 +1698,7 @@ int main(int argc, char **argv)
 	query_forget_and_inability();
 	query_does_not_revive_expired_or_native_members();
 	query_dead_after_resume();
+	query_force_unstageable_reentry_releases_member();
 	const uint64_t query_bases[] = {0, (uint64_t)UINT32_MAX - 10000U};
 	for (unsigned b = 0; b < ARRAY_SIZE(query_bases); ++b) {
 		for (unsigned eligible = 0; eligible < 2; ++eligible) {

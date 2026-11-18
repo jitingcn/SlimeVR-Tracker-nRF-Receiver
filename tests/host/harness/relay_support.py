@@ -66,7 +66,7 @@ def relay_declarations(esb, member_diagnostics=True):
                       " { relay_coord_init_once(); relay_control_ready = true;"
                       " (void)relay_control_diag; (void)relay_member_diag; }", ""])
 
-RELAY_ADMISSION = ("relay_layout_stageable", "relay_auto_roster_eligible")
+RELAY_ADMISSION = ("relay_layout_stageable", "relay_roster_eligible")
 
 
 def relay_query_helpers(esb, membership=False):

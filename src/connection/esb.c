@@ -880,26 +880,32 @@ static struct {
 	bool valid;
 } tdma_staged;
 
-static bool relay_layout_stageable(uint16_t members)
+static bool relay_layout_stageable(uint8_t direct)
 {
-	uint8_t direct = relay_mask_count(members);
 	struct relay_runtime_settings applied = relay_runtime_for_members(relay_settings, direct);
 	return relay_stage_lead_ticks(&applied, direct) <= RC_LAYOUT_MAX_ACTIVATION_TICKS;
 }
 
-static bool relay_auto_roster_eligible(uint32_t desired)
+static bool relay_roster_eligible(uint32_t desired)
 {
-	return relay_user_mode != RELAY_MODE_AUTO
-		|| (relay_mask_count((uint16_t)desired) <= relay_settings.max_trackers
+	uint8_t count = relay_mask_count((uint16_t)desired);
+	if (relay_user_mode == RELAY_MODE_AUTO) {
+		return count <= relay_settings.max_trackers
 			&& relay_coord_capable(&relay_coord, (uint16_t)desired)
-			&& relay_layout_stageable((uint16_t)desired));
+			&& relay_layout_stageable(count);
+	}
+	/* Force uses only the capped roster. Its size determines the exit lead. */
+	return relay_user_mode != RELAY_MODE_FORCE
+		|| relay_layout_stageable(MIN(count, relay_settings.max_trackers));
 }
 
 /* All query lease state is serialized with membership and layout publication. */
 static bool relay_query_can_resume(void)
 {
+	uint32_t roster = relay_user_mode == RELAY_MODE_FORCE
+		? (uint32_t)atomic_get(&tdma_shadow_desired_mask) : tdma_active_mask;
 	return relay_coord_requested(&relay_coord, relay_user_mode, (uint16_t)tdma_active_mask)
-		&& relay_auto_roster_eligible(tdma_active_mask);
+		&& relay_roster_eligible(roster);
 }
 
 /* Caller holds irq_lock. A missed native hold must not pin its roster. */
@@ -1192,11 +1198,10 @@ static void tdma_recalculate(bool forced)
 		uint32_t relay_mask = tdma_admissible_mask(new_mask);
 		bool relay_requested = relay_control_ready && !atomic_get(&radio_operation_busy)
 			&& !esb_ota_relay_is_active() && !receiver_ota_is_active()
-			&& now >= relay_query_until && relay_auto_roster_eligible(new_mask)
+			&& now >= relay_query_until && relay_roster_eligible(new_mask)
 			&& relay_coord_requested(&relay_coord, relay_user_mode, (uint16_t)relay_mask);
 		if (relay_user_mode == RELAY_MODE_FORCE) {
-			relay_requested = relay_requested && (relay_profile || relay_force_entry_allowed())
-				&& relay_layout_stageable((uint16_t)relay_mask);
+			relay_requested = relay_requested && (relay_profile || relay_force_entry_allowed());
 			new_mask = relay_mask;
 		}
 		uint8_t profile = relay_requested ? RELAY_PROFILE_120HZ : 0;
@@ -1580,7 +1585,7 @@ void esb_get_auto_loss_snapshot(struct esb_auto_loss_snapshot *out)
 	uint32_t desired = (uint32_t)atomic_get(&tdma_shadow_desired_mask);
 	out->relay_eligible = out->eligible
 #if defined(CONFIG_RELAY)
-		&& out->active_mask == tdma_admissible_mask(desired) && relay_auto_roster_eligible(desired)
+		&& out->active_mask == tdma_admissible_mask(desired) && relay_roster_eligible(desired)
 #else
 		&& out->active_mask == desired
 #endif
@@ -6326,7 +6331,7 @@ static bool relay_auto_ladder_paused(void)
 {
 	return relay_profile || (tdma_staged.valid && tdma_staged.p.profile)
 		|| (relay_coord.auto_engaged
-			&& relay_auto_roster_eligible((uint32_t)atomic_get(&tdma_shadow_desired_mask)));
+			&& relay_roster_eligible((uint32_t)atomic_get(&tdma_shadow_desired_mask)));
 }
 
 void esb_relay_set_mode(enum relay_mode mode)
@@ -6535,7 +6540,7 @@ void esb_relay_print_status(void)
 	enum relay_mode mode = relay_user_mode;
 	uint16_t members = (uint16_t)tdma_active_mask;
 	bool ready = relay_coord_ready(&relay_coord, members)
-		&& relay_auto_roster_eligible((uint32_t)atomic_get(&tdma_shadow_desired_mask));
+		&& relay_roster_eligible((uint32_t)atomic_get(&tdma_shadow_desired_mask));
 	bool engaged = relay_profile != 0;
 
 	uint16_t block_mask = relay_block_mask;

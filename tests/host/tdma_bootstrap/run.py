@@ -86,7 +86,7 @@ declarations.append(relay_declarations(source, member_diagnostics=False))
 declarations.append('static bool relay_auto_ladder_paused(void);')
 declarations.append('static bool esb_initialized = true;')
 functions = [function(name) for name in (
-    'tdma_loss_reset_windows', 'tdma_pack_config', 'relay_layout_stageable', 'relay_auto_roster_eligible',
+    'tdma_loss_reset_windows', 'tdma_pack_config', 'relay_layout_stageable', 'relay_roster_eligible',
     'relay_query_can_resume',
     'relay_query_update_locked', 'relay_query_begin', 'tdma_shadow_observe',
     'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
