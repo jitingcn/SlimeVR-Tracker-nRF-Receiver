@@ -2792,7 +2792,7 @@ static uint32_t relay_pool_received[RELAY_REPAIR_MAX];
 static uint8_t relay_block_id = 0xFF;
 static uint8_t relay_block_percent;
 static uint16_t relay_block_mask;
-static uint32_t relay_block_deadline;
+static int64_t relay_block_deadline;
 static struct {
 	uint32_t arrivals;
 	uint32_t records;
@@ -2861,7 +2861,7 @@ static bool relay_early_receipt_valid(const uint8_t *data, uint8_t length)
 static bool relay_multi_blocked(uint8_t id)
 {
 	return id < RC_MAX && (relay_block_mask & BIT(id)) &&
-		(int32_t)(relay_block_deadline - k_uptime_get_32()) > 0;
+		k_uptime_get() < relay_block_deadline;
 }
 
 static bool relay_block_drop(uint8_t id, uint8_t salt)
@@ -6458,7 +6458,7 @@ bool esb_relay_block_mask(uint16_t mask, uint8_t seconds)
 	unsigned key = irq_lock();
 	relay_block_id = 0xff;
 	relay_block_percent = 0;
-	relay_block_deadline = k_uptime_get_32() + seconds * 1000U;
+	relay_block_deadline = k_uptime_get() + seconds * 1000U;
 	relay_block_mask = mask;
 	irq_unlock(key);
 	return true;
@@ -6630,7 +6630,7 @@ void esb_relay_print_status(void)
 	bool engaged = relay_profile != 0;
 
 	uint16_t block_mask = relay_block_mask;
-	int32_t block_left = (int32_t)(relay_block_deadline - k_uptime_get_32());
+	int64_t block_left = relay_block_deadline - k_uptime_get();
 #ifdef CONFIG_RELAY_CYCLE_DIAGNOSTICS
 	uint64_t rx_cycles = relay_rx_cycles_total;
 	uint32_t rx_packets = relay_rx_packets, rx_max = relay_rx_cycles_max;

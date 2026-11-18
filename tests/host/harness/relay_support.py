@@ -23,7 +23,7 @@ def relay_declarations(esb, member_diagnostics=True):
     """Coordinator, published layout, test-hook state and RX statistics."""
     esb = select_relay(esb)
     state = re.findall(r"^static (?:struct relay_coord relay_coord|enum relay_mode relay_user_mode|"
-                       r"int64_t relay_query_until|uint(?:8|16|32)_t relay_block_(?:id|percent|mask|deadline))\b[^\n]*;",
+                       r"int64_t relay_query_until|(?:int64_t|uint(?:8|16|32)_t) relay_block_(?:id|percent|mask|deadline))\b[^\n]*;",
                        esb, re.MULTILINE)
     if len(state) != 7:
         raise ValueError(f"relay state declarations changed: {state}")

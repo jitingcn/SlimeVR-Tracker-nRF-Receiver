@@ -20,11 +20,11 @@ code='''
 #define MIN(a,b) ((a)<(b)?(a):(b))
 static uint8_t relay_block_id=255, relay_block_percent;
 static uint16_t relay_block_mask;
-static uint32_t relay_block_deadline, now;
+static int64_t relay_block_deadline, now;
 static struct {unsigned blocked;} relay_rx_stats;
 static unsigned irq_lock(void){return 0;}
 static void irq_unlock(unsigned k){(void)k;}
-static uint32_t k_uptime_get_32(void){return now;}
+static int64_t k_uptime_get(void){return now;}
 '''
 for name in ('relay_multi_blocked','relay_block_drop','esb_relay_block','esb_relay_block_mask'):
  code+='\n'+extract_block(src,rf'^(?:static )?(?:bool|void) {name}\([^;{{]*\)\s*\{{')
@@ -40,6 +40,7 @@ int main(void){
  for(unsigned i=0;i<16;i++) assert(relay_block_drop(i,5)==(i==3||i==9));
  now+=1999; assert(relay_block_drop(3,1));
  now++; assert(!relay_block_drop(3,1));
+ now+=INT64_C(0x80000001); assert(!relay_block_drop(3,1));
  assert(esb_relay_block_mask((1<<3)|(1<<6)|(1<<9),60));
  assert(relay_block_drop(6,1));
  esb_relay_block(9,0);

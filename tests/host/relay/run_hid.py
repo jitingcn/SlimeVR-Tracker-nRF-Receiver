@@ -35,7 +35,7 @@ def block(pattern, semicolon=True):
 
 
 constants = "\n".join(re.findall(r"^#define ESB_(?:PING|PONG|COMPOSITE)\w*[^\n]*", esb_h, re.MULTILINE))
-relay_state = "\n".join(re.findall(r"^static uint(?:8|16|32)_t relay_block_(?:id|percent|mask|deadline)[^\n]*;", esb, re.MULTILINE))
+relay_state = "\n".join(re.findall(r"^static (?:int64_t|uint(?:8|16|32)_t) relay_block_(?:id|percent|mask|deadline)[^\n]*;", esb, re.MULTILINE))
 stats = re.search(r"^static struct \{\n\tuint32_t arrivals;.*?\} relay_rx_stats;", esb, re.MULTILINE | re.DOTALL)
 if not stats:
     raise SystemExit("relay_rx_stats not found")
