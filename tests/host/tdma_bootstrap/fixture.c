@@ -1210,6 +1210,36 @@ static void dense_relay_exit_announcement_lead(void)
 	puts("PASS dense relay exit: three maintenance rounds fit the staged lead");
 }
 
+static void legacy_join_waits_for_relay_exit(void)
+{
+	for (unsigned cap = 2; cap <= 3; cap++) {
+		two_member_layout(2, true);
+		relay_settings = (struct relay_runtime_settings){cap, 1, 16, 100, 120, 0};
+		relay_settings_generation++;
+		relay_coord.enabled = true;
+		relay_coord.auto_engaged = true;
+		service();
+		assert(tdma_staged.valid && tdma_staged.p.profile);
+		now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1;
+		service();
+		assert(relay_profile && tdma_active_mask == 3);
+
+		stored_trackers = 3;
+		now_ms += TDMA_RECONFIG_MIN_MS;
+		assert(ping(0, true) && ping(1, true) && ping(2, true));
+		service();
+		assert(tdma_staged.valid && !tdma_staged.p.profile && tdma_staged.p.new_mask == 3);
+		assert(relay_profile && relay_control_eligible() && tdma_active_mask == 3);
+		assert(slot(tdma_advertised_config(2, tdma_staged.activation_ticks - 1)) == 0xff);
+		now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1;
+		assert(ping(2, true));
+		service();
+		assert(!tdma_staged.valid && !relay_profile && !relay_control_eligible());
+		assert(tdma_active_mask == 7 && slot(tracker_slots[2].tdma_config_packed) == 2);
+	}
+	puts("PASS legacy join: relay roster gets its staged exit before native admits the legacy tracker");
+}
+
 /* Last modeled repair before the query-triggered native activation. */
 #define QUERY_CASE_LAST_REPAIR_MS (6000U + RELAY_LAYOUT_ACTIVATION_MS - 10U)
 
@@ -1589,6 +1619,7 @@ int main(int argc, char **argv)
 	member_cap_owner_blocks();
 	member_cap_native_auto();
 	relay_mode_transitions();
+	legacy_join_waits_for_relay_exit();
 	dense_relay_exit_announcement_lead();
 	query_membership_recovery(0, false);
 	query_membership_recovery(0, true);

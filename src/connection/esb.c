@@ -1177,7 +1177,8 @@ static void tdma_recalculate(bool forced)
 		uint32_t old_mask = tdma_active_mask;
 		uint32_t stored_mask = stored_trackers >= MAX_TRACKERS
 			? UINT32_MAX : (stored_trackers > 0 ? BIT(stored_trackers) - 1U : 0U);
-		uint32_t new_mask = (uint32_t)atomic_get(&tdma_shadow_desired_mask) & stored_mask;
+		uint32_t desired_mask = (uint32_t)atomic_get(&tdma_shadow_desired_mask) & stored_mask;
+		uint32_t new_mask = desired_mask;
 #if defined(CONFIG_RELAY)
 		uint32_t relay_mask = tdma_admissible_mask(new_mask);
 		bool relay_requested = relay_control_ready && !atomic_get(&radio_operation_busy)
@@ -1189,6 +1190,14 @@ static void tdma_recalculate(bool forced)
 			new_mask = relay_mask;
 		}
 		uint8_t profile = relay_requested ? RELAY_PROFILE_120HZ : 0;
+		uint32_t continuing = old_mask & desired_mask;
+		if (relay_profile && !profile && continuing && (new_mask & ~old_mask)
+		    && !tdma_staging_supported_locked(old_mask, new_mask)
+		    && relay_coord_capable(&relay_coord, (uint16_t)old_mask)) {
+			/* A legacy joiner cannot follow a staged publication. Return the
+			 * remaining applied members to native before publishing the join. */
+			new_mask = continuing;
+		}
 #endif
 		uint8_t active_count = 0;
 		for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
