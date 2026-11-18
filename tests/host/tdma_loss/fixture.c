@@ -801,6 +801,8 @@ static void auto_nonrelay_join(void)
 {
 	auto_policy_ladder();
 	relay_coord.auto_engaged = true;
+	relay_control_ready = false;
+	assert(!relay_auto_ladder_paused());
 	relay_profile = 1;
 	relay_coord_auto_update(&relay_coord, BIT(3) | BIT(4), now, true, false);
 	assert(!relay_coord.auto_engaged && relay_auto_ladder_paused());

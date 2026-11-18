@@ -73,7 +73,7 @@ int main(void){
  /* Permission off keeps control frame for the applied profile 1 until its staged exit activates. */
  relay_coord.enabled=false;assert(relay_control_context_current(&c,100));
  relay_profile=0;assert(!relay_control_context_current(&c,100));relay_profile=1;
- relay_coord.t[3].capable=false;assert(!relay_control_context_current(&c,100));relay_coord.t[3].capable=true;
+ relay_coord.t[3].capable=false;assert(relay_control_context_current(&c,100));relay_coord.t[3].capable=true;
  relay_coord.enabled=false;assert(relay_control_context_current(&c,100));relay_coord.enabled=true; /* relay off stages the exit */
  esb_initialized=false;assert(!relay_control_context_current(&c,100));esb_initialized=true;
  assert(relay_control_context_current(&c,100));

@@ -1076,8 +1076,9 @@ static uint32_t tdma_advertised_config(uint8_t id, uint32_t now_ticks)
  * staged activation (relay_protocol.h); otherwise publish immediately. */
 static bool tdma_staging_supported_locked(uint32_t old_mask, uint32_t new_mask)
 {
-	uint32_t affected = old_mask | new_mask;
-	/* `relay off` still stages the exit from an applied profile 1. */
+	uint32_t affected = relay_profile ? new_mask & ~old_mask : old_mask | new_mask;
+	/* Applied relay members already support staging. A removed slot may
+	 * have lost its live capability while the layout is still on air. */
 	if (!old_mask) {
 		return false;
 	}
@@ -1203,7 +1204,7 @@ static void tdma_recalculate(bool forced)
 #if defined(CONFIG_RELAY)
 		/* Transitions are serialized: one staged layout at a time. */
 		if (tdma_staged.valid) {
-			if ((!forced || relay_profile || tdma_staged.p.profile) && !tdma_staged_due_locked((uint32_t)k_uptime_ticks())) {
+			if (!tdma_staged_due_locked((uint32_t)k_uptime_ticks())) {
 				irq_unlock(key);
 				return;
 			}
@@ -3312,7 +3313,7 @@ static void esb_ack_handler_cb(
 				trailer.pending_epoch = tdma_staged.p.epoch;
 				trailer.pending_total
 					= tdma_staged.p.profile
-						? relay_geometry_code(tdma_staged.p.active_count, tdma_staged.p.settings.max_repairs)
+						? relay_geometry_code(tdma_staged.p.active_count, tdma_staged.p.geometry.repairs)
 						: tdma_staged.p.active_count;
 				trailer.pending_slot_ticks = tdma_staged.p.slot_ticks;
 				trailer.pending_member_mask = (uint16_t)tdma_staged.p.new_mask;
@@ -3327,7 +3328,7 @@ static void esb_ack_handler_cb(
 				trailer.pending = true;
 				trailer.pending_epoch = epoch;
 				trailer.pending_total
-					= relay_geometry_code(relay_mask_count(members), relay_applied_settings.max_repairs);
+					= relay_geometry_code(relay_mask_count(members), relay_receiver_geometry.repairs);
 				trailer.pending_slot_ticks = RELAY_SLOT_TICKS;
 				trailer.pending_member_mask = members;
 				trailer.activation_units = (uint16_t)((lead + RELAY_ACTIVATION_UNIT_TICKS - 1U)
@@ -6415,7 +6416,7 @@ static void esb_thread(void)
 static bool relay_auto_ladder_paused(void)
 {
 	return relay_profile || (tdma_staged.valid && tdma_staged.p.profile)
-		|| (relay_coord.auto_engaged
+		|| (relay_control_ready && relay_coord.auto_engaged
 			&& relay_roster_eligible((uint32_t)atomic_get(&tdma_shadow_desired_mask)));
 }
 
@@ -7245,8 +7246,7 @@ static void relay_control_plan(struct relay_control *control, struct rc_grant_pl
  * while the fleet keeps running. */
 static bool relay_control_eligible(void)
 {
-	return esb_initialized && relay_profile
-		&& relay_coord_capable(&relay_coord, (uint16_t)tdma_active_mask);
+	return esb_initialized && relay_profile;
 }
 
 static bool relay_control_context_current(const struct relay_control *control, uint32_t origin)

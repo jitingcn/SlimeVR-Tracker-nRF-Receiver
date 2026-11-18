@@ -463,7 +463,7 @@ static void test_maintenance(void)
 	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_NORMAL && ack.pipe == 3);
 	assert(ack.length == ESB_PONG_LEN + RELAY_TRAILER_PENDING_LEN);
 	assert(relay_trailer_decode_len(&ack.data[ESB_PONG_LEN], ack.length - ESB_PONG_LEN, &trailer));
-	assert(trailer.pending && trailer.pending_total == relay_geometry_code(3, relay_applied_settings.max_repairs));
+	assert(trailer.pending && trailer.pending_total == relay_geometry_code(3, relay_receiver_geometry.repairs));
 	assert(trailer.pending_member_mask == 7 && trailer.pending_slot_ticks == RELAY_SLOT_TICKS);
 	tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
 	ack = ack_for(&p, &has_ack);
@@ -478,6 +478,15 @@ static void test_maintenance(void)
 	assert(trailer.pending && trailer.pending_epoch == 4 && trailer.pending_total == 3);
 	assert(trailer.activation_units * RELAY_ACTIVATION_UNIT_TICKS == 1024U);
 	assert(tracker_slots[id].tracker_remote_command == ESB_PONG_FLAG_CALIBRATE);
+	tdma_staged.p.profile = RELAY_PROFILE_120HZ;
+	tdma_staged.p.slot_ticks = 16;
+	tdma_staged.p.geometry.repairs = 1;
+	tdma_staged.p.settings.max_repairs = 5;
+	ack = ack_for(&p, &has_ack);
+	assert(relay_trailer_decode_len(&ack.data[ESB_PONG_LEN], ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.pending && trailer.pending_total == relay_geometry_code(3, 1));
+	tdma_staged.p.profile = 0;
+	tdma_staged.p.slot_ticks = 48;
 	relay_profile = 0; /* A native-only stage preserves command delivery. */
 	ack = ack_for(&p, &has_ack);
 	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
@@ -500,6 +509,7 @@ static void test_valid(void)
     bool has_ack = false;
     struct esb_payload ack = ack_for(&p, &has_ack);
     assert(has_ack && ack.pipe == 3 && ack.data[0] == ESB_PONG_TYPE);
+    assert(ack.length == ESB_PONG_LEN);
     assert(sys_get_be32(&ack.data[3]) == 132768);
     const uint8_t expected_pong[12] = {0xf1, 2, 1, 0, 2, 6, 0xa0, 0, 7, 48, 3, 2};
     assert(memcmp(ack.data, expected_pong, sizeof(expected_pong)) == 0);
@@ -614,6 +624,7 @@ static void test_interleaved_pipe(void)
     equal_state(&expected);
 #endif
     incoming = valid;
+    incoming.rx_ticks = 132768;
     incoming_ready = true;
     now_ticks = 133000;
     struct esb_payload ack = ack_for(&wrong_pipe, &has_ack);
@@ -622,6 +633,9 @@ static void test_interleaved_pipe(void)
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     assert(tracker_diags[id].g_last_isr_rx_ticks == 133000 && tracker_diags[id].g_last_isr_rx_valid);
     equal_state(&expected);
+    /* Exercise the packet timestamp when the per-ID latch is unavailable. */
+    tracker_diags[id].g_ping_isr_rx_ticks_valid = false;
+    expected.radio_valid[id] = false;
 #endif
     now_ticks = 133010;
     const struct esb_evt event = {.evt_id = ESB_EVENT_RX_RECEIVED};

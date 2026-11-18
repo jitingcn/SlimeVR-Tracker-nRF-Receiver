@@ -583,10 +583,15 @@ static void staged_publication(void)
     two_member_layout(3, false);
     assert(!tdma_staged.valid && tdma_active_mask == 7);
 
-    /* Administrative (forced) recalculation applies a pending stage at once. */
+    /* A forced recalculation still honors the advertised activation tick. */
     two_member_layout(3, true);
     assert(tdma_staged.valid);
+    uint32_t activation = tdma_staged.activation_ticks;
     force_layout();
+    assert(tdma_staged.valid && tdma_active_mask == 3);
+    assert(tdma_staged.activation_ticks == activation);
+    now_ms = 2101 + RELAY_LAYOUT_ACTIVATION_MS + 1;
+    service();
     assert(!tdma_staged.valid && tdma_active_mask == 7);
     relay_coord_init(&relay_coord);
     tdma_staged.valid = false;
