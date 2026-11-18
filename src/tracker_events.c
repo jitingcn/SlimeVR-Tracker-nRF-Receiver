@@ -6,7 +6,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(tracker_events, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(tracker_events, LOG_LEVEL_DBG);
 
 #define OP_COUNT 8
 #define RX_COUNT 32
@@ -362,7 +362,7 @@ static void log_delivery(const struct delivery *out)
 	} else {
 		kind = "BUTTON"; phase = "CLICK_GROUP"; detail = e->detail == 255 ? "count_at_least" : "count";
 	}
-	LOG_INF("EVT%s trk=%u boot=%08x op=%u seq=%u kind=%s origin=%s event=%s phase=%s(%u) outcome=%s detail=%s(%u) rx_ms=%u",
+	LOG_DBG("EVT%s trk=%u boot=%08x op=%u seq=%u kind=%s origin=%s event=%s phase=%s(%u) outcome=%s detail=%s(%u) rx_ms=%u",
 		out->opcode == RCV_HID_OP_TRACKER_OBSERVATION ? " observation" : "", e->tracker_id,
 		e->nonce, e->operation_id, e->event_seq, kind, cal ? (e->kind & CAL_EVENT_ORIGIN_AUTO ? "auto" : "user") : "na",
 		lookup(events, 8, e->event), phase, e->phase, lookup(outcomes, 6, e->outcome), detail, e->detail, out->received_at);
