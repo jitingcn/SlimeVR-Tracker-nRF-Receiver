@@ -163,6 +163,7 @@ struct tracker_slot {
 	bool sequence_initialized;
 	uint8_t last_ping_counter;
 	bool ping_counter_initialized;
+	uint32_t wom_deadline_ms;
 	uint64_t last_ping_time;
 #if defined(CONFIG_RELAY)
 	uint64_t query_advertised_ticks;
@@ -195,7 +196,6 @@ struct tracker_slot {
 	bool wom_complete;
 	bool wom_advertised;
 	uint8_t wom_first_ping_counter;
-	uint32_t wom_deadline_ms;
 	struct packet_stats stats;
 	uint32_t decision_received;
 	uint32_t decision_gaps;
