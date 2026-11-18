@@ -886,8 +886,9 @@ static struct {
 	uint32_t activation_ticks;
 	bool valid;
 	bool native_followup;
-	/* Pairing resets revoke delivery while the announced slot ranks stay fixed. */
+	/* Revoked IDs stay off the wire through the lead of their fresh stage. */
 	uint16_t revoked_mask;
+	uint16_t readmit_mask;
 	int64_t native_guard_until_ms;
 } tdma_staged;
 
@@ -993,6 +994,14 @@ static bool tdma_staged_due_locked(uint32_t now_ticks)
 	return tdma_staged.valid && (int32_t)(now_ticks - tdma_staged.activation_ticks) >= 0;
 }
 
+/* Removing a bit changes the wire slot rank of every member above it. Only
+ * publish the prefix whose ranks still agree with the immutable layout. */
+static uint16_t tdma_wire_members(uint16_t members, uint16_t revoked)
+{
+	uint32_t holes = members & revoked;
+	return holes ? members & ((holes & (0U - holes)) - 1U) : members;
+}
+
 /* Reserve NORMAL clock PONGs for relay switches and their follow-up joins.
  * Ordinary native-only changes leave the command path available. */
 static inline uint32_t tdma_staged_pong_mask(uint32_t now_ticks)
@@ -1066,12 +1075,17 @@ static uint32_t tdma_membership_wait_ms(uint32_t maximum_ms)
  * the stats thread applies it; wake that thread to do so. */
 static uint32_t tdma_advertised_config(uint8_t id, uint32_t now_ticks)
 {
-	if (!tdma_staged_due_locked(now_ticks) || id >= MAX_TRACKERS) {
-		return id < MAX_TRACKERS ? tracker_slots[id].tdma_config_packed : 0;
+	if (id >= MAX_TRACKERS) {
+		return 0;
+	}
+	if (!tdma_staged_due_locked(now_ticks)) {
+		uint32_t cfg = tracker_slots[id].tdma_config_packed;
+		return (tdma_staged.revoked_mask & BIT(id)) ? cfg | 0xff000000U : cfg;
 	}
 	const struct tdma_publication *p = &tdma_staged.p;
 	uint8_t assigned = 0xFF;
-	if ((p->new_mask & BIT(id)) && !(tdma_staged.revoked_mask & BIT(id))) {
+	uint16_t revoked = tdma_staged.revoked_mask & ~tdma_staged.readmit_mask;
+	if ((p->new_mask & BIT(id)) && !(revoked & BIT(id))) {
 		assigned = (uint8_t)relay_member_slot((uint16_t)p->new_mask, id);
 	}
 	k_sem_give(&tdma_membership_wake);
@@ -1222,6 +1236,8 @@ static void tdma_recalculate(bool forced)
 				tdma_staged.native_guard_until_ms = now + RELAY_LAYOUT_ACTIVATION_MS;
 			}
 			tdma_staged.valid = false;
+			tdma_staged.revoked_mask &= ~tdma_staged.readmit_mask;
+			tdma_staged.readmit_mask = 0;
 			tdma_apply_locked(&due, now);
 			irq_unlock(key);
 			tdma_apply_finish(&due, now, true);
@@ -1383,16 +1399,17 @@ static void tdma_recalculate(bool forced)
 		 * Legacy members get the new tuple on their next PONG, as in native TDMA. */
 		bool native_guard = now < tdma_staged.native_guard_until_ms;
 		bool native_followup = !relay_profile && !profile && native_guard;
-		/* A revoked slot stays reserved until a fresh layout can activate
-		 * after the old grant expires, including if that layout enters relay. */
-		bool pairing_followup = tdma_staged.revoked_mask && (relay_profile || native_guard);
+		/* A fresh stage starts after revocation. Its full lead drains old grants
+		 * before any revoked ID, or a slot vacated by one, can be reused. */
+		bool pairing_followup = (old_mask | new_mask) & tdma_staged.revoked_mask;
+		native_followup |= !relay_profile && !profile && pairing_followup;
 		if (active_count && (native_followup || pairing_followup || ((!forced || relay_profile || profile)
 		    && tdma_staging_supported_locked(old_mask, announce_mask)))) {
 			/* The applied layout carries the announcements. */
 			uint32_t lead = relay_profile ? relay_stage_lead_ticks(&relay_applied_settings, tdma_dynamic_active_count)
 				: k_ms_to_ticks_ceil32(RELAY_LAYOUT_ACTIVATION_MS);
 			tdma_staged.p = pub;
-			tdma_staged.revoked_mask = 0;
+			tdma_staged.readmit_mask = new_mask & tdma_staged.revoked_mask;
 			tdma_staged.native_followup = native_followup;
 			tdma_staged.activation_ticks = (uint32_t)k_uptime_ticks() + lead;
 			/* Quiet-zone admission fences the old layout; this activation
@@ -1421,9 +1438,6 @@ static void tdma_recalculate(bool forced)
 			return;
 		}
 #if defined(CONFIG_RELAY)
-		if (active_count) {
-			tdma_staged.revoked_mask = 0;
-		}
 		tdma_staged.activation_ticks = (uint32_t)k_uptime_ticks();
 		tdma_apply_locked(&pub, now);
 		irq_unlock(key);
@@ -3328,30 +3342,34 @@ static void esb_ack_handler_cb(
 		/* Relay-capable trackers get the trailer: head assignment, forwarding
 		 * slot, member mask and relayed mask, all for the layout whose epoch
 		 * the legacy tuple of a NORMAL PONG carries. Others keep 13 bytes. */
-		if (relay_coord_is_capable(&relay_coord, tracker_id)
-		    && !(tdma_staged.revoked_mask & BIT(tracker_id))) {
+		/* Judge both masks at the same tick as the tuple. */
+		bool due = tdma_staged_due_locked(rx_ticks);
+		uint16_t revoked = tdma_staged.revoked_mask & ~(due ? tdma_staged.readmit_mask : 0U);
+		if (relay_coord_is_capable(&relay_coord, tracker_id) && !(revoked & BIT(tracker_id))) {
 			struct relay_pong_trailer trailer;
-			/* Judged at the PONG timestamp, like the tuple. */
-			bool due = tdma_staged_due_locked(rx_ticks);
 			uint8_t epoch = (uint8_t)(tdma_advertised_config(tracker_id, rx_ticks) & 0xFFU);
-			uint16_t members = (uint16_t)(due ? tdma_staged.p.new_mask : tdma_active_mask);
+			uint16_t layout = (uint16_t)(due ? tdma_staged.p.new_mask : tdma_active_mask);
+			uint16_t members = tdma_wire_members(layout, revoked);
 			relay_coord_trailer(&relay_coord, tracker_id, epoch, members, &trailer);
 			trailer.pending = false;
 			/* Announce a staged layout on NORMAL PONGs, whose bytes 3..6
 			 * carry the receiver timestamp the activation is relative to. */
 			if (tdma_staged.valid && !due && cmd == ESB_PONG_FLAG_NORMAL) {
 				uint32_t lead = tdma_staged.activation_ticks - rx_ticks;
-				trailer.pending = (int32_t)lead > 0;
+				uint16_t pending = (uint16_t)tdma_staged.p.new_mask;
+				trailer.pending_member_mask = tdma_wire_members(pending, revoked);
+				/* The v5 private trailer requires a full roster for its geometry. */
+				trailer.pending = !tdma_staged.p.profile || trailer.pending_member_mask == pending;
 				trailer.pending_epoch = tdma_staged.p.epoch;
 				trailer.pending_total
 					= tdma_staged.p.profile
 						? relay_geometry_code(tdma_staged.p.active_count, tdma_staged.p.geometry.repairs)
 						: tdma_staged.p.active_count;
 				trailer.pending_slot_ticks = tdma_staged.p.slot_ticks;
-				trailer.pending_member_mask = (uint16_t)tdma_staged.p.new_mask;
 				trailer.activation_units = (uint16_t)MIN(
 					(lead + RELAY_ACTIVATION_UNIT_TICKS - 1U) / RELAY_ACTIVATION_UNIT_TICKS, UINT16_MAX);
-			} else if (relay_profile && !tdma_staged.valid && ack_payload->data[7] == ESB_PONG_FLAG_NORMAL) {
+			} else if (relay_profile && !tdma_staged.valid && members == layout
+				   && ack_payload->data[7] == ESB_PONG_FLAG_NORMAL) {
 				/* The legacy tuple cannot say profile 1, so a tracker joining a
 				 * running profile learns it as a layout activating on the next
 				 * actual frame boundary; control frame then anchors its cap and future R. */
@@ -4939,6 +4957,27 @@ void esb_set_addr_unified(void)
 	}
 }
 
+#if defined(CONFIG_RELAY)
+/* Caller holds tracker_store_lock after the roster save succeeds. Stop old
+ * announcements before publishing the pairing change. A control copy can
+ * already be armed at freeze, and an ACK can already be in the radio. One
+ * millisecond covers either turn (1 + 4 guard + 2 offset + 11 air ticks for
+ * control, and less for an ACK). No subsequent copy can arm with the old roster. */
+static void tdma_revoke_pairings(uint16_t removed)
+{
+	unsigned key = irq_lock();
+	tdma_staged.revoked_mask |= removed;
+	tdma_staged.readmit_mask &= ~removed;
+	if (tdma_active_mask & removed) {
+		relay_layout_generation++;
+	}
+	irq_unlock(key);
+	if (removed) {
+		k_msleep(1);
+	}
+}
+#endif
+
 /* Caller holds tracker_store_lock and irq_lock. A slot is a new session. */
 static void tracker_slot_reset(uint8_t id)
 {
@@ -4954,13 +4993,6 @@ static void tracker_slot_reset(uint8_t id)
 	channel_target_mask &= ~BIT(id);
 	tdma_shadow_forget_tracker(id);
 #if defined(CONFIG_RELAY)
-	uint32_t reserved_mask = tdma_active_mask;
-	if (tdma_staged.valid) {
-		reserved_mask |= tdma_staged.p.new_mask;
-	} else if (k_uptime_get() >= tdma_staged.native_guard_until_ms) {
-		reserved_mask = 0;
-	}
-	tdma_staged.revoked_mask |= reserved_mask & BIT(id);
 	relay_coord_forget(&relay_coord, id, k_uptime_get_32());
 	if ((relay_query_protected_mask || relay_query_suspending) && !relay_query_can_resume()) {
 		relay_query_protected_mask = 0;
@@ -5071,6 +5103,9 @@ int esb_pop_pair(void)
 	bool raw_target = data_collect_is_target(removed_id);
 	esb_ota_forget_tracker(removed_id);
 	data_collect_forget_tracker(removed_id);
+#if defined(CONFIG_RELAY)
+	tdma_revoke_pairings(BIT(removed_id));
+#endif
 	unsigned int key = irq_lock();
 	if (raw_target) {
 		raw_arq_reset();
@@ -5233,6 +5268,9 @@ int esb_clear(void)
 		esb_ota_forget_tracker(i);
 		data_collect_forget_tracker(i);
 	}
+#if defined(CONFIG_RELAY)
+	tdma_revoke_pairings(BIT(stored_trackers) - 1U);
+#endif
 	unsigned int key = irq_lock();
 	atomic_inc(&test_all_generation);
 	test_all_invalidate();
@@ -7303,7 +7341,9 @@ static void relay_control_plan(struct relay_control *control, struct rc_grant_pl
  * while the fleet keeps running. */
 static bool relay_control_eligible(void)
 {
-	return esb_initialized && relay_profile;
+	/* v5 requires every direct ID for this geometry. A shortened mask would
+	 * be rejected or imply different slot ranks. Resume after a clean publish. */
+	return esb_initialized && relay_profile && !(tdma_active_mask & tdma_staged.revoked_mask);
 }
 
 static bool relay_control_context_current(const struct relay_control *control, uint32_t origin)
