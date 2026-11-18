@@ -1,6 +1,6 @@
 # Runtime repair policy
 
-`relay auto` is the boot default and switches profiles based on direct-link
+In relay-enabled builds, `relay auto` is the boot default and switches profiles based on direct-link
 quality. `relay force` keeps an eligible fleet in profile 1 through direct-link
 recovery. `relay off` returns to direct TDMA by staged activation. `relay on`
 remains an alias for `relay auto`. Mode selection lasts until reboot and
@@ -10,7 +10,7 @@ persistent record.
 Defaults are max_trackers=16, max_repairs=5, repair_floor=5, slot_ticks=16,
 tps_min=120 and tps_max=120. Native auto keeps the full live roster. An auto
 entry needs every live tracker to support relay and the roster to fit the cap.
-The staged layout's actual member count T sets R=clamp(floor(32768/tps_min/slot_ticks)-T-1,1,max_repairs).
+Before the repeat-control adjustment, reserve four ticks for arming. The slot budget is `floor((floor(32768 / tps_min) - 4) / slot_ticks)`. For T members the nominal repair count is `clamp(budget - T - 1, 1, max_repairs)`.
 Equal requested floor/ceiling means static allocation at that derived R.
 `tps_min` is a repair-budget target, not a hard throughput guarantee.
 
@@ -70,4 +70,4 @@ migrates too. New version-3 records preserve that tuple as an explicit redundanc
 choice. Invalid/absent records use the new defaults. No NVS rewrite happens
 at boot. Setting the ceiling while floor equals ceiling keeps static mode;
 a lower explicit floor is preserved or clamped down to a lowered ceiling.
-The ceiling must be 1-5; R0 is not a supported policy setting.
+The ceiling accepts 1 to 5. With repeat control off, `relay layout repair_floor 0` allows ordinary on-demand frames with no repair slots.
