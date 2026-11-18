@@ -9,7 +9,6 @@
 #define BIT(n) (1u << (n))
 #define ARG_UNUSED(x) (void)(x)
 #define K_MSEC(x) (x)
-#define REMOTE_HID_CONFIRM_TIMEOUT_MS 5000
 static char console_output[4096];
 static size_t console_used;
 static void capture_console(const char *format, ...)
@@ -53,6 +52,7 @@ static void (*async_ack_fn)(const uint8_t *) = capture;
 static uint16_t next_token, available_token[16], result_minutes[16], result_error[16];
 static uint32_t available, queued_mask = BIT(2) | BIT(5), cancelled_mask;
 static uint16_t cancelled_token;
+static int64_t staged_until;
 static unsigned sends;
 static uint16_t sent_minutes;
 uint32_t esb_send_remote_wom_command(uint8_t target, uint16_t minutes, uint16_t *token)
@@ -66,6 +66,11 @@ bool esb_get_remote_wom_result(uint8_t id, uint16_t token, uint16_t *minutes, ui
 {
     if (!(available & BIT(id)) || available_token[id] != token) return false;
     *minutes = result_minutes[id]; *error = result_error[id]; return true;
+}
+bool esb_remote_wom_waiting(uint8_t id, uint16_t token)
+{
+    return id == 2 && token == remote_wom_token
+        && now < staged_until + ESB_WOM_COMMAND_TIMEOUT_MS;
 }
 void esb_cancel_remote_wom_command(uint32_t mask, uint16_t token)
 { cancelled_mask = mask; cancelled_token = token; }
@@ -166,6 +171,20 @@ int main(void)
     reply(2, 0, ENOTSUP); remote_wom_poll();
     assert(strstr(console_output, "error") && !strstr(console_output, "accepted"));
     request[3] = 1; assert(hid_wom(request, 3) == RCV_HID_ST_EINVAL);
+    request[3] = 0;
+    assert(hid_wom(request, 3) == RCV_HID_ST_STARTED);
+    staged_until = now + 6594;
+    before = ack_count;
+    now += ESB_WOM_COMMAND_TIMEOUT_MS;
+    remote_wom_poll();
+    assert(ack_count == before && remote_hid_pending && scheduled == 50);
+    now = staged_until + ESB_WOM_COMMAND_TIMEOUT_MS - 1;
+    remote_wom_poll();
+    assert(ack_count == before && remote_hid_pending);
+    now++;
+    remote_wom_poll();
+    assert(ack_count == before + 2 && !remote_hid_pending);
+    assert(sys_get_le16(&acks[before][8]) == ETIMEDOUT);
     puts("WOM job: exact token, false ACK, busy, deferred all, errors, timeout, terminal-only");
     return 0;
 }

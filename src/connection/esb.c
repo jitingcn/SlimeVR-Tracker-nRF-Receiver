@@ -189,6 +189,7 @@ struct tracker_slot {
 	bool wom_complete;
 	bool wom_advertised;
 	uint8_t wom_first_ping_counter;
+	uint32_t wom_deadline_ms;
 	struct packet_stats stats;
 	uint32_t decision_received;
 	uint32_t decision_gaps;
@@ -982,6 +983,35 @@ static bool tdma_staged_due_locked(uint32_t now_ticks)
 	return tdma_staged.valid && (int32_t)(now_ticks - tdma_staged.activation_ticks) >= 0;
 }
 
+/* Relay switches reserve NORMAL clock PONGs for affected v5 members.
+ * A native-only change leaves the command path available. */
+static inline uint32_t tdma_staged_pong_mask(uint32_t now_ticks)
+{
+	return tdma_staged.valid && !tdma_staged_due_locked(now_ticks)
+		&& (relay_profile || tdma_staged.p.profile)
+		? tdma_active_mask | tdma_staged.p.new_mask : 0;
+}
+
+static void tdma_defer_wom_locked(uint32_t targets)
+{
+	uint32_t now_ticks = (uint32_t)k_uptime_ticks();
+	uint32_t blocked = tdma_staged_pong_mask(now_ticks) & targets;
+	if (!blocked) {
+		return;
+	}
+	uint32_t now_ms = k_uptime_get_32();
+	uint32_t delay_ms = k_ticks_to_ms_ceil32(tdma_staged.activation_ticks - now_ticks);
+	for (uint8_t id = 0; id < MAX_TRACKERS; id++) {
+		struct tracker_slot *slot = &tracker_slots[id];
+		/* An advertised command can still get a result during staging. */
+		if ((blocked & BIT(id)) && slot->tracker_remote_command == ESB_PONG_FLAG_WOM_CONTROL
+		    && !slot->wom_advertised && (int32_t)(slot->wom_deadline_ms - now_ms) > 0
+		    && relay_coord_is_capable(&relay_coord, id)) {
+			slot->wom_deadline_ms += delay_ms;
+		}
+	}
+}
+
 /* Native auto/off uses the full live roster. An applied or forced relay
  * layout can assign at most max_trackers slots. */
 static uint32_t tdma_admissible_mask(uint32_t desired)
@@ -1335,6 +1365,7 @@ static void tdma_recalculate(bool forced)
 			/* Quiet-zone admission fences the old layout; this activation
 			 * tick is the first start of the new membership's timeline. */
 			tdma_staged.valid = true;
+			tdma_defer_wom_locked(UINT32_MAX);
 			irq_unlock(key);
 			LOG_INF("TDMA layout epoch %u staged: activates in %u ms", epoch, k_ticks_to_ms_ceil32(lead));
 #else
@@ -3104,12 +3135,7 @@ static void esb_ack_handler_cb(
 		bool ota_aborting = false;
 		bool staged_pong = false;
 #if defined(CONFIG_RELAY)
-		/* A relay switch needs the NORMAL clock bytes. Keep commands queued
-		 * for affected members until activation. Native-only changes can
-		 * still run during OTA and must leave its command path available. */
-		staged_pong = tdma_staged.valid && !tdma_staged_due_locked(rx_ticks)
-			&& (relay_profile || tdma_staged.p.profile)
-			&& ((tdma_active_mask | tdma_staged.p.new_mask) & BIT(tracker_id))
+		staged_pong = (tdma_staged_pong_mask(rx_ticks) & BIT(tracker_id))
 			&& relay_coord_is_capable(&relay_coord, tracker_id);
 #endif
 		if (!channel_confirm && !staged_pong) {
@@ -5180,6 +5206,7 @@ uint32_t esb_send_remote_wom_command(uint8_t target_id, uint16_t minutes, uint16
 		}
 	}
 	if (mask != 0) {
+		uint32_t deadline_ms = k_uptime_get_32() + ESB_WOM_COMMAND_TIMEOUT_MS;
 		if (++wom_next_token == 0) {
 			wom_next_token = 1;
 		}
@@ -5193,8 +5220,12 @@ uint32_t esb_send_remote_wom_command(uint8_t target_id, uint16_t minutes, uint16
 			tracker_slots[id].wom_complete = false;
 			tracker_slots[id].wom_advertised = false;
 			tracker_slots[id].wom_first_ping_counter = 0;
+			tracker_slots[id].wom_deadline_ms = deadline_ms;
 			tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_WOM_CONTROL;
 		}
+#if defined(CONFIG_RELAY)
+		tdma_defer_wom_locked(mask);
+#endif
 		*token_out = wom_next_token;
 	}
 	irq_unlock(key);
@@ -5225,6 +5256,18 @@ bool esb_get_remote_wom_result(uint8_t id, uint16_t token, uint16_t *minutes, ui
 	return complete;
 }
 
+bool esb_remote_wom_waiting(uint8_t id, uint16_t token)
+{
+	if (id >= MAX_TRACKERS || token == 0) {
+		return false;
+	}
+	unsigned int key = irq_lock();
+	bool waiting = tracker_slots[id].wom_token == token
+		&& (int32_t)(tracker_slots[id].wom_deadline_ms - k_uptime_get_32()) > 0;
+	irq_unlock(key);
+	return waiting;
+}
+
 void esb_cancel_remote_wom_command(uint32_t mask, uint16_t token)
 {
 	unsigned int key = irq_lock();
@@ -5239,6 +5282,7 @@ void esb_cancel_remote_wom_command(uint32_t mask, uint16_t token)
 			tracker_slots[id].wom_complete = false;
 			tracker_slots[id].wom_advertised = false;
 			tracker_slots[id].wom_first_ping_counter = 0;
+			tracker_slots[id].wom_deadline_ms = 0;
 		}
 	}
 	irq_unlock(key);

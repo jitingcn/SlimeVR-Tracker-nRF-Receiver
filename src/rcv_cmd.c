@@ -450,7 +450,7 @@ static void remote_wom_poll(void)
 		}
 		uint16_t minutes = 0, error = 0;
 		if (!esb_get_remote_wom_result(id, remote_wom_token, &minutes, &error)) {
-			if (!expired) {
+			if (!expired || esb_remote_wom_waiting(id, remote_wom_token)) {
 				continue;
 			}
 			error = ETIMEDOUT;
@@ -530,7 +530,7 @@ static void remote_hid_job_handler(struct k_work *work)
 		mask = esb_send_remote_wom_command(RCV_HID_TARGET_ALL, remote_wom_minutes,
 						   &remote_wom_token);
 		atomic_set(&remote_hid_expected, mask);
-		remote_wom_deadline = k_uptime_get() + REMOTE_HID_CONFIRM_TIMEOUT_MS;
+		remote_wom_deadline = k_uptime_get() + ESB_WOM_COMMAND_TIMEOUT_MS;
 		(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(50));
 		return;
 	default:
@@ -605,7 +605,7 @@ static uint8_t remote_wom_begin(uint8_t seq, uint8_t target, uint16_t minutes, b
 		return RCV_HID_ST_ENOENT;
 	}
 	atomic_set(&remote_hid_expected, mask);
-	remote_wom_deadline = k_uptime_get() + REMOTE_HID_CONFIRM_TIMEOUT_MS;
+	remote_wom_deadline = k_uptime_get() + ESB_WOM_COMMAND_TIMEOUT_MS;
 	(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(50));
 	return RCV_HID_ST_STARTED;
 }

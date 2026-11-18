@@ -121,6 +121,7 @@ static inline uint8_t esb_rf_channel_decode(uint8_t stored)
 #define ESB_WOM_TIMEOUT_MAX_MINUTES 35791
 #define ESB_WOM_TIMEOUT_CLEAR 0xffff
 #define ESB_WOM_ENTER 0xfffe
+#define ESB_WOM_COMMAND_TIMEOUT_MS 5000
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON 0x34  // Start batch raw data collection (data[8] = target Hz)
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF 0x35 // Stop batch raw data collection
 #define ESB_PONG_FLAG_METADATA_REQUEST 0x36 // Request selected metadata section/chunk
@@ -216,6 +217,8 @@ uint32_t esb_send_remote_wom_command(uint8_t target_id, uint16_t minutes, uint16
 /* Exact transaction outcome; positive errno on failure, value=0 on successful clear,
  * value=ESB_WOM_ENTER on accepted entry, otherwise timeout minutes. */
 bool esb_get_remote_wom_result(uint8_t id, uint16_t token, uint16_t *minutes, uint16_t *error);
+/* Whether a matching transaction still has time left, including relay staging. */
+bool esb_remote_wom_waiting(uint8_t id, uint16_t token);
 void esb_cancel_remote_wom_command(uint32_t mask, uint16_t token);
 void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
 /* Clear only a pending OTA abort command; preserves unrelated commands. */

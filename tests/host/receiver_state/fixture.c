@@ -53,6 +53,11 @@ static void k_mutex_lock(int *lock, int timeout) { (void)lock; (void)timeout; as
 static void k_mutex_unlock(int *lock) { (void)lock; assert(mutex_depth == 1 && !irq_depth); mutex_depth--; }
 static int64_t k_uptime_get(void) { return now_ms; }
 static uint32_t k_uptime_get_32(void) { return now_ms; }
+static uint32_t k_uptime_ticks(void) { return (uint32_t)(now_ms * 32768 / 1000); }
+static uint32_t k_ticks_to_ms_ceil32(uint32_t ticks)
+{
+    return (uint32_t)(((uint64_t)ticks * 1000 + 32767) / 32768);
+}
 static void k_msleep(unsigned ms) { assert(!irq_depth); now_ms += ms; }
 static void k_msgq_purge(int *q) { (void)q; assert(!irq_depth); }
 static uint64_t mock_device_addr;

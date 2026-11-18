@@ -43,7 +43,7 @@ last_raw_seq last_raw_valid tracker_remote_command pending_cmd_arg tracker_test_
 pending_sens_data pending_sens_auto_axis pending_sens_auto_revolutions
 metadata_active_mask metadata_active_chunk metadata_active_token
 metadata_pending_mask metadata_pending_chunk metadata_pending_token
-wom_token wom_minutes wom_error wom_complete wom_advertised wom_first_ping_counter
+wom_token wom_minutes wom_error wom_complete wom_advertised wom_first_ping_counter wom_deadline_ms
 stats decision_received decision_gaps'''.split()
 diagnostic_fields = '''stats g_last_ping_rx_time_diff_ticks
 g_last_ping_rx_time_diff_valid g_ping_isr_rx_ticks g_ping_isr_rx_ticks_valid
@@ -73,7 +73,7 @@ def declaration(name):
 
 
 def function(name):
-    return extract_block(source, rf'^(?:static\s+)?(?:void|bool|int|uint32_t)\s+{name}\([^;{{]*\)\s*\{{')
+    return extract_block(source, rf'^(?:static\s+)?(?:inline\s+)?(?:void|bool|int|uint32_t)\s+{name}\([^;{{]*\)\s*\{{')
 
 
 constants = '\n'.join(re.findall(
@@ -110,7 +110,8 @@ if 'slots' in cases or 'pairing' in cases:
 if 'slots' in cases:
     names += ['esb_pop_pair', 'esb_clear',
               'tdma_loss_reset_windows', 'tdma_sync_stats_reset', 'esb_rx_discontinuity',
-              'esb_reset_all_stats', 'esb_send_remote_wom_command', 'remote_wom_receive',
+              'esb_reset_all_stats', 'tdma_staged_pong_mask', 'tdma_defer_wom_locked',
+              'esb_send_remote_wom_command', 'remote_wom_receive',
               'esb_get_remote_wom_result', 'esb_request_metadata']
 if 'pairing' in cases:
     # Older comparison sources may not have the warning helper.

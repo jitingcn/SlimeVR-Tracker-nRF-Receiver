@@ -90,7 +90,8 @@ def relay_query_helpers(esb, membership=False):
 
 
 
-STAGING_RECALC = ("tdma_staging_supported_locked", "tdma_apply_locked", "tdma_apply_finish") + RELAY_ADMISSION
+STAGING_RECALC = ("tdma_staged_pong_mask", "tdma_defer_wom_locked", "tdma_staging_supported_locked",
+                  "tdma_apply_locked", "tdma_apply_finish") + RELAY_ADMISSION
 
 
 def staging_helpers(esb, recalc=False):
@@ -99,7 +100,7 @@ def staging_helpers(esb, recalc=False):
     if recalc:
         return "\n\n".join(_function(esb, name) for name in ("tdma_advertised_config",) + STAGING_RECALC) + "\n"
     # ACK-only fixtures have no stats thread: count wakeups instead.
-    return "\n".join((_function(esb, "tdma_pack_config"),
+    return "\n".join((_function(esb, "tdma_pack_config"), _function(esb, "tdma_staged_pong_mask"),
                       "static unsigned tdma_membership_wake_gives;",
                       "#define k_sem_give(sem) ((void)(sem), tdma_membership_wake_gives++)",
                       "#define tdma_membership_wake tdma_membership_wake_gives",

@@ -59,7 +59,7 @@ functions = [
     "esb_set_all_trackers_channel", "esb_clear_all_trackers_channel",
     "esb_auto_channel_request", "esb_set_receiver_channel", "esb_clear_receiver_channel",
     "esb_get_receiver_channel",
-    "remote_wom_receive", "esb_send_remote_wom_command",
+    "remote_wom_receive", "esb_remote_wom_waiting",
     "esb_get_remote_wom_result", "esb_cancel_remote_wom_command",
     "esb_send_remote_command_sens", "esb_send_remote_command_sens_auto",
     "esb_send_remote_command_sens_auto_all", "esb_send_remote_command_test_on",
@@ -95,7 +95,7 @@ prelude = prelude.replace("/* DIAGNOSTIC DECLARATIONS */",
 # confirmation priority, command formats, OTA override and CRC generation.
 defines = []
 for line in header.splitlines():
-    match = re.match(r"#define (ESB_(?:(?:PING|PONG|RAW|OTA|COMPOSITE|CHANNEL_CONFIRM|WOM_TIMEOUT)_\w+|WOM_ENTER|METADATA_MASK_VALID))\s+", line)
+    match = re.match(r"#define (ESB_(?:(?:PING|PONG|RAW|OTA|COMPOSITE|CHANNEL_CONFIRM|WOM_TIMEOUT)_\w+|WOM_ENTER|WOM_COMMAND_TIMEOUT_MS|METADATA_MASK_VALID))\s+", line)
     if match and not re.search(r"#define\s+" + match[1] + r"\b", prelude):
         defines.append(line)
 defines.extend(re.findall(r'^#define (?:PING_TIMEOUT_MS|PING_CLEAN_REACQUIRE_STREAK)\b[^\n]*',
@@ -111,6 +111,9 @@ production += "\n" + relay_section(source, stats=False)
 production += "\n" + publication_function("channel_change_begin")
 production += "\n" + relay_query_helpers(source)
 production += "\n" + staging_helpers(source)
+production += "\n".join(extract.function(source, name) for name in (
+    "tdma_defer_wom_locked", "esb_send_remote_wom_command",
+))
 production += '\n#include "tracker_event_protocol.h"\n'
 production += "\n".join(extract.function(source, name) for name in
                          ("composite_body_length", "relay_early_receipt_valid"))

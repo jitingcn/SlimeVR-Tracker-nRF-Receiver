@@ -192,6 +192,8 @@ def main():
         layout_constants = '\n'.join(re.findall(
             r'^#define TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|'
             r'RECONFIG_MIN_MS|LOSS_RECONFIG_MIN_MS|CAP_LEVEL_MAX)\b[^\n]*', esb, re.M))
+        header = (root/'src/connection/esb.h').read_text()
+        layout_constants += '\n' + re.search(r'^#define ESB_PONG_FLAG_WOM_CONTROL\b[^\n]*', header, re.M).group()
         layout_names = '''tdma_cap_ladder tdma_config_epoch tdma_dynamic_active_count
             tdma_dynamic_slot_ticks tdma_active_mask tdma_cap_level tdma_published_cap_level
             tdma_loss_trigger_streak_ticks tdma_loss_recover_streak_ticks
@@ -211,7 +213,8 @@ def main():
             'tdma_loss_reset_windows', 'tdma_pack_config', 'relay_layout_stageable', 'relay_roster_eligible',
             'relay_query_can_resume', 'relay_query_update_locked', 'tdma_shadow_observe',
             'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked',
-            'tdma_slot_ticks_for', 'tdma_staging_supported_locked', 'tdma_apply_locked',
+            'tdma_slot_ticks_for', 'tdma_staged_pong_mask', 'tdma_defer_wom_locked',
+            'tdma_staging_supported_locked', 'tdma_apply_locked',
             'tdma_apply_finish', 'relay_auto_ladder_paused', 'esb_loss_operations_idle',
             'relay_force_entry_allowed', 'tdma_recalculate'))
         membership += ('\n#if defined(CONFIG_RELAY)\n' +

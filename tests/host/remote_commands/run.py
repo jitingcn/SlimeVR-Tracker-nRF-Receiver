@@ -173,7 +173,9 @@ if __name__ == "__main__":
                        "} else { assert(false); } return status; }\n")
         prelude, cases = (HERE / "test_wom_completion.c").read_text().split("/* PRODUCTION BODIES */")
         generated = temporary / "wom.c"
-        generated.write_text(prelude + production + cases)
+        timeout_def = next(line for line in (ROOT / "src/connection/esb.h").read_text().splitlines()
+                           if line.startswith("#define ESB_WOM_COMMAND_TIMEOUT_MS "))
+        generated.write_text(timeout_def + "\n" + prelude + production + cases)
         binary = temporary / "wom"
         subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",

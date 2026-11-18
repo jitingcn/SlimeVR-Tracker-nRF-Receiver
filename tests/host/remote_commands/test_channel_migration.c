@@ -192,7 +192,12 @@ static atomic_t pairing_new_devices_blocked;
 static bool ota_target, ota_payload;
 static uint8_t receiver_device_addr[6] = {1, 2, 3, 4, 5, 6};
 static int channel_get_error;
-static uint32_t k_uptime_ticks(void) { return 0x12345678; }
+static uint32_t now_ticks;
+static uint32_t k_uptime_ticks(void) { return now_ticks; }
+static uint32_t k_ticks_to_ms_ceil32(uint32_t ticks)
+{
+    return (uint32_t)(((uint64_t)ticks * 1000 + 32767) / 32768);
+}
 static int esb_get_rf_channel(uint32_t *channel) {
     *channel = physical_channel;
     return channel_get_error;
@@ -263,6 +268,7 @@ static void reset(unsigned count) {
     fault_status = ota = self_ota = collecting = batch = false;
     fail_stop = fail_set = fail_start = fail_store = 0;
     now = 100;
+    now_ticks = 0x12345678;
     completed = 0;
     auto_completed = 0;
     esb_radio_fault = esb_pairing = false;
@@ -728,6 +734,70 @@ static void test_wom_timeouts(void) {
     assert(tracker_slots[0].wom_minutes == ESB_WOM_TIMEOUT_CLEAR &&
            tracker_slots[2].wom_minutes == ESB_WOM_TIMEOUT_CLEAR);
 }
+static void test_wom_staging_deadline(void)
+{
+    reset(RELAY_MAX_TRACKERS);
+    relay_profile = RELAY_PROFILE_120HZ;
+    tdma_active_mask = UINT16_MAX;
+    relay_applied_settings = (struct relay_runtime_settings){16, 1, 16, 60, 60, 1, 0};
+    relay_coord_note_caps(&relay_coord, 0, RELAY_INFO_CAPS);
+    relay_coord_note_caps(&relay_coord, 2, RELAY_INFO_CAPS);
+    uint16_t token, earlier, unblocked;
+    assert(esb_send_remote_wom_command(2, 0, &earlier) == BIT(2));
+
+    now += 500;
+    now_ticks += 32768 / 2;
+    uint32_t lead = relay_stage_lead_ticks(&relay_applied_settings, 16);
+    uint32_t lead_ms = k_ticks_to_ms_ceil32(lead);
+    tdma_staged.p = (struct tdma_publication){.new_mask = UINT16_MAX, .active_count = 16, .slot_ticks = 16};
+    tdma_staged.activation_ticks = now_ticks + lead;
+    tdma_staged.valid = true;
+    unsigned key = irq_lock();
+    tdma_defer_wom_locked(UINT32_MAX);
+    irq_unlock(key);
+    int64_t activation_ms = now + lead_ms;
+    assert(lead_ms > ESB_WOM_COMMAND_TIMEOUT_MS);
+
+    now += 1000;
+    now_ticks += 32768;
+    assert(esb_send_remote_wom_command(0, 0, &token) == BIT(0));
+    assert(esb_send_remote_wom_command(1, 0, &unblocked) == BIT(1));
+    now += ESB_WOM_COMMAND_TIMEOUT_MS;
+    now_ticks += 32768 * ESB_WOM_COMMAND_TIMEOUT_MS / 1000;
+    assert(now < activation_ms);
+    assert(esb_remote_wom_waiting(0, token) && esb_remote_wom_waiting(2, earlier));
+    assert(!esb_remote_wom_waiting(1, unblocked));
+
+    uint8_t ping[ESB_PING_LEN] = {ESB_PING_TYPE, 0, 7};
+    ping[12] = crc8_ccitt(0x07, ping, 12);
+    struct esb_payload ack = {0};
+    bool has = false, suppress = false;
+    esb_ack_handler_cb(ping, sizeof(ping), 1, &ack, &has, &suppress);
+    assert(has && !suppress && ack.data[7] == ESB_PONG_FLAG_NORMAL);
+    assert(!tracker_slots[0].wom_advertised);
+
+    now = activation_ms;
+    now_ticks = tdma_staged.activation_ticks;
+    esb_ack_handler_cb(ping, sizeof(ping), 1, &ack, &has, &suppress);
+    assert(has && !suppress && ack.data[7] == ESB_PONG_FLAG_WOM_CONTROL);
+    assert(tracker_slots[0].wom_advertised);
+    tdma_staged.valid = false;
+    relay_profile = 0;
+    now += ESB_WOM_COMMAND_TIMEOUT_MS - 501;
+    assert(esb_remote_wom_waiting(2, earlier));
+    now++;
+    assert(!esb_remote_wom_waiting(2, earlier) && esb_remote_wom_waiting(0, token));
+    now = activation_ms + ESB_WOM_COMMAND_TIMEOUT_MS - 1;
+    assert(esb_remote_wom_waiting(0, token));
+    now++;
+    assert(!esb_remote_wom_waiting(0, token));
+    relay_coord_note_caps(&relay_coord, 0, 0);
+    relay_coord_note_caps(&relay_coord, 2, 0);
+    tdma_active_mask = 0;
+    printf("PASS WOM staging: first advertisement follows the %u ms stage and the unblocked timeout is %u ms\n",
+        lead_ms, ESB_WOM_COMMAND_TIMEOUT_MS);
+}
+
 static void test_wom_enter(void) {
     reset(3);
     uint16_t token, value, error;
@@ -777,6 +847,7 @@ int main(void) {
     test_command_publication();
     test_wom_enter();
     test_wom_timeouts();
+    test_wom_staging_deadline();
     test_channel_pongs();
     /* Production channel_apply discards queued old-home packets before
      * resetting admission, including storage-error rollback. */
