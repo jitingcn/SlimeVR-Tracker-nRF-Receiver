@@ -717,7 +717,9 @@ static void auto_policy_ladder(void)
 		tracker_slots[3].decision_gaps += 80;
 		decision_ready_mask = tdma_active_mask;
 		tdma_loss_controller_tick(now);
-		assert(relay_coord.auto_engaged == (second >= 2));
+		/* This fixture judges once a second. The weak timer starts at the
+		 * second poor judgement and rounds up to the next policy pass. */
+		assert(relay_coord.auto_engaged == (second >= RC_WEAK_WINDOWS - 1 + (RC_AUTO_ENTER_MS + 999) / 1000));
 		assert(tdma_cap_level == 2); /* relay acts before the ladder's fifth loss tick */
 	}
 	assert(relay_coord.auto_engaged && tdma_cap_level == 2);
