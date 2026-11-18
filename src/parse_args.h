@@ -30,5 +30,6 @@
 size_t parse_args(char *str, char *argv[], size_t size);
 uint64_t parse_u64(const char *str, uint8_t base);
 bool parse_long_bounded(const char *str, long minimum, long maximum, long *value);
+bool parse_float_triplet(const char *str, float values[3]);
 
 #endif

@@ -25,7 +25,6 @@
 
 #include "rcv_cmd.h"
 
-#include <stdlib.h>
 #include <string.h>
 #include <zephyr/sys/printk.h>
 
@@ -319,23 +318,9 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 				printk("Sens auto request not queued: tracker %d is not active or invalid\n", tracker_id);
 			}
 		} else {
-			char *token;
-			char *endptr;
-			int token_count = 0;
 			float values[3];
 
-			token = strtok(arg3, ",");
-			while (token != NULL && token_count < 3) {
-				values[token_count] = strtof(token, &endptr);
-				if (token == endptr || *endptr != '\0') {
-					printk("Invalid float value: %s\n", token);
-					break;
-				}
-				token_count++;
-				token = strtok(NULL, ",");
-			}
-
-			if (token_count == 3) {
+			if (!arg4 && !arg5 && parse_float_triplet(arg3, values)) {
 				uint8_t tid = target_all ? RCV_HID_TARGET_ALL : tracker_id;
 				if (rcv_cmd_remote_sens_set(tid, values[0], values[1], values[2]) == RCV_HID_ST_QUEUED) {
 					if (target_all) {

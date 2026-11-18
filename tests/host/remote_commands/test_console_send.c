@@ -10,6 +10,7 @@
 static unsigned requests;
 static uint8_t last_target, last_flag, last_axis;
 static uint16_t last_value;
+static float last_sens[3];
 uint8_t rcv_cmd_remote_flag(uint8_t target, uint8_t flag)
 {
     assert(rcv_hid_opcode_is_pong_flag(flag));
@@ -25,7 +26,15 @@ uint8_t rcv_cmd_tracker_channel_all(uint8_t channel)
     return RCV_HID_ST_STARTED;
 }
 uint8_t rcv_cmd_tracker_channel_clear_all(void) { assert(false); return 0; }
-uint8_t rcv_cmd_remote_sens_set(uint8_t target, float x, float y, float z) { assert(false); return 0; }
+uint8_t rcv_cmd_remote_sens_set(uint8_t target, float x, float y, float z)
+{
+    requests++;
+    last_target = target;
+    last_sens[0] = x;
+    last_sens[1] = y;
+    last_sens[2] = z;
+    return RCV_HID_ST_QUEUED;
+}
 uint8_t rcv_cmd_remote_sens_auto(uint8_t target, uint8_t axis, uint16_t rev)
 {
     requests++;
@@ -188,11 +197,47 @@ static void test_send_decimal(void)
     assert(requests == 12);
 }
 
+static void run_send_line(char *line)
+{
+    char *argv[8] = {NULL};
+    assert(parse_args(line, argv, 8) >= 4);
+    console_handle_send(argv[1], argv[2], argv[3], argv[4], argv[5]);
+}
+
+static void test_manual_sens_set(void)
+{
+    requests = 0;
+    char single[] = "send 7 sens +1.25,-2.5,5e-1 \t";
+    run_send_line(single);
+    assert(requests == 1 && last_target == 7);
+    assert(last_sens[0] == 1.25f && last_sens[1] == -2.5f && last_sens[2] == 0.5f);
+    char all[] = "send all sens .5,+1,-2e1";
+    run_send_line(all);
+    assert(requests == 2 && last_target == RCV_HID_TARGET_ALL);
+    assert(last_sens[0] == 0.5f && last_sens[1] == 1.0f && last_sens[2] == -20.0f);
+
+    char invalid[][40] = {
+        "send 7 sens 1,2",          "send 7 sens ,1,2,3",
+        "send 7 sens 1,,2,3",      "send 7 sens 1,2,",
+        "send 7 sens 1,2,3,",      "send 7 sens 1,2,3,4",
+        "send 7 sens 1,2,3x",      "send 7 sens 1,2,+",
+        "send 7 sens nan,2,3",     "send 7 sens 1,inf,3",
+        "send 7 sens 1,2,-inf",    "send 7 sens 1e100,2,3",
+        "send 7 sens 1,1e-100,3",  "send 7 sens 1, 2,3",
+        "send 7 sens 1,2,3 extra", "send all sens 1,2,3 extra more",
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        run_send_line(invalid[i]);
+        assert(requests == 2);
+    }
+}
+
 int main(void)
 {
     test_bounded_decimal();
     test_u8_decimal();
     test_send_decimal();
+    test_manual_sens_set();
     test_calibration_commands();
     test_wom_commands();
     char *targets[] = {"0", "all"};
