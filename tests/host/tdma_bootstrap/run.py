@@ -27,7 +27,7 @@ from relay_support import relay_declarations
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--source', type=Path, default=ROOT / 'src/connection/esb.c')
-parser.add_argument('--case', choices=['owner-store-lock-delay', 'relay-exit-order'])
+parser.add_argument('--case', choices=['owner-store-lock-delay', 'relay-exit-order', 'relay-exit-pairing'])
 args = parser.parse_args()
 source = select_relay(args.source.read_text())
 header = (ROOT / 'src/connection/esb.h').read_text()
@@ -69,7 +69,8 @@ variables = '''tdma_cap_ladder tdma_config_epoch
     tdma_shadow_live_evidence_mask tdma_shadow_desired_mask
     tdma_shadow_pending_join_mask tdma_shadow_pending_leave_mask tdma_shadow_desired_changed_at_ms
     tdma_membership_deadline_ms tdma_membership_deadline_armed
-    relay_query_protected_mask relay_query_recovery_started_ms relay_query_recovering relay_query_suspending'''.split()
+    relay_query_protected_mask relay_query_recovery_started_ms relay_query_recovering relay_query_suspending
+    test_all_ready_after_ms channel_target_mask'''.split()
 declarations = [
     constants,
     extract_block(source, r'^struct packet_stats\s*\{', True),
@@ -94,7 +95,8 @@ functions = [function(name) for name in (
     'tdma_staging_supported_locked',
     'tdma_apply_locked', 'tdma_apply_finish', 'tdma_advertised_config', 'esb_loss_operations_idle',
     'relay_force_entry_allowed', 'tdma_recalculate',
-    'tracker_store_restore', 'relay_auto_ladder_paused', 'esb_relay_set_mode',
+    'tracker_store_restore', 'tracker_slot_reset', 'esb_add_pair', 'esb_pop_pair',
+    'relay_auto_ladder_paused', 'esb_relay_set_mode',
     'relay_control_eligible', 'esb_relay_blocks_ota', 'decision_accept',
     'packet_stats_refresh', 'packet_stats_count', 'check_packet_sequence',
 )]

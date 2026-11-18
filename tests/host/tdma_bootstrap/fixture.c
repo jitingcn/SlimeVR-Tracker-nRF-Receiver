@@ -98,6 +98,23 @@ static int tracker_roster_load(uint8_t *count, uint64_t *addresses)
     memcpy(addresses, saved_addr, sizeof(saved_addr));
     return 0;
 }
+static int tracker_roster_save(uint8_t count, const uint64_t *addresses)
+{
+    assert(mutex_depth == 1 && !irq_depth);
+    saved_count = count;
+    memcpy(saved_addr, addresses, sizeof(saved_addr));
+    return 0;
+}
+static bool tracker_roster_address_valid(uint64_t addr) { return addr != 0; }
+static struct { uint64_t DEVICEADDR[1]; } fixture_ficr;
+#define NRF_FICR (&fixture_ficr)
+static bool data_collect_is_target(uint8_t id) { (void)id; return false; }
+static void data_collect_forget_tracker(uint8_t id) { (void)id; }
+static void esb_ota_forget_tracker(uint8_t id) { (void)id; }
+static void raw_arq_reset(void) { assert(irq_depth); }
+static void hid_reset_rssi_smooth(uint8_t id) { (void)id; }
+static void tracker_events_pairing_invalidate(uint32_t mask) { (void)mask; }
+static void tracker_events_pairing_cleanup(void) { assert(!irq_depth); }
 static bool data_collect_is_active(void) { return false; }
 static bool data_collect_batch_is_active(void) { return false; }
 static void (*sync_hook)(void);
@@ -168,8 +185,7 @@ static void reset_fixture(uint8_t count, uint64_t time)
     assert(!irq_depth && !mutex_depth && count <= MAX_TRACKERS);
     now_ms = time; exact_ticks = 0; restore_error = 0; saved_count = count;
     tdma_active_mask = 0;
-    tdma_staged.valid = tdma_staged.native_followup = false;
-    tdma_staged.native_guard_until_ms = 0;
+    memset(&tdma_staged, 0, sizeof(tdma_staged));
     relay_user_mode = RELAY_MODE_AUTO;
     relay_coord_set_enabled(&relay_coord, relay_user_mode != RELAY_MODE_OFF);
     unsigned int key = irq_lock();
@@ -1378,16 +1394,9 @@ enum exit_wake_order {
 	WAKE_AFTER_GUARD,
 };
 
-static void relay_exit_wake_order(bool off, enum exit_wake_order order)
+static void relay_exit_setup(bool off)
 {
 	const uint32_t v5 = BIT(2) | BIT(3);
-	bool pre_join = order == WAKE_BEFORE_STAGE || order == WAKE_SPLIT_ACROSS_STAGE;
-	uint32_t exit_mask = v5 | (pre_join ? BIT(1) : 0);
-	uint8_t joiner = order == WAKE_BEFORE_STAGE || order == WAKE_DURING_LEAD
-		|| order == WAKE_AT_TICK_BEFORE_OWNER ? 1 : 0;
-	uint32_t final_mask = exit_mask | BIT(joiner);
-	if (order == WAKE_TOGETHER_DURING_LEAD) final_mask |= BIT(1);
-
 	reset_fixture(4, 0);
 	assert(tracker_store_restore() == 0);
 	relay_coord_init(&relay_coord);
@@ -1417,6 +1426,19 @@ static void relay_exit_wake_order(bool off, enum exit_wake_order order)
 	}
 	now_ms += TDMA_RECONFIG_MIN_MS;
 	assert(ping(2, true) && ping(3, true));
+}
+
+static void relay_exit_wake_order(bool off, enum exit_wake_order order)
+{
+	const uint32_t v5 = BIT(2) | BIT(3);
+	bool pre_join = order == WAKE_BEFORE_STAGE || order == WAKE_SPLIT_ACROSS_STAGE;
+	uint32_t exit_mask = v5 | (pre_join ? BIT(1) : 0);
+	uint8_t joiner = order == WAKE_BEFORE_STAGE || order == WAKE_DURING_LEAD
+		|| order == WAKE_AT_TICK_BEFORE_OWNER ? 1 : 0;
+	uint32_t final_mask = exit_mask | BIT(joiner);
+	if (order == WAKE_TOGETHER_DURING_LEAD) final_mask |= BIT(1);
+
+	relay_exit_setup(off);
 	if (pre_join) {
 		assert(ping(1, true));
 		now_ms += TDMA_MEMBERSHIP_COHORT_MS;
@@ -1514,6 +1536,66 @@ static void relay_exit_wake_orders(void)
 		for (enum exit_wake_order order = WAKE_BEFORE_STAGE; order <= WAKE_AFTER_GUARD; order++) {
 			relay_exit_wake_order(off, order);
 		}
+	}
+}
+
+static void relay_exit_pairing_change(bool off, bool replace)
+{
+	const uint32_t members = BIT(2) | BIT(3);
+	relay_exit_setup(off);
+	service();
+	assert(tdma_staged.valid && !tdma_staged.p.profile && tdma_staged.p.new_mask == members);
+	uint32_t exit_tick = tdma_staged.activation_ticks;
+	uint32_t survivor = tdma_advertised_config(2, exit_tick);
+	uint32_t announced = tdma_advertised_config(3, exit_tick);
+	assert(slot(announced) == 1 && total(announced) == 2);
+
+	now_ms += 900;
+	assert(esb_pop_pair() == 0 && stored_trackers == 3);
+	assert(relay_control_eligible());
+	if (replace) {
+		now_ms += 100;
+		assert(esb_add_pair(987654, false) == 3 && stored_trackers == 4);
+	}
+	assert(!relay_coord_is_capable(&relay_coord, 3));
+	assert(tdma_staged.valid && tdma_staged.activation_ticks == exit_tick);
+	assert(!(atomic_get(&tdma_shadow_live_evidence_mask) & BIT(3)));
+	assert(tdma_advertised_config(2, exit_tick) == survivor);
+
+	/* The first NORMAL PONG can be built before either PING dispatch or
+	 * owner publication. The old device may have had control until exit. */
+	now_ms += k_ticks_to_ms_ceil32(exit_tick - ticks_at(now_ms));
+	exact_ticks = exit_tick;
+	assert(slot(tdma_advertised_config(3, exit_tick)) == 0xff);
+	if (replace) {
+		assert(ping(3, true));
+	}
+	service();
+	exact_ticks = 0;
+	assert(!relay_profile && tdma_staged.valid && tdma_staged.native_followup);
+	assert(tracker_slots[2].tdma_config_packed == survivor);
+	assert(slot(tracker_slots[3].tdma_config_packed) == 0xff);
+
+	uint32_t fresh_tick = tdma_staged.activation_ticks;
+	assert(fresh_tick - exit_tick >= k_ms_to_ticks_ceil32(RELAY_LAYOUT_ACTIVATION_MS));
+	assert(tdma_staged.p.new_mask == (replace ? members : BIT(2)));
+	assert(slot(tdma_advertised_config(3, fresh_tick - 1)) == 0xff);
+	uint32_t fresh = tdma_advertised_config(3, fresh_tick);
+	assert(epoch_of(fresh) != epoch_of(announced));
+	assert(slot(fresh) == (replace ? 1 : 0xff));
+	service_at_tick(fresh_tick);
+	assert(!tdma_staged.valid && tracker_slots[3].tdma_config_packed == fresh);
+	assert(tdma_active_mask == (replace ? members : BIT(2)));
+	printf("PASS %s exit, %s: old slot withheld at activation, fresh layout after %u ms\n",
+	       off ? "off" : "auto", replace ? "pop and re-pair" : "pop",
+	       k_ticks_to_ms_ceil32(fresh_tick - exit_tick));
+}
+
+static void relay_exit_pairing_changes(void)
+{
+	for (unsigned off = 0; off <= 1; off++) {
+		relay_exit_pairing_change(off, false);
+		relay_exit_pairing_change(off, true);
 	}
 }
 
@@ -1906,6 +1988,10 @@ int main(int argc, char **argv)
             relay_exit_wake_orders();
             return 0;
         }
+        if (!strcmp(argv[1], "relay-exit-pairing")) {
+            relay_exit_pairing_changes();
+            return 0;
+        }
         assert(!strcmp(argv[1], "owner-store-lock-delay"));
         owner_store_lock_delay();
         puts("Receiver owner lock-delay cases passed");
@@ -1937,6 +2023,7 @@ int main(int argc, char **argv)
 	legacy_join_waits_for_relay_exit();
 	legacy_join_during_relay_exit_lead();
 	relay_exit_wake_orders();
+	relay_exit_pairing_changes();
 	dense_relay_exit_announcement_lead(100);
 	dense_relay_exit_announcement_lead(120);
 	query_membership_recovery(0, false);

@@ -494,6 +494,19 @@ static void test_maintenance(void)
 	now_ticks = tdma_staged.activation_ticks;
 	ack = ack_for(&p, &has_ack);
 	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
+
+	/* A replacement can report v5 capabilities again before exit. */
+	tdma_staged.revoked_mask = BIT(id);
+	tracker_slots[id].tdma_config_packed = 0;
+	tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
+	--now_ticks;
+	ack = ack_for(&p, &has_ack);
+	assert(has_ack && ack.length == ESB_PONG_LEN && ack.data[7] == ESB_PONG_FLAG_NORMAL);
+	assert(ack.data[9] == 0);
+	++now_ticks;
+	ack = ack_for(&p, &has_ack);
+	assert(has_ack && ack.length == ESB_PONG_LEN && ack.data[7] == ESB_PONG_FLAG_NORMAL);
+	assert(ack.data[8] == 0xff);
 }
 
 static void test_valid(void)
