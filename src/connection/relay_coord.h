@@ -19,7 +19,7 @@
  * observed at RC_GOOD_PERMILLE or better across that window. A member joins the
  * remembered set when poor on the engaging tick, or once weak continuously
  * for RC_AUTO_ENTER_MS while engaged. */
-#define RC_AUTO_ENTER_MS 750U
+#define RC_AUTO_ENTER_MS 1250U
 #define RC_AUTO_OUTAGE_ENTER_MS 1000U
 #define RC_AUTO_RECOVER_MS 1000U
 #define RC_AUTO_HOLD_MS 1500U
