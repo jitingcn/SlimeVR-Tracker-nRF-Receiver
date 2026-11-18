@@ -759,11 +759,14 @@ SYS_INIT(composite_pre_init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);
 //|RX     0|id      |batt    |batt_v  |temp    |brd_id  |mcu_id  |resv----|imu_id  |mag_id  |fw_date          |major   |minor   |patch   |rssi    |
 //|RX     1|id      |q0               |q1               |q2               |q3               |a0               |a1               |a2               |
 //|RX     2|id      |batt    |batt_v  |temp    |q_buf                              |a0               |a1               |a2               |rssi    |
-//|RX     3|id      |svr_stat|status  |resv----------------------------------------------------------------------------------------------|rssi    |
+//|RX     3|id      |svr_stat|status  |received|lost    |resv----------------------------------------------------------------------------|rssi    |
 //|RX     4|id      |q0               |q1               |q2               |q3               |m0               |m1               |m2               |
 //|RX     5|id      |runtime                                                                |resv----------------------------------------|rssi    |
 //|RX     6|id      |button  |sleeptime        |resv-------------------------------------------------------------------------------------|rssi    |
 //|RX     7|id      |button  |sleeptime        |q_buf                              |a0               |a1               |a2               |rssi    |
+
+// Type 3 reports unreported RF received/lost counts (not rates), up to 255
+// each. Counts are accounted for on HID FIFO admission, not host receipt.
 
 // runtime is in microseconds (overkill), sleeptime is in milliseconds (overkill but less)
 
@@ -832,30 +835,24 @@ bool hid_write_tracker_event(const uint8_t record[16], uint32_t generation)
 	return hid_enqueue_packet(record, generation);
 }
 
-#if defined(CONFIG_RELAY)
-bool hid_try_write_packet_n(const uint8_t *data, uint8_t rssi)
-#else
-void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
-#endif
+static bool hid_write_packet_n_internal(const uint8_t *data, uint8_t rssi, bool retain_on_full)
 {
+	// Drop packets with all-zero quaternion (type 1 and 4: quat in bytes 2-9).
+	if (data[0] == 1 || data[0] == 4) {
+		if ((data[2] | data[3] | data[4] | data[5] |
+		     data[6] | data[7] | data[8] | data[9]) == 0) {
+			/* A deferred writer should move on from a filtered record. */
+			return retain_on_full;
+		}
+	}
+
 	uint8_t pkt[16];
 	/* A refused report must not move the RSSI shown on later reports. */
 	unsigned key = irq_lock();
 	uint8_t id = data[1];
 	struct rssi_ema_state previous = {0};
-	if (id < MAX_TRACKERS) previous = rssi_states[id];
-
-	// Drop packets with all-zero quaternion (type 1 and 4: quat in bytes 2-9).
-	if (data[0] == 1 || data[0] == 4) {
-		if ((data[2] | data[3] | data[4] | data[5] |
-		     data[6] | data[7] | data[8] | data[9]) == 0) {
-			irq_unlock(key);
-#if defined(CONFIG_RELAY)
-			return true;
-#else
-			return;
-#endif
-		}
+	if (id < MAX_TRACKERS) {
+		previous = rssi_states[id];
 	}
 
 	memcpy(pkt, data, sizeof(pkt));
@@ -868,23 +865,21 @@ void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
 		}
 	}
 
-#if defined(CONFIG_RELAY)
-	bool accepted = hid_push_packet(pkt, 0);
-#else
-	bool accepted = hid_enqueue_packet(pkt, 0);
-#endif
-	if (!accepted && id < MAX_TRACKERS) rssi_states[id] = previous;
-	irq_unlock(key);
-#if defined(CONFIG_RELAY)
-	return accepted;
-#endif
-}
-#if defined(CONFIG_RELAY)
-
-void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
-{
-	if (!hid_try_write_packet_n(data, rssi)) {
-		hid_note_dropped(data);
+	bool admitted = retain_on_full ? hid_push_packet(pkt, 0) : hid_enqueue_packet(pkt, 0);
+	if (!admitted && id < MAX_TRACKERS) {
+		rssi_states[id] = previous;
 	}
+	irq_unlock(key);
+	return admitted;
+}
+#if defined(CONFIG_RELAY)
+bool hid_try_write_packet_n(const uint8_t *data, uint8_t rssi)
+{
+	return hid_write_packet_n_internal(data, rssi, true);
 }
 #endif
+
+bool hid_write_packet_n(const uint8_t *data, uint8_t rssi)
+{
+	return hid_write_packet_n_internal(data, rssi, false);
+}

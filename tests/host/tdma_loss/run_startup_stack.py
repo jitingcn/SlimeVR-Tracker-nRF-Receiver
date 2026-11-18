@@ -241,7 +241,9 @@ def replay(path, image, scenario, count):
             raise RuntimeError(f'Wrong published roster: {actual_count}, {actual_addresses}')
         if machine.mem_read(symbol('tracker_store_ready')[0], 1)[0] != 1:
             raise RuntimeError('Roster was not marked ready')
-        for required in ('tracker_store_restore', 'nvs_read_hist', 'nvs_prev_ate', 'flash_nrf_read'):
+        # LTO may inline nvs_read_hist into sys_read_checked. Require the read
+        # boundary, real ATE walk and flash access, not a separate call frame.
+        for required in ('tracker_store_restore', 'sys_read_checked', 'nvs_prev_ate', 'flash_nrf_read'):
             if not calls[f'startup:{required}']:
                 raise RuntimeError(f'Required real linked path not executed: {required}')
         if scenario != 'valid' and not writes:

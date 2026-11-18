@@ -96,7 +96,7 @@ functions = '\n'.join(function(source, name) for name in (
     'packet_device_addr', 'hid_fill_padding', 'hid_stats_record_reports',
     'hid_stats_update_idle_if_needed', 'hid_stats_snapshot', 'rssi_smooth_update',
     'hid_reset_rssi_smooth', 'hid_type_byte1_is_tracker_id',
-    'hid_type_has_rssi_slot', 'hid_try_write_packet_n', 'hid_write_packet_n'))
+    'hid_type_has_rssi_slot', 'hid_write_packet_n_internal', 'hid_try_write_packet_n', 'hid_write_packet_n'))
 # The historical address formatter returned void. Preserve its exact body and
 # callers; only the test's direct boolean assertions need a signature adapter.
 if re.search(r'^static void packet_device_addr\s*\(', source, re.M):

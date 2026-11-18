@@ -147,7 +147,6 @@ static inline uint8_t esb_rf_channel_decode(uint8_t stored)
 #define ESB_OTA_VERIFY_TYPE 0x24   // Request CRC verification (receiver → tracker)
 #define ESB_OTA_ACTIVATE_TYPE 0x25 // Activate new firmware (receiver → tracker)
 
-int clocks_start(void);
 int esb_initialize(bool);
 /* Internal background transactions suppress only routine initialization INFO. */
 int esb_initialize_quiet(bool tx);
@@ -219,6 +218,10 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
 /* Clear only a pending OTA abort command; preserves unrelated commands. */
 void esb_clear_remote_ota_abort(uint8_t tracker_id);
 void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8_t arg);
+/* Publish a validated target/flag with IRQs already locked by the caller.
+ * Stores only: no blocking or logging. Used to commit raw session flags with
+ * the matching local session transition. */
+void esb_publish_remote_command_locked(uint8_t tracker_id, uint8_t command_flag, uint8_t arg);
 /* Active-scan then queue. Returns bitmask of targeted tracker ids. Blocks ~1s. */
 uint32_t esb_send_remote_command_all(uint8_t command_flag);
 /* Targeted test commands: publish TPS, then queue the flag. Return the
@@ -250,11 +253,14 @@ void esb_set_remote_confirm_cb(esb_remote_confirm_cb_t cb);
 // Local receiver channel management
 int esb_set_receiver_channel(uint8_t channel); // Set local home, errno on failure
 int esb_clear_receiver_channel(void);         // Restore default local home
-/* Nonreentrant radio gate. Begin/end do not stop/restore hardware. Active transfer
- * predicates retain exclusion after their admission owner releases this gate. */
+/* Nonreentrant radio gate, available only after boot RX succeeds. Begin/end
+ * do not stop/restore hardware. Active transfer predicates retain exclusion
+ * after their admission owner releases this gate. */
 bool esb_channel_is_busy(void);
 int esb_radio_operation_begin(void);
 int esb_radio_collection_begin(void); /* Admission for replacing an existing raw session */
+/* USB flash-only recovery may reserve the gate after a safe startup failure. */
+int esb_radio_self_ota_begin(void);
 void esb_radio_operation_end(void);
 int esb_radio_operation_stop(void);
 /* Owner-held checked PTX/PRX teardown. Failure latches the radio owner fault. */

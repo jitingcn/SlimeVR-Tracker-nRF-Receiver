@@ -150,7 +150,8 @@ hid_functions = '\n'.join(function(hid_source, name) for name in [
     'int_in_ready_cb', 'input_report_done_cb', 'iface_ready_cb',
     'report_event_handler', 'hid_usb_state_changed', 'composite_pre_init',
     'hid_type_byte1_is_tracker_id', 'hid_type_has_rssi_slot',
-    'hid_enqueue_packet', 'hid_write_tracker_event', 'hid_try_write_packet_n', 'hid_write_packet_n'])
+    'hid_push_packet', 'hid_note_dropped', 'hid_enqueue_packet', 'hid_write_tracker_event',
+    'hid_write_packet_n_internal', 'hid_write_packet_n'])
 hid = common + r'''
 #define RCV_HID_TYPE_CMD_ACK 251
 #define RCV_HID_TYPE_CMD 254
@@ -304,11 +305,14 @@ except ValueError:
     crc_source = (zephyr_base / 'subsys/crc/crc8_sw.c').read_text()
     crc_table_start = crc_source.index('static const uint8_t crc8_ccitt_small_table')
     crc_table_end = crc_source.index('};', crc_table_start) + 2
-    cdc_crc = '#define __weak\n' + crc_source[crc_table_start:crc_table_end] + '\n' + function(crc_source, 'crc8_ccitt')
+    crc_function = function(crc_source, 'crc8_ccitt').replace('__weak ', '', 1)
+    cdc_crc = crc_source[crc_table_start:crc_table_end] + '\n' + crc_function
 cdc = common + r'''
 #define UART_LINE_CTRL_DTR 1
 #define ESB_PONG_FLAG_DATA_COLLECT_OFF 1
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF 2
+#define ESB_PONG_FLAG_DATA_COLLECT_ON 3
+#define ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON 4
 static void (*uart_callback)(const struct device *, void *);
 static bool dtr=true, tx_enabled, uart_ready=true;
 static unsigned space=65536;
@@ -330,7 +334,12 @@ static int uart_fifo_fill(const struct device *d, const uint8_t *p, int n) {
 }
 static void sys_put_be32(uint32_t v, uint8_t *p) { p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p[3]=v; }
 static unsigned off_commands;
-static void esb_send_remote_command(uint8_t id, int flag) { off_commands++; }
+static void esb_send_remote_command(uint8_t id, int flag) {
+    if (flag==ESB_PONG_FLAG_DATA_COLLECT_OFF || flag==ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF) off_commands++;
+}
+static void esb_publish_remote_command_locked(uint8_t id, uint8_t flag, uint8_t arg) {
+    esb_send_remote_command(id, flag);
+}
 void data_collect_stop(void);
 void data_collect_batch_stop(void);
 ''' + cdc_crc + cdc_body + r'''
@@ -367,7 +376,8 @@ int main(int argc, char **argv) {
         data_collect_start(3); publish(); space=0; advance(1); data_collect_stop();
         data_collect_batch_start(BIT(3),400); publish(); data_collect_batch_stop();
         space=65536; drain(3); assert(output_len==2*(sizeof(payload)+9) && buf_used()==0); verify_frame(0); verify_frame(sizeof(payload)+9);
-        data_collect_start(3); advance(61000); assert(!data_collect_is_active() && off_commands==1);
+        unsigned before=off_commands;
+        data_collect_start(3); advance(61000); assert(!data_collect_is_active() && off_commands==before+1);
     } else if (!strcmp(argv[1],"cdc-wrap")) {
         dc_buf_head=DATA_COLLECT_BUF_SIZE-4; dc_buf_tail=dc_buf_head;
         publish(); drain(3); assert(buf_used()==0 && output_len==sizeof(payload)+9); verify_frame(0);

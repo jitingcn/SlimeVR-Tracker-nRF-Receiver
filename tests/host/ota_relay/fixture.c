@@ -188,6 +188,7 @@ bool esb_relay_blocks_ota(uint8_t id) { return id < 16 && (relayed_ids & (1u << 
 static bool receiver_ota_is_active(void) { return receiver_ota_active; }
 static bool data_collect_is_active(void) { return collect_active; }
 static bool data_collect_batch_is_active(void) { return collect_batch_active; }
+static int atomic_get(const atomic_t *value) { return *value; }
 static bool atomic_cas(atomic_t *value, int old, int next)
 {
     assert(value == &radio_operation_busy && old == 0 && next == 1);
@@ -246,11 +247,12 @@ void esb_radio_operation_end(void)
     radio_ends++;
 }
 void esb_auto_loss_invalidate(void) { external_call(); loss_invalidations++; }
-void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
+bool hid_write_packet_n(const uint8_t *data, uint8_t rssi)
 {
     external_call();
     assert(rssi == 0 && report_count < sizeof(reports) / sizeof(reports[0]));
     memcpy(reports[report_count++], data, 16);
+    return true;
 }
 
 static void *watched_copy;

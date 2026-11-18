@@ -53,7 +53,8 @@ functions = [
     "test_all_invalidate",
     "esb_channel_is_busy", "radio_operation_begin", "esb_radio_operation_begin",
     "esb_radio_collection_begin", "esb_radio_operation_end",
-    "channel_command_for_tracker", "esb_send_remote_command_arg", "esb_send_remote_command",
+    "channel_command_for_tracker", "esb_publish_remote_command_locked",
+    "esb_send_remote_command_arg", "esb_send_remote_command",
     "channel_apply", "channel_change_poll",
     "esb_set_all_trackers_channel", "esb_clear_all_trackers_channel",
     "esb_auto_channel_request", "esb_set_receiver_channel", "esb_clear_receiver_channel",
@@ -128,7 +129,6 @@ static void echo(uint8_t tracker_id, uint8_t flag) {
 }
 """
 control = (ROOT / "src/rcv_cmd.c").read_text()
-production += "\nuint8_t rcv_cmd_collect_stop(void);\nuint8_t rcv_cmd_collect_batch_stop(void);\n"
 production += "\n".join(extract.function(control, name) for name in (
     "rcv_cmd_collect_start", "rcv_cmd_collect_stop",
     "rcv_cmd_collect_batch_start", "rcv_cmd_collect_batch_stop"))

@@ -153,7 +153,7 @@ if __name__ == "__main__":
         binary = temporary / "console-send"
         subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
-            "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+            "-g", "-O1", "-ffast-math", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
             "-fno-pie", "-no-pie", "-I", str(temporary), "-I", str(ROOT / "src"),
             str(ROOT / "src/console_send.c"), str(ROOT / "src/parse_args.c"),
             str(HERE / "test_console_send.c"),

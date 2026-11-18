@@ -230,7 +230,7 @@ void receiver_ota_process_hid(const uint8_t *data, size_t len)
 		break;
 	case HID_OTA_BEGIN: {
 		bool acquired_radio = !receiver_ota_is_active();
-		if (acquired_radio && esb_radio_operation_begin()) {
+		if (acquired_radio && esb_radio_self_ota_begin()) {
 			LOG_WRN("Receiver OTA BEGIN deferred: radio operation busy");
 			rcv_ota_send_status();
 			break;

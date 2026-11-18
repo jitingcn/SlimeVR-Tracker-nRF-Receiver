@@ -32,6 +32,9 @@ radio_functions = '\n\n'.join(
     for name in ('radio_operation_begin', 'esb_radio_operation_begin',
                  'esb_radio_operation_end')
 )
+radio_startup = extract_block(radio_source, r"^enum esb_radio_startup \{", semicolon=True)
+radio_functions = (radio_startup + "\nstatic atomic_t radio_startup_state = ESB_RADIO_READY;\n\n"
+                   + radio_functions)
 
 # The second build inserts scheduling points after scalar command stores.
 # The first build includes the original source directly without instrumentation.

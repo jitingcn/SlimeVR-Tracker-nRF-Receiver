@@ -145,8 +145,8 @@ static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *p, size_t n)
 static int esb_find_tracker(uint64_t address) { (void)address; return -1; }
 static void tdma_check_slot(uint8_t id, uint32_t ticks, int8_t rssi) { (void)id; (void)ticks; (void)rssi; }
 static int check_packet_sequence(uint8_t id, uint8_t sequence) { (void)id; (void)sequence; return 0; }
-static void hid_write_packet_n(const uint8_t *packet, int8_t rssi)
-{ (void)rssi; memcpy(last_pose, packet, 16); ++downstream_pose; }
+static bool hid_write_packet_n(const uint8_t *packet, uint8_t rssi)
+{ (void)rssi; memcpy(last_pose, packet, 16); ++downstream_pose; return true; }
 static bool tracker_events_receive(const uint8_t *packet, uint8_t length, uint32_t now)
 { struct tracker_event e; (void)now; return tracker_event_decode(packet, length, &e); }
 static bool data_collect_is_target(uint8_t id) { (void)id; return false; }
@@ -320,6 +320,7 @@ static int k_msgq_put(void *queue, const void *item, int timeout)
 static void reset(void)
 {
     home_beacon_tx_result = radio_operation_busy = 0;
+    radio_startup_state = ESB_RADIO_READY;
     esb_initialized = esb_radio_fault = radio_fault = false;
     info_logs = error_logs = warning_logs = status_errors = 0;
     init_calls = disable_calls = write_calls = start_calls = rx_start_calls = 0;

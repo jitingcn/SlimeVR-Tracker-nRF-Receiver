@@ -74,8 +74,9 @@ static void tdma_check_slot(uint8_t tracker, unsigned ticks, uint8_t rssi) {
     (void)ticks; (void)rssi; assert(tracker==2); slot_calls++;
 }
 #endif
-static void hid_write_packet_n(const uint8_t packet[16], uint8_t rssi) {
+static bool hid_write_packet_n(const uint8_t *packet, uint8_t rssi) {
     (void)rssi; assert(pose_count<8); memcpy(poses[pose_count++],packet,16);
+    return true;
 }
 #define tracker_events_pairing_cleanup checked_cleanup
 #define relay_hid_packet hid_write_packet_n

@@ -257,10 +257,7 @@ uint8_t rcv_cmd_collect_start(uint8_t tracker_id)
 	if (esb_radio_collection_begin()) {
 		return RCV_HID_ST_EBUSY;
 	}
-	rcv_cmd_collect_batch_stop();
-	rcv_cmd_collect_stop();
 	data_collect_start(tracker_id);
-	esb_send_remote_command(tracker_id, ESB_PONG_FLAG_DATA_COLLECT_ON);
 	esb_radio_operation_end();
 	return RCV_HID_ST_OK;
 #endif
@@ -271,11 +268,7 @@ uint8_t rcv_cmd_collect_stop(void)
 #ifndef CONFIG_DATA_COLLECT
 	return RCV_HID_ST_ENOTSUP;
 #else
-	if (data_collect_is_active()) {
-		uint8_t tid = data_collect_get_target_id();
-		data_collect_stop();
-		esb_send_remote_command(tid, ESB_PONG_FLAG_DATA_COLLECT_OFF);
-	}
+	data_collect_stop();
 	return RCV_HID_ST_OK;
 #endif
 }
@@ -301,14 +294,7 @@ uint8_t rcv_cmd_collect_batch_start(uint16_t rate_hz)
 	if (esb_radio_collection_begin()) {
 		return RCV_HID_ST_EBUSY;
 	}
-	rcv_cmd_collect_stop();
-	rcv_cmd_collect_batch_stop();
 	data_collect_batch_start(mask, rate_hz);
-	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
-		if (mask & BIT(i)) {
-			esb_send_remote_command_arg(i, ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, (uint8_t)rate_hz);
-		}
-	}
 	esb_radio_operation_end();
 	return RCV_HID_ST_OK;
 #endif
@@ -319,20 +305,7 @@ uint8_t rcv_cmd_collect_batch_stop(void)
 #ifndef CONFIG_DATA_COLLECT
 	return RCV_HID_ST_ENOTSUP;
 #else
-	if (data_collect_batch_is_active()) {
-		uint32_t mask = 0;
-		for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
-			if (data_collect_batch_is_target(i)) {
-				mask |= BIT(i);
-			}
-		}
-		data_collect_batch_stop();
-		for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
-			if (mask & BIT(i)) {
-				esb_send_remote_command(i, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF);
-			}
-		}
-	}
+	data_collect_batch_stop();
 	return RCV_HID_ST_OK;
 #endif
 }

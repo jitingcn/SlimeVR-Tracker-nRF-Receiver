@@ -10,7 +10,8 @@ here = Path(__file__).resolve().parent
 sys.path.insert(0, str(here.parent / 'harness'))
 from c_extract import extract_block
 source = select_relay((here.parents[2] / 'src/connection/esb.c').read_text())
-code = source[source.index('struct relay_learning_record {'):source.index('struct composite_result {')]
+code = source[source.index('static bool esb_forward_tracker_packet('):
+              source.index('struct composite_result {')]
 # Thread loops are exercised through their queue operations below.
 for name in ('relay_learning_thread', 'relay_hid_thread'):
     code = code.replace(extract_block(code, rf'^static void {name}\(void\)\s*\{{'), '')
@@ -21,6 +22,7 @@ prefix = r'''
 #include <string.h>
 #include "relay_coord.h"
 #define ARG_UNUSED(x) (void)(x)
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define K_NO_WAIT 0
 #define K_THREAD_DEFINE(...)
 struct queue { unsigned size, capacity, head, count; unsigned char *data; };
@@ -38,11 +40,28 @@ static void irq_unlock(unsigned key){(void)key;}
 static struct relay_coord relay_coord;
 static uint32_t relay_session=42;
 static uint8_t relay_epoch=3;
+/* PACKET STATS */
+static struct { struct packet_stats stats; } tracker_slots[2];
 static unsigned hid_count, hid_drops;
+static bool check_status;
+static uint8_t status_counts[2];
 static void hid_note_dropped(const uint8_t *data){(void)data;hid_drops++;}
 static bool stalled;
-static bool hid_try_write_packet_n(const uint8_t *data,uint8_t rssi){if(stalled)return false;assert(data[0]==hid_count++);assert(rssi==50);return true;}
+static bool hid_try_write_packet_n(const uint8_t *data, uint8_t rssi)
+{
+ if (stalled) return false;
+ if (check_status) {
+  assert(data[0] == 3 && data[1] == 1);
+  status_counts[0] = data[4];
+  status_counts[1] = data[5];
+ } else {
+  assert(data[0] == hid_count++);
+ }
+ assert(rssi == 50);
+ return true;
+}
 '''
+prefix = prefix.replace('/* PACKET STATS */', extract_block(source, r'^struct packet_stats \{', True))
 cases = r'''
 int main(void) {
  relay_coord_init(&relay_coord);
@@ -56,6 +75,25 @@ int main(void) {
  for(unsigned i=0;i<129;i++)assert(relay_hid_step(&output,&pending));
  assert(hid_count==129 && relay_hid_enqueued==129 && relay_hid_refused==2 && hid_drops==1 && !pending);
  assert(!relay_hid_step(&output,&pending));
+
+ check_status = true;
+ uint8_t status[16] = {3, 1};
+ struct packet_stats *stats = &tracker_slots[1].stats;
+ stats->total_received = 256;
+ stats->total_gaps = 5;
+ relay_hid_packet(status, 50);
+ stalled = true;
+ assert(!relay_hid_step(&output, &pending) && pending);
+ assert(!stats->status_reported_received && !stats->status_reported_gaps && hid_drops == 1);
+ stats->total_received++;
+ stalled = false;
+ assert(relay_hid_step(&output, &pending) && !pending);
+ assert(status_counts[0] == 255 && status_counts[1] == 5);
+ relay_hid_packet(status, 50);
+ assert(relay_hid_step(&output, &pending));
+ assert(status_counts[0] == 2 && status_counts[1] == 0);
+ assert(stats->status_reported_received == 257 && stats->status_reported_gaps == 5);
+
  for(unsigned i=0;i<17;i++)relay_defer_capture(&relay_coord,1,2,50,100+i);
  assert(relay_learning_overflow==1 && relay_coord.peer[1][2].evidence_ms==116);
  struct relay_control c={.session=42,.epoch=3,.members=2,.repair_count=5};

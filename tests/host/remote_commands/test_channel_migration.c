@@ -64,10 +64,10 @@ static bool data_collect_batch_is_active(void) { return batch; }
 static bool esb_ota_relay_abort_pending(uint8_t id) { return abort_pending[id]; }
 static uint8_t collecting_id;
 static uint32_t collecting_mask;
-static void data_collect_start(uint8_t id) { collecting = true; collecting_id = id; }
+static void data_collect_start(uint8_t id) { batch = false; collecting = true; collecting_id = id; }
 static void data_collect_stop(void) { collecting = false; }
 static uint8_t data_collect_get_target_id(void) { return collecting_id; }
-static void data_collect_batch_start(uint32_t mask, uint16_t rate) { batch = true; collecting_mask = mask; }
+static void data_collect_batch_start(uint32_t mask, uint16_t rate) { collecting = false; batch = true; collecting_mask = mask; }
 static void data_collect_batch_stop(void) { batch = false; }
 static bool data_collect_batch_is_target(uint8_t id) { return (collecting_mask & BIT(id)) != 0; }
 static uint8_t stored_trackers, receiver_rf_channel, physical_channel, durable_channel;
@@ -231,6 +231,7 @@ static void done(bool success) {
 }
 static void reset(unsigned count) {
     radio_operation_busy = channel_change_pending = 0;
+    radio_startup_state = ESB_RADIO_READY;
     tracker_store_lock = 0;
     stored_trackers = count;
     memset(stored_tracker_addr, 0, sizeof(stored_tracker_addr));

@@ -148,9 +148,9 @@ struct packet_stats {
 	uint32_t packets_in_last_second; // Number of packets in the last second
 	uint64_t last_tps_time;          // Last TPS calculation timestamp
 	uint32_t current_tps;            // Current TPS (packets per second)
-	// Per-status-period counters (filled into status packet data[4]/data[5], reset after each status packet)
-	uint16_t status_received; // Packets received since last status packet
-	uint16_t status_lost;     // Packets lost (gaps) since last status packet
+	/* Cumulative cursor for counts already admitted in type-3 records. */
+	uint32_t status_reported_received;
+	uint32_t status_reported_gaps;
 };
 
 struct tracker_slot {
@@ -1356,6 +1356,12 @@ static void tdma_recalculate(bool forced)
 static atomic_t radio_operation_busy;
 /* Sticky on an unsafe teardown: never reinitialize/release a faulted RADIO. */
 static bool esb_radio_fault;
+enum esb_radio_startup {
+	ESB_RADIO_STARTING,
+	ESB_RADIO_READY,
+	ESB_RADIO_STARTUP_FAILED,
+};
+static atomic_t radio_startup_state;
 static atomic_t channel_change_pending;
 static uint8_t pending_channel;
 static uint8_t channel_command;
@@ -1370,15 +1376,17 @@ static esb_remote_confirm_cb_t remote_confirm_cb;
 
 bool esb_channel_is_busy(void)
 {
-	return atomic_get(&radio_operation_busy) != 0;
+	return atomic_get(&radio_startup_state) != ESB_RADIO_READY ||
+	       atomic_get(&radio_operation_busy) != 0;
 }
 
-static int radio_operation_begin(bool replace_collection)
+static int radio_operation_begin(bool replace_collection, bool require_radio)
 {
-	if (esb_radio_fault) {
+	enum esb_radio_startup startup = atomic_get(&radio_startup_state);
+	if (esb_radio_fault || (require_radio && startup == ESB_RADIO_STARTUP_FAILED)) {
 		return -EIO;
 	}
-	if (!atomic_cas(&radio_operation_busy, 0, 1)) {
+	if (startup == ESB_RADIO_STARTING || !atomic_cas(&radio_operation_busy, 0, 1)) {
 		return -EBUSY;
 	}
 	if (esb_ota_relay_is_active() || receiver_ota_is_active() ||
@@ -1397,12 +1405,17 @@ static int radio_operation_begin(bool replace_collection)
 
 int esb_radio_operation_begin(void)
 {
-	return radio_operation_begin(false);
+	return radio_operation_begin(false, true);
+}
+
+int esb_radio_self_ota_begin(void)
+{
+	return radio_operation_begin(false, false);
 }
 
 int esb_radio_collection_begin(void)
 {
-	int err = radio_operation_begin(true);
+	int err = radio_operation_begin(true, true);
 	if (!err) {
 		esb_auto_loss_invalidate();
 	}
@@ -2194,7 +2207,6 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		stats->normal_packets++;
 		stats->last_sequence = received_seq;
 		stats->first_packet = false;
-		stats->status_received++;
 		decision_accept(tracker_id, 0);
 		LOG_DBG("First packet: tracker=%d, seq=%d", tracker_id, received_seq);
 		return 0;
@@ -2218,7 +2230,6 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		tracker_slots[tracker_id].last_packet_sequence = received_seq;
 		stats->normal_packets++;
 		stats->last_sequence = received_seq;
-		stats->status_received++;
 		decision_accept(tracker_id, 0);
 		LOG_DBG("Normal packet: tracker=%d, seq=%d", tracker_id, received_seq);
 		return 0;
@@ -2263,7 +2274,6 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		decision_fence_mask |= BIT(tracker_id);
 		tracker_slots[tracker_id].last_packet_sequence = received_seq;
 		stats->last_sequence = received_seq;
-		stats->status_received++;
 		// Restart events are kept at WARNING level because this is important information
 		LOG_WRN(
 			"Tracker restart detected: tracker=%d, last_seq=%d, new_seq=%d, jump=%d",
@@ -2282,8 +2292,6 @@ static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 		stats->gap_events++;
 		uint8_t gaps = diff_forward - 1;
 		stats->total_gaps += gaps; // Estimate number of lost packets
-		stats->status_received++;
-		stats->status_lost += gaps;
 		decision_accept(tracker_id, gaps);
 		tracker_slots[tracker_id].last_packet_sequence = received_seq;
 		stats->last_sequence = received_seq;
@@ -2787,11 +2795,9 @@ static void relay_host_stats_publish(uint8_t id, uint8_t skipped)
 {
 	struct packet_stats *stats = &tracker_slots[id].stats;
 	stats->total_received++;
-	stats->status_received++;
 	if (skipped) {
 		stats->gap_events++;
 		stats->total_gaps += skipped;
-		stats->status_lost += skipped;
 	} else {
 		stats->normal_packets++;
 	}
@@ -3698,6 +3704,39 @@ static void esb_receive_ping(const struct esb_payload *payload, uint32_t event_t
 	tracker_slots[tracker_id].last_pong_queued_counter = counter;
 }
 
+static bool esb_forward_tracker_packet(uint8_t pkt[16], uint8_t rssi)
+{
+	struct packet_stats *stats = NULL;
+	unsigned int key;
+	if (pkt[0] == 3) {
+		/* Serialize the status cursor with RF updates and stats resets.
+		 * With relay enabled, the worker samples totals on each admission attempt. */
+		key = irq_lock();
+		stats = &tracker_slots[pkt[1]].stats;
+		uint32_t received = stats->total_received - stats->status_reported_received;
+		uint32_t gaps = stats->total_gaps - stats->status_reported_gaps;
+		pkt[4] = MIN(received, UINT8_MAX);
+		pkt[5] = MIN(gaps, UINT8_MAX);
+		pkt[6] = 0; /* windows_hit (not implemented) */
+		pkt[7] = 0; /* windows_missed (not implemented) */
+	}
+
+#if defined(CONFIG_RELAY)
+	bool admitted = hid_try_write_packet_n(pkt, rssi);
+#else
+	bool admitted = hid_write_packet_n(pkt, rssi);
+#endif
+	if (stats) {
+		/* Retain counts that did not fit or were not admitted to the FIFO. */
+		if (admitted) {
+			stats->status_reported_received += pkt[4];
+			stats->status_reported_gaps += pkt[5];
+		}
+		irq_unlock(key);
+	}
+	return admitted;
+}
+
 #if defined(CONFIG_RELAY)
 /* Learning does not affect receipt/deduplication evidence at the freeze.
  * Copy the grant with reports: a queued report must use its receive-time grant. */
@@ -3818,7 +3857,7 @@ static bool relay_hid_step(struct relay_hid_record *record, bool *pending)
 		if (k_msgq_get(&relay_hid_queue, record, K_NO_WAIT)) return false;
 		*pending = true;
 	}
-	if (!hid_try_write_packet_n(record->data, record->rssi)) {
+	if (!esb_forward_tracker_packet(record->data, record->rssi)) {
 		relay_hid_refused++;
 		return false;
 	}
@@ -4002,26 +4041,13 @@ static void esb_execute_composite(struct esb_payload *payload, uint32_t event_ti
 		pkt[1] = tracker_id;
 		memcpy(&pkt[2], &payload->data[pos], MIN(sub_len, 14));
 
-		/* For status packets (type 3), fill packet loss stats */
-		if (sub_type == 3) {
-			struct packet_stats *stats = &tracker_slots[tracker_id].stats;
-			pkt[4] = stats->status_received;
-			pkt[5] = stats->status_lost;
-			pkt[6] = 0;
-			pkt[7] = 0;
-			stats->status_received = 0;
-			stats->status_lost = 0;
-		}
 #if defined(CONFIG_RELAY)
 		if (sub_type == 0) {
 			relay_take_caps(tracker_id, pkt);
 		}
-#endif
-
-#if defined(CONFIG_RELAY)
 		relay_hid_packet(pkt, payload->rssi);
 #else
-		hid_write_packet_n(pkt, payload->rssi);
+		esb_forward_tracker_packet(pkt, payload->rssi);
 #endif
 		pos += sub_len;
 	}
@@ -4099,16 +4125,6 @@ static void esb_receive_normal(struct esb_payload *payload, uint32_t event_ticks
 	}
 
 	// Forward packet for other cases (normal, potential loss, reboot)
-	// For status packets (type 3), fill in packet loss statistics before forwarding
-	if (payload->data[0] == 3) {
-		struct packet_stats *stats = &tracker_slots[tracker_id].stats;
-		payload->data[4] = stats->status_received;
-		payload->data[5] = stats->status_lost;
-		payload->data[6] = 0; // windows_hit (not implemented)
-		payload->data[7] = 0; // windows_missed (not implemented)
-		stats->status_received = 0;
-		stats->status_lost = 0;
-	}
 	if (payload->data[0] == 0) {
 		relay_take_caps(tracker_id, payload->data);
 	}
@@ -4487,18 +4503,7 @@ static void event_handler(struct esb_evt const *event)
 				}
 
 				// Forward packet for other cases (normal, potential loss, reboot)
-				// For status packets (type 3), fill in packet loss statistics before forwarding
-				if (rx_payload.data[0] == 3) {
-					struct packet_stats *stats = &tracker_slots[tracker_id].stats;
-					rx_payload.data[4] = stats->status_received;
-					rx_payload.data[5] = stats->status_lost;
-					rx_payload.data[6] = 0; // windows_hit (not implemented)
-					rx_payload.data[7] = 0; // windows_missed (not implemented)
-					stats->status_received = 0;
-					stats->status_lost = 0;
-				}
-				hid_write_packet_n(rx_payload.data,
-								   rx_payload.rssi); // write to hid endpoint
+				esb_forward_tracker_packet(rx_payload.data, rx_payload.rssi);
 			} break;
 #endif
 			default: {
@@ -4545,42 +4550,49 @@ static void event_handler(struct esb_evt const *event)
 	}
 }
 
-int clocks_start(void)
-{
-	int err;
-	int res;
-	struct onoff_manager *clk_mgr;
-	struct onoff_client clk_cli;
-	int fetch_attempts = 0;
+#define HFXO_START_TIMEOUT_MS 100
+static K_SEM_DEFINE(clocks_start_sem, 0, 1);
+static struct onoff_client clocks_start_client;
+static int clocks_start_result;
 
-	clk_mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
-	if (!clk_mgr) {
-		LOG_ERR("Unable to get the Clock manager");
+static void clocks_start_complete(struct onoff_manager *mgr, struct onoff_client *cli,
+				  uint32_t state, int res)
+{
+	ARG_UNUSED(mgr);
+	ARG_UNUSED(cli);
+	clocks_start_result = res < 0 ? res : (state == ONOFF_STATE_ON ? 0 : -EIO);
+	k_sem_give(&clocks_start_sem);
+}
+
+/* Single attempt, owned by the ESB startup thread. On success the receiver
+ * keeps this reference until reset, including between ESB/scanner modes. */
+static __attribute__((noinline)) int clocks_start(void)
+{
+	struct onoff_manager *mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
+	if (!mgr) {
 		return -ENXIO;
 	}
 
-	sys_notify_init_spinwait(&clk_cli.notify);
-
-	err = onoff_request(clk_mgr, &clk_cli);
+	/* Completion may run inside request, or even after a timeout if the
+	 * manager already detached the notification. Never reuse this client. */
+	sys_notify_init_callback(&clocks_start_client.notify, clocks_start_complete);
+	int err = onoff_request(mgr, &clocks_start_client);
 	if (err < 0) {
-		LOG_ERR("Clock request failed: %d", err);
 		return err;
 	}
 
-	do {
-		err = sys_notify_fetch_result(&clk_cli.notify, &res);
-		if (!err && res) {
-			LOG_ERR("Clock could not be started: %d", res);
-			return res;
-		}
-		if (err && ++fetch_attempts > 10000) {
-			LOG_WRN("Unable to fetch Clock request result: %d", err);
-			return err;
-		}
-	} while (err);
+	if (k_sem_take(&clocks_start_sem, K_MSEC(HFXO_START_TIMEOUT_MS)) == 0) {
+		return clocks_start_result;
+	}
 
-	LOG_DBG("HF clock started");
-	return 0;
+	/* Cancels a queued request, or releases the ref already assigned at
+	 * transition completion, even if our callback hasn't run yet. For a
+	 * raced failed transition the manager is in ERROR and grants no ref. */
+	err = onoff_cancel_or_release(mgr, &clocks_start_client);
+	if (err < 0 && err != -EIO) {
+		LOG_ERR("HFXO timeout cleanup failed: %d", err);
+	}
+	return -ETIMEDOUT;
 }
 /* ESB pipe addresses (base addresses big-endian). */
 static const uint8_t discovery_base_addr_0[4] = {0x62, 0x39, 0x8A, 0xF2};
@@ -4623,28 +4635,22 @@ static int esb_initialize_internal(bool tx, bool quiet)
 	int err;
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
+	config.protocol = ESB_PROTOCOL_ESB_DPL;
 	config.bitrate = ESB_BITRATE_2MBPS_BLE;
+	config.event_handler = event_handler;
+	config.tx_output_power = CONFIG_RADIO_TX_POWER;
+	config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
+	config.selective_auto_ack = true;
+	config.use_fast_ramp_up = true;
 
 	if (tx) {
-		config.protocol = ESB_PROTOCOL_ESB_DPL;
-		config.event_handler = event_handler;
-		config.tx_output_power = CONFIG_RADIO_TX_POWER;
-		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
 		config.tx_mode = ESB_TXMODE_MANUAL;
-		config.selective_auto_ack = true;
-		config.use_fast_ramp_up = true;
 	} else {
-		config.protocol = ESB_PROTOCOL_ESB_DPL;
 		config.mode = ESB_MODE_PRX;
-		config.event_handler = event_handler;
 #if defined(CONFIG_RELAY)
 		config.rx_metadata_handler = relay_rx_metadata;
 #endif
 		config.ack_handler = esb_ack_handler_cb;
-		config.tx_output_power = CONFIG_RADIO_TX_POWER;
-		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
-		config.selective_auto_ack = true;
-		config.use_fast_ramp_up = true;
 	}
 
 	if (!quiet) {
@@ -5573,6 +5579,19 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 	esb_send_remote_command_arg(tracker_id, command_flag, 0);
 }
 
+void esb_publish_remote_command_locked(uint8_t tracker_id, uint8_t command_flag, uint8_t arg)
+{
+	if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON ||
+	    command_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
+		tracker_slots[tracker_id].last_raw_valid = false;
+	}
+	if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON) {
+		raw_arq_reset();
+	}
+	tracker_slots[tracker_id].pending_cmd_arg = arg;
+	tracker_slots[tracker_id].tracker_remote_command = command_flag;
+}
+
 void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8_t arg)
 {
 	if (command_flag == ESB_PONG_FLAG_SET_CHANNEL || command_flag == ESB_PONG_FLAG_CLEAR_CHANNEL ||
@@ -5583,15 +5602,7 @@ void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8
 	}
 	if (tracker_id < MAX_TRACKERS) {
 		unsigned int key = irq_lock();
-		if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON ||
-		    command_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
-			tracker_slots[tracker_id].last_raw_valid = false;
-		}
-		if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON) {
-			raw_arq_reset();
-		}
-		tracker_slots[tracker_id].pending_cmd_arg = arg;
-		tracker_slots[tracker_id].tracker_remote_command = command_flag;
+		esb_publish_remote_command_locked(tracker_id, command_flag, arg);
 		irq_unlock(key);
 		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", esb_pong_flag_name(command_flag),
 			command_flag, tracker_id);
@@ -6131,12 +6142,8 @@ static int tracker_store_restore(void)
 
 static void esb_thread(void)
 {
-	clocks_start();
 #if defined(CONFIG_RELAY)
 	relay_session = sys_rand32_get();
-#endif
-
-#if defined(CONFIG_RELAY)
 	relay_settings_load();
 #endif
 	int roster_err = tracker_store_restore();
@@ -6162,10 +6169,24 @@ static void esb_thread(void)
 	memcpy(receiver_device_addr, dev_addr, 6);
 	LOG_INF("Receiver address: %012llX", *dev_addr & 0xFFFFFFFFFFFF);
 
-	// Always start in unified mode: pipe 0 for pairing, pipes 1-7 for data
-	esb_set_addr_unified();
-	esb_initialize(false);
-	esb_start_rx();
+	int err = clocks_start();
+	if (!err) {
+		// Unified mode: pipe 0 for pairing, pipes 1-7 for data
+		esb_set_addr_unified();
+		err = esb_initialize(false);
+		if (!err) {
+			err = esb_start_rx();
+			if (err) {
+				(void)esb_radio_quiesce();
+			}
+		}
+	}
+	if (err) {
+		LOG_ERR("Radio startup failed: %d", err);
+		set_status(SYS_STATUS_CONNECTION_ERROR, true);
+		atomic_set(&radio_startup_state, ESB_RADIO_STARTUP_FAILED);
+		return;
+	}
 
 	// Auto-enable pairing mode if no stored trackers
 	if (tracker_store_ready && tracker_count == 0) {
@@ -6177,6 +6198,7 @@ static void esb_thread(void)
 		LOG_INF("No stored trackers, pairing mode auto-enabled");
 		set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 	}
+	atomic_set(&radio_startup_state, ESB_RADIO_READY);
 	auto_channel_init(receiver_device_addr);
 
 	while (1) {

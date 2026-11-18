@@ -5,6 +5,7 @@ static int failures;
 static void reset_state(void)
 {
 	memset(tracker_slots, 0, sizeof(tracker_slots));
+	memset(&relay_rx_stats, 0, sizeof(relay_rx_stats));
 	memset(hid_out, 0, sizeof(hid_out));
 	hid_count = 0;
 	shadow_seen = 0;
@@ -44,7 +45,6 @@ static void make_normal(struct esb_payload *p, uint8_t type, uint8_t id, uint8_t
 static void test_normal_stats(void)
 {
  reset_state(); relay_profile = 0;
- memset(&relay_rx_stats, 0, sizeof(relay_rx_stats));
  struct esb_payload p;
  make_normal(&p, 1, 2, 5, 60);
  esb_receive_normal(&p, 0, false);
@@ -111,13 +111,16 @@ static void test_fast_repair(void)
 	CHECK(direct.rssi == 60 && hid_out[0].rssi == 60);
 	CHECK(shadow_seen == (1U << 2)); /* valid repairs renew membership */
 	/* A published repair counts once in the host totals. */
-	CHECK(tracker_slots[2].stats.total_received == 1 && tracker_slots[2].stats.status_received == 1);
+	CHECK(tracker_slots[2].stats.total_received == 1);
+	CHECK(relay_rx_stats.arrivals == 1 && relay_rx_stats.repair_accepted == 1);
 	CHECK(relay_coord.peer[0][2].rssi_x8 == 480 && !relay_coord.peer[0][2].expected);
 	shadow_seen = 0;
 	esb_receive_repair(&packet, at);
 	CHECK(hid_count == 1);
 	CHECK(shadow_seen == 0); /* a duplicate renews nothing */
 	CHECK(tracker_slots[2].stats.total_received == 1); /* nor counts */
+	CHECK(relay_rx_stats.arrivals == 2 && relay_rx_stats.repair_accepted == 1);
+	CHECK(relay_rx_stats.duplicate_stale == 1);
 	r.helper = 1;
 	packet.pipe = 2;
 	packet.length = relay_repair_encode(packet.data, &r);
@@ -166,7 +169,10 @@ static void test_private_host_stats(void)
 	esb_receive_normal(&p, 0, false);
 	esb_receive_normal(&p, 0, false); /* duplicate */
 	native = tracker_slots[2].stats;
-	CHECK(hid_count == 2 && native.total_received == 2 && native.total_gaps == 2 && native.status_lost == 2);
+	CHECK(hid_count == 2 && native.total_received == 2 && native.total_gaps == 2);
+	uint8_t status[16] = {3, 2};
+	CHECK(esb_forward_tracker_packet(status, 60));
+	CHECK(hid_out[2].pkt[4] == 2 && hid_out[2].pkt[5] == 2);
 
 	reset_state();
 	relay_profile = RELAY_PROFILE_120HZ;
@@ -183,7 +189,10 @@ static void test_private_host_stats(void)
 	priv = tracker_slots[2].stats;
 	CHECK(hid_count == 2);
 	CHECK(priv.total_received == native.total_received && priv.total_gaps == native.total_gaps);
-	CHECK(priv.status_received == native.status_received && priv.status_lost == native.status_lost);
+	CHECK(esb_forward_tracker_packet(status, 60));
+	CHECK(hid_out[2].pkt[4] == 2 && hid_out[2].pkt[5] == 2);
+	CHECK(esb_forward_tracker_packet(status, 60));
+	CHECK(hid_out[3].pkt[4] == 0 && hid_out[3].pkt[5] == 0);
 	CHECK(priv.gap_events == native.gap_events && priv.normal_packets == native.normal_packets);
 	relay_direct_pose = false;
 	relay_profile = 0;

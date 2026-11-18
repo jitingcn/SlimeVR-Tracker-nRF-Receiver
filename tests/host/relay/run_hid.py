@@ -3,7 +3,7 @@
 same HID packets as the same frame received directly, so an unmodified
 SlimeVR server sees nothing new. Runs the production functions extracted from
 esb.c (sequence check, normal/composite/repair processing, capability strip)
-against a recording hid_write_packet_n()."""
+against a recording HID FIFO writer."""
 from pathlib import Path as _RelayPath
 import sys as _relay_sys
 _relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
@@ -96,13 +96,14 @@ static bool tracker_events_receive(const uint8_t *p, size_t n, uint32_t now) { (
 struct hid_record { uint8_t pkt[16]; uint8_t rssi; };
 static struct hid_record hid_out[32];
 static int hid_count;
-static void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
+static bool hid_try_write_packet_n(const uint8_t *data, uint8_t rssi)
 {
 	memcpy(hid_out[hid_count].pkt, data, 16);
 	hid_out[hid_count].rssi = rssi;
 	hid_count++;
+	return true;
 }
-#define relay_hid_packet hid_write_packet_n
+#define relay_hid_packet esb_forward_tracker_packet
 #define relay_defer_capture relay_coord_capture
 #define relay_defer_report relay_coord_report
 static struct relay_coord relay_coord;
@@ -116,7 +117,7 @@ def main():
              relay_state,
              function("packet_stats_refresh"), function("packet_stats_count"), function("check_packet_sequence"),
              function("relay_multi_blocked"), function("relay_block_drop"), function("relay_host_stats_publish"), function("relay_sequence_check"), function("relay_take_caps"),
-             function("composite_body_length"),
+             function("composite_body_length"), function("esb_forward_tracker_packet"),
              block(r"^struct composite_result\s*\{"), function("composite_validate"), function("esb_execute_composite"), function("esb_receive_composite"), function("esb_receive_normal"), function("esb_receive_repair"), function("esb_receive_peer_report"),
              (HERE / "hid_cases.c").read_text()]
     with tempfile.TemporaryDirectory() as tmp:

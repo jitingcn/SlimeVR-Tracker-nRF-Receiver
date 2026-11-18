@@ -28,7 +28,7 @@ from relay_support import relay_section, relay_query_helpers, staging_helpers
 CASES = ('maintenance', 'wrong-type', 'bad-crc', 'wrong-pipe', 'out-of-range', 'interleaved-pipe',
          'ota-status', 'ota-info', 'valid', 'valid-dirty', 'reacquire',
          'event-fallback', 'valid-after-invalid', 'duplicate', 'out-of-order', 'drain',
-         'detailed-warning', 'late-metadata', 'pairing-gate')
+         'detailed-warning', 'late-metadata', 'pairing-gate', 'status-admission')
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source', type=Path, default=ROOT / 'src/connection/esb.c')
 parser.add_argument('--case', action='append', choices=CASES)
@@ -36,6 +36,8 @@ args = parser.parse_args()
 source = select_relay(args.source.read_text())
 header = (ROOT / 'src/connection/esb.h').read_text()
 auto_source = (ROOT / 'src/connection/auto_channel.c').read_text()
+hid_source = (ROOT / 'src/hid.c').read_text()
+hid_cmd = (ROOT / 'src/rcv_hid_cmd.h').read_text()
 
 
 def function(name):
@@ -65,10 +67,32 @@ event = function('event_handler')
 clock = function('account_ping_clock') if re.search(r'^static void account_ping_clock\s*\(', source, re.M) else ''
 clock = '#if defined(CONFIG_TDMA_DIAGNOSTICS)\n' + clock + '\n#endif\n'
 lengths = extract_block(source, r'^static int composite_body_length\s*\([^;{}]*\)\s*\{')
-lengths += '\n' + extract_block(source, r'^static bool relay_early_receipt_valid\s*\([^;{}]*\)\s*\{')
-packet_helpers = extract_block(source, r'^struct composite_result\s*\{', True) + '\n' + '\n'.join(function(name) for name in ('esb_receive_ping', 'composite_validate', 'esb_execute_composite', 'esb_receive_composite',
-                                                     'esb_receive_normal', 'esb_receive_repair', 'esb_receive_peer_report')
-                           if re.search(rf'^static (?:void|bool) {name}\s*\(', source, re.M))
+lengths += '\n' + function('relay_early_receipt_valid')
+packet_helpers = (function('esb_forward_tracker_packet') + """
+#undef relay_hid_packet
+/* Drain each deferred record immediately to model ingest without a worker. */
+static void relay_hid_packet(uint8_t data[16], uint8_t rssi)
+{
+    if (!esb_forward_tracker_packet(data, rssi)) hid_note_dropped(data);
+}
+""" + extract_block(source, r'^struct composite_result\s*\{', True) + '\n' +
+    '\n'.join(function(name) for name in (
+        'esb_receive_ping', 'composite_validate', 'esb_execute_composite',
+        'esb_receive_composite', 'esb_receive_normal', 'esb_receive_repair',
+        'esb_receive_peer_report')))
+
+hid_bodies = '\n'.join((
+    *re.findall(r'^#define RCV_HID_TYPE_CMD(?:_ACK)?\s+[^\n]+', hid_cmd, re.M),
+    hid_source[hid_source.index('#define MAX_REPORTS'):hid_source.index('static bool hid_fifo_is_empty')],
+    *re.findall(r'^#define RSSI_EMA_ALPHA\b[^\n]*', hid_source, re.M),
+    extract_block(hid_source, r'^struct rssi_ema_state\s*\{', True),
+    *re.findall(r'^static [^\n]+\b(?:rssi_states|dropped_reports|max_dropped_reports|'
+                r'total_dropped_reports|tracker_drops|total_tracker_drops)\b[^;\n]*;', hid_source, re.M),
+    *(extract_block(hid_source, rf'^[\w \t]+\b{name}\s*\([^;{{}}]*\)\s*\{{') for name in (
+        'rssi_smooth_update', 'hid_type_byte1_is_tracker_id', 'hid_type_has_rssi_slot',
+        'hid_push_packet', 'hid_note_dropped', 'hid_enqueue_packet', 'hid_write_packet_n_internal',
+        'hid_try_write_packet_n', 'hid_write_packet_n')),
+))
 fixture = (HERE / 'fixture.c').read_text()
 auto_channel = extract_block(auto_source, r'^bool auto_channel_is_beacon\s*\([^;{}]*\)\s*\{')
 auto_enabled_source = auto_source[:auto_source.rindex('\nbool auto_channel_receive')]
@@ -77,6 +101,7 @@ auto_channel += '\n' + extract_block(
 fixture = fixture.replace('/* ACTUAL AUTO CHANNEL */', auto_channel)
 fixture = fixture.replace('/* PROTOCOL CONSTANTS */', constants)
 fixture = fixture.replace('/* PRODUCTION STATE */', shape)
+fixture = fixture.replace('/* ACTUAL HID FIFO */', hid_bodies)
 fixture = fixture.replace('/* ACTUAL PRODUCTION FUNCTIONS */',
                           '\n\n'.join((relay_section(source), relay_query_helpers(source), staging_helpers(source), lengths, clock, ack, packet_helpers, event)))
 
