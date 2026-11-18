@@ -886,7 +886,7 @@ static struct {
 	uint32_t activation_ticks;
 	bool valid;
 	bool native_followup;
-	/* Keep revoked IDs out of PONG masks through the lead of their fresh stage. */
+	/* Filter revoked IDs from the current mask and pending native mask until readmission. */
 	uint16_t revoked_mask;
 	uint16_t readmit_mask;
 	int64_t native_guard_until_ms;
@@ -3357,9 +3357,9 @@ static void esb_ack_handler_cb(
 			if (tdma_staged.valid && !due && cmd == ESB_PONG_FLAG_NORMAL) {
 				uint32_t lead = tdma_staged.activation_ticks - rx_ticks;
 				uint16_t pending = (uint16_t)tdma_staged.p.new_mask;
-				trailer.pending_member_mask = tdma_wire_members(pending, revoked);
-				/* The v5 private trailer requires a full roster for its geometry. */
-				trailer.pending = !tdma_staged.p.profile || trailer.pending_member_mask == pending;
+				/* Survivors need the full pending private roster to stage the v5 geometry. */
+				trailer.pending_member_mask = tdma_staged.p.profile ? pending : tdma_wire_members(pending, revoked);
+				trailer.pending = true;
 				trailer.pending_epoch = tdma_staged.p.epoch;
 				trailer.pending_total
 					= tdma_staged.p.profile
