@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Exercise test-all layout publication against a pending targeted command."""
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import importlib.util
 import os
 from pathlib import Path
@@ -13,7 +18,7 @@ ROOT = HERE.parents[2]
 spec = importlib.util.spec_from_file_location("extract", HERE.parent / "tdma_loss/run.py")
 extract = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(extract)
-source = (ROOT / "src/connection/esb.c").read_text()
+source = select_relay((ROOT / "src/connection/esb.c").read_text())
 header = (ROOT / "src/connection/esb.h").read_text()
 
 
@@ -56,6 +61,7 @@ prelude = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "relay_protocol.h"
 #define MAX_TRACKERS 4
 #define BIT(n) (1U << (n))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -135,6 +141,7 @@ static void reset(void) {
     test_all_broadcasting = test_all_generation = 0;
     test_all_requested_tps = test_all_effective_tps = 500;
     tdma_dynamic_slot_ticks = 64;
+
     tdma_active_mask = BIT(0) | BIT(1);
     irq_depth = attempts = deferred = deliveries = reclamp_logs = 0;
     target_armed = true;
@@ -174,6 +181,9 @@ int main(void) {
     test_all_update_effective(2, 1000, true);
     assert(!irq_depth && !attempts && !reclamp_logs);
     puts("PASS test-all layout publication excludes targeted command preemption");
+    tdma_dynamic_slot_ticks = 16;
+    assert(test_all_capacity_tps(11) == 180);
+    puts("PASS test-all direct-slot capacity is 180 TPS");
     return 0;
 }
 '''
@@ -185,6 +195,6 @@ with tempfile.TemporaryDirectory(prefix="receiver-policy-publication-") as direc
     subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-g", "-O1",
         "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
-        str(generated), "-o", str(binary),
+        "-I", str(ROOT / "src/connection"), str(generated), "-o", str(binary),
     ], check=True)
     subprocess.run([str(binary)], check=True)

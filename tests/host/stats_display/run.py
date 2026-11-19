@@ -6,6 +6,11 @@ its if (display_expired) log block. State accesses are instrumented to model an
 interrupt attempting to observe the pair while the display spinlock is held.
 """
 
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse
 import os
 from pathlib import Path
@@ -23,7 +28,7 @@ from c_extract import _code_mask, extract_block
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source', type=Path, default=ROOT / 'src/connection/esb.c')
 args = parser.parse_args()
-source = args.source.read_text()
+source = select_relay(args.source.read_text())
 
 
 def unique(pattern, text):

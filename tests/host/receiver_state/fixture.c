@@ -53,6 +53,11 @@ static void k_mutex_lock(int *lock, int timeout) { (void)lock; (void)timeout; as
 static void k_mutex_unlock(int *lock) { (void)lock; assert(mutex_depth == 1 && !irq_depth); mutex_depth--; }
 static int64_t k_uptime_get(void) { return now_ms; }
 static uint32_t k_uptime_get_32(void) { return now_ms; }
+static uint32_t k_uptime_ticks(void) { return (uint32_t)(now_ms * 32768 / 1000); }
+static uint32_t k_ticks_to_ms_ceil32(uint32_t ticks)
+{
+    return (uint32_t)(((uint64_t)ticks * 1000 + 32767) / 32768);
+}
 static void k_msleep(unsigned ms) { assert(!irq_depth); now_ms += ms; }
 static void k_msgq_purge(int *q) { (void)q; assert(!irq_depth); }
 static uint64_t mock_device_addr;
@@ -252,6 +257,9 @@ static void reset_one_slot(unsigned id)
 
 static void test_isolated_reset(void)
 {
+	/* Member 1 is active, so it must be a stored (admissible) slot. */
+	uint8_t stored_before = stored_trackers;
+	stored_trackers = 2;
 	seed_slot(0);
 	seed_slot(1);
 	metadata_next_token = 0x4567;
@@ -282,6 +290,7 @@ static void test_isolated_reset(void)
 	check_slot(0);
 	assert(!tdma_membership_deadline_armed);
 	assert(auto_loss_reset_epoch == before + 2 && pairing_invalidations == pairing_before + 2);
+	stored_trackers = stored_before;
 }
 
 static void test_partial_resets(void)

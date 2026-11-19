@@ -84,6 +84,9 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(NONE)
 
 FILE(GLOB_RECURSE app_sources CONFIGURE_DEPENDS src/*.c)
+if(NOT CONFIG_RELAY)
+  list(FILTER app_sources EXCLUDE REGEX ".*/connection/relay_coord\\.c$")
+endif()
 # Data collection: choose HID or CDC implementation, or exclude both
 if(CONFIG_DATA_COLLECT)
   if(CONFIG_DATA_COLLECT_HID)

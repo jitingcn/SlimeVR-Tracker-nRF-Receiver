@@ -420,6 +420,13 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 		uint8_t tracker_id = data[1];
 		if (tracker_id >= MAX_TRACKERS) {
 			LOG_ERR("OTA: Invalid tracker ID %u", tracker_id);
+#if defined(CONFIG_RELAY)
+			break;
+		}
+		/* OTA runs over a direct link only, never through a relay head. */
+		if (esb_relay_blocks_ota(tracker_id)) {
+			LOG_WRN("OTA: tracker %u lacks a recent healthy direct link, refused", tracker_id);
+#endif
 			break;
 		}
 		k_spinlock_key_t admission_key = k_spin_lock(&ota_relay_lock);
@@ -463,6 +470,13 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 
 		for (;;) {
 			unsigned int irq_key = irq_lock();
+#if defined(CONFIG_RELAY)
+			if (esb_relay_blocks_ota(tracker_id)) {
+				irq_unlock(irq_key);
+				if (acquired_radio) esb_radio_operation_end();
+				break;
+			}
+#endif
 			uint32_t now = k_uptime_ticks();
 			k_spinlock_key_t key = k_spin_lock(&ota_relay_lock);
 			struct ota_per_tracker *t = &ota_relay.tracker[tracker_id];

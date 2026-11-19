@@ -125,7 +125,7 @@ def enum_name(names: dict[int, str], value: int) -> str:
 
 
 def decode_tracker_event(record: bytes, received_monotonic_ms: int | None = None) -> dict | None:
-    """Decode a private legacy 16-byte notification, never a v3 packet."""
+    """Decode a private legacy 16-byte notification, never a relay packet."""
     if (len(record) != 16 or record[0] != RCV_HID_TYPE_CMD_ACK or record[1] != 0
             or record[2] not in (RCV_HID_OP_TRACKER_EVENT, RCV_HID_OP_TRACKER_OBSERVATION)):
         return None

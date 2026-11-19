@@ -9,7 +9,6 @@
 #define BIT(n) (1u << (n))
 #define ARG_UNUSED(x) (void)(x)
 #define K_MSEC(x) (x)
-#define REMOTE_HID_CONFIRM_TIMEOUT_MS 5000
 static char console_output[4096];
 static size_t console_used;
 static void capture_console(const char *format, ...)
@@ -42,8 +41,8 @@ static atomic_t remote_hid_pending, remote_hid_expected, remote_hid_confirmed;
 static uint8_t remote_hid_seq, remote_hid_opcode, remote_hid_flag;
 static bool remote_wom_console;
 static uint16_t remote_wom_token, remote_wom_minutes;
-static uint32_t remote_wom_failed;
-static int64_t remote_wom_deadline;
+static union { uint32_t wom_failed; } remote_hid_wait;
+static int64_t remote_hid_deadline;
 enum { REMOTE_HID_JOB_NONE, REMOTE_HID_JOB_WOM_COMMAND };
 static int remote_hid_job;
 static uint8_t acks[20][16];
@@ -53,6 +52,7 @@ static void (*async_ack_fn)(const uint8_t *) = capture;
 static uint16_t next_token, available_token[16], result_minutes[16], result_error[16];
 static uint32_t available, queued_mask = BIT(2) | BIT(5), cancelled_mask;
 static uint16_t cancelled_token;
+static int64_t staged_until;
 static unsigned sends;
 static uint16_t sent_minutes;
 uint32_t esb_send_remote_wom_command(uint8_t target, uint16_t minutes, uint16_t *token)
@@ -66,6 +66,11 @@ bool esb_get_remote_wom_result(uint8_t id, uint16_t token, uint16_t *minutes, ui
 {
     if (!(available & BIT(id)) || available_token[id] != token) return false;
     *minutes = result_minutes[id]; *error = result_error[id]; return true;
+}
+bool esb_remote_wom_waiting(uint8_t id, uint16_t token)
+{
+    return id == 2 && token == remote_wom_token
+        && now < staged_until + ESB_WOM_COMMAND_TIMEOUT_MS;
 }
 void esb_cancel_remote_wom_command(uint32_t mask, uint16_t token)
 { cancelled_mask = mask; cancelled_token = token; }
@@ -100,7 +105,7 @@ int main(void)
     assert(submitted == 1 && sends == before && remote_wom_minutes == 10);
     /* Drive the same post-scan state the deferred job publishes. */
     remote_hid_expected = esb_send_remote_wom_command(255, remote_wom_minutes, &remote_wom_token);
-    remote_wom_deadline = now + 5000;
+    remote_hid_deadline = now + 5000;
     reply(2, 0, EIO); remote_wom_poll();
     assert(ack_count == 3 && sys_get_le16(&acks[2][8]) == EIO && remote_hid_pending);
     now += 5000; remote_wom_poll();
@@ -123,7 +128,7 @@ int main(void)
     assert(remote_wom_begin(8, 255, ESB_WOM_TIMEOUT_CLEAR, false) == RCV_HID_ST_STARTED);
     assert(submitted == 2 && sends == before && remote_wom_minutes == ESB_WOM_TIMEOUT_CLEAR);
     remote_hid_expected = esb_send_remote_wom_command(255, remote_wom_minutes, &remote_wom_token);
-    remote_wom_deadline = now + 5000;
+    remote_hid_deadline = now + 5000;
     reply(2, 0, 0); reply(5, 0, EIO); remote_wom_poll();
     assert(ack_count == 10 && !remote_hid_pending);
     assert(acks[9][3] == RCV_HID_ST_ENOENT && acks[9][7] == BIT(2) && acks[9][11] == BIT(5));
@@ -150,7 +155,7 @@ int main(void)
     assert(remote_wom_begin(8, 255, ESB_WOM_ENTER, false) == RCV_HID_ST_STARTED);
     assert(submitted == 3 && sends == before && remote_wom_minutes == ESB_WOM_ENTER);
     remote_hid_expected = esb_send_remote_wom_command(255, remote_wom_minutes, &remote_wom_token);
-    remote_wom_deadline = now + 5000;
+    remote_hid_deadline = now + 5000;
     before = ack_count;
     reply(2, ESB_WOM_ENTER, 0); reply(5, 0, EBUSY); remote_wom_poll();
     assert(!remote_hid_pending && ack_count == before + 3);
@@ -166,6 +171,32 @@ int main(void)
     reply(2, 0, ENOTSUP); remote_wom_poll();
     assert(strstr(console_output, "error") && !strstr(console_output, "accepted"));
     request[3] = 1; assert(hid_wom(request, 3) == RCV_HID_ST_EINVAL);
+    request[3] = 0;
+    assert(hid_wom(request, 3) == RCV_HID_ST_STARTED);
+    staged_until = now + 6594;
+    before = ack_count;
+    now += ESB_WOM_COMMAND_TIMEOUT_MS;
+    scheduled = 0;
+    remote_wom_poll();
+    assert(ack_count == before && remote_hid_pending && scheduled == 50);
+    now = staged_until + ESB_WOM_COMMAND_TIMEOUT_MS - 1;
+    scheduled = 0;
+    remote_wom_poll();
+    assert(ack_count == before && remote_hid_pending && scheduled == 50);
+    now++;
+    remote_wom_poll();
+    assert(ack_count == before + 2 && !remote_hid_pending);
+    assert(sys_get_le16(&acks[before][8]) == ETIMEDOUT);
+    assert(hid_wom(request, 3) == RCV_HID_ST_STARTED);
+    staged_until = now + 6594;
+    now = staged_until + 1;
+    before = ack_count;
+    reply(2, ESB_WOM_ENTER, 0);
+    remote_wom_poll();
+    assert(!remote_hid_pending && ack_count == before + 2);
+    assert(acks[before][4] == RCV_HID_WOM_RESULT && acks[before][5] == 2 &&
+           sys_get_le16(&acks[before][8]) == 0 && acks[before+1][3] == RCV_HID_ST_OK &&
+           acks[before+1][4] == RCV_HID_WOM_SUMMARY && acks[before+1][7] == BIT(2));
     puts("WOM job: exact token, false ACK, busy, deferred all, errors, timeout, terminal-only");
     return 0;
 }

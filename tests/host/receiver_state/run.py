@@ -5,6 +5,11 @@ Store and peripheral leaves are modeled; tuple tests inject a possible interrupt
 after each production shared-field store, without changing the store or order.
 --source-root or --esb-source selects function bodies; declarations use the live contract.
 """
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse
 import os
 from pathlib import Path
@@ -18,6 +23,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE.parent / 'harness'))
 from c_extract import extract_block
+from relay_support import relay_declarations
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--source-root', type=Path, default=ROOT)
@@ -25,8 +31,8 @@ parser.add_argument('--esb-source', type=Path)
 parser.add_argument('--case', action='append', choices=['slots', 'shadow', 'tuples', 'pairing'])
 args = parser.parse_args()
 cases = args.case or ['slots', 'shadow', 'tuples', 'pairing']
-source = (args.esb_source or args.source_root / 'src/connection/esb.c').read_text()
-live = (ROOT / 'src/connection/esb.c').read_text()
+source = select_relay((args.esb_source or args.source_root / 'src/connection/esb.c').read_text())
+live = select_relay((ROOT / 'src/connection/esb.c').read_text())
 
 # Explicit inventory is independent of the reset implementation: removing a
 # production reset store must leave a seeded field nonzero and fail the test.
@@ -37,7 +43,7 @@ last_raw_seq last_raw_valid tracker_remote_command pending_cmd_arg tracker_test_
 pending_sens_data pending_sens_auto_axis pending_sens_auto_revolutions
 metadata_active_mask metadata_active_chunk metadata_active_token
 metadata_pending_mask metadata_pending_chunk metadata_pending_token
-wom_token wom_minutes wom_error wom_complete wom_advertised wom_first_ping_counter
+wom_token wom_minutes wom_error wom_complete wom_advertised wom_first_ping_counter wom_deadline_ms
 stats decision_received decision_gaps'''.split()
 diagnostic_fields = '''stats g_last_ping_rx_time_diff_ticks
 g_last_ping_rx_time_diff_valid g_ping_isr_rx_ticks g_ping_isr_rx_ticks_valid
@@ -54,7 +60,8 @@ test_all_state_valid test_all_enabled test_all_requested_tps test_all_effective_
 test_all_generation metadata_next_token wom_next_token tdma_loss_trigger_streak_ticks
 tdma_loss_recover_streak_ticks tdma_loss_probe_streak_ticks tdma_loss_pool_received
 tdma_loss_pool_gaps tdma_loss_pool_ticks auto_loss_reset_epoch decision_ready_mask
-decision_fence_mask tdma_rx_discontinuity_pending'''.split()
+decision_fence_mask tdma_rx_discontinuity_pending relay_query_protected_mask
+relay_query_recovery_started_ms relay_query_recovering relay_query_suspending'''.split()
 
 
 def declaration(name):
@@ -66,7 +73,7 @@ def declaration(name):
 
 
 def function(name):
-    return extract_block(source, rf'^(?:static\s+)?(?:void|bool|int|uint32_t)\s+{name}\([^;{{]*\)\s*\{{')
+    return extract_block(source, rf'^(?:static\s+)?(?:inline\s+)?(?:void|bool|int|uint32_t)\s+{name}\([^;{{]*\)\s*\{{')
 
 
 constants = '\n'.join(re.findall(
@@ -90,8 +97,7 @@ declarations += '\n#endif\n'
 if 'pairing' in cases:
     declarations += '\n' + extract_block(live, r'^struct pairing_event\s*\{', semicolon=True)
 
-names = ['esb_auto_loss_invalidate',
-         'tdma_shadow_observe', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
+names = ['esb_auto_loss_invalidate', 'tdma_shadow_observe', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
          'esb_send_remote_command_sens', 'esb_send_remote_command_sens_auto',
          'esb_send_remote_command_sens_auto_all']
 if re.search(r'^void esb_publish_remote_command_locked\(', source, re.M):
@@ -102,7 +108,8 @@ if 'slots' in cases or 'pairing' in cases:
 if 'slots' in cases:
     names += ['esb_pop_pair', 'esb_clear',
               'tdma_loss_reset_windows', 'tdma_sync_stats_reset', 'esb_rx_discontinuity',
-              'esb_reset_all_stats', 'esb_send_remote_wom_command', 'remote_wom_receive',
+              'esb_reset_all_stats',
+              'esb_send_remote_wom_command', 'remote_wom_receive',
               'esb_get_remote_wom_result', 'esb_request_metadata']
 if 'pairing' in cases:
     # Older comparison sources may not have the warning helper.
@@ -117,6 +124,15 @@ for name in names:
             r'(^[ \t]*tracker_slots\[[^\]\n]+\]\.(?:pending_sens_data(?:\[[^\]]+\])?|pending_sens_auto_axis|pending_sens_auto_revolutions|pending_cmd_arg|tracker_remote_command)\s*=[^\n;]*;)',
             r'\1 preempt();', body, flags=re.M)
     functions.append(body)
+
+# Walk from callers to their relay-only dependencies. A required helper
+# still raises if it is missing from the selected comparison source.
+for name in reversed(('relay_layout_stageable', 'relay_roster_eligible',
+                      'relay_query_can_resume', 'relay_query_update_locked',
+                      'tdma_admissible_mask', 'tdma_staged_pong_mask', 'tdma_defer_wom_locked',
+                      'tdma_revoke_pairings')):
+    if any(re.search(rf'\b{name}\s*\(', body) for body in functions):
+        functions.insert(0, function(name))
 
 stat_slot_fields = {'stats', 'ping_counter_initialized', 'last_ping_counter',
                     'last_pong_queued_counter', 'tdma_prev_recv', 'tdma_prev_gaps',
@@ -169,6 +185,8 @@ for name, lines in checks.items():
     value = 0 if name == 'check_slot' else 1
     generated += [f'assert(rssi[id] == {value});', '}']
 fixture = (HERE / 'fixture.c').read_text()
+if 'relay_coord_forget' in source:
+    declarations += '\n' + relay_declarations(source)
 fixture = fixture.replace('/* PRODUCTION_DECLARATIONS */', declarations)
 fixture = fixture.replace('/* PRODUCTION_FUNCTIONS */', '\n'.join(functions))
 fixture = fixture.replace('/* GENERATED_SLOT_CHECKS */', '\n'.join(generated))
@@ -188,7 +206,7 @@ with tempfile.TemporaryDirectory(prefix='receiver-state-') as directory:
         subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
             '-std=gnu11', '-g', '-O1', '-fsanitize=address,undefined',
             '-fno-omit-frame-pointer', '-fno-pie', '-no-pie',
-            '-I', str(temporary), '-I', str(ROOT / 'src'), *flags, *diagnostic_flags,
+            '-I', str(temporary), '-I', str(ROOT / 'src'), '-I', str(ROOT / 'src/connection'), *flags, *diagnostic_flags,
             str(probe), str(ROOT / 'src/connection/tracker_roster.c'),
             '-o', str(executable),
         ], check=True)

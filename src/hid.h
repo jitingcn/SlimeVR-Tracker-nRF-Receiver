@@ -26,6 +26,21 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Drop types 1 and 4 when their quaternion in bytes 2 to 9 is all zero. */
+static inline bool hid_packet_is_filtered(const uint8_t *data)
+{
+	return (data[0] == 1 || data[0] == 4)
+		&& (data[2] | data[3] | data[4] | data[5] |
+		    data[6] | data[7] | data[8] | data[9]) == 0;
+}
+
+#if defined(CONFIG_RELAY)
+/* True when admitted or filtered. On false, relay retains the record for
+ * retry and the attempt does not increment the drop count. */
+bool hid_try_write_packet_n(const uint8_t *data, uint8_t rssi);
+#endif
+/* Count a report that was discarded for good. IRQ safe. */
+void hid_note_dropped(const uint8_t *data);
 /* True only when the report is admitted to the HID FIFO. */
 bool hid_write_packet_n(const uint8_t *data, uint8_t rssi);
 /* Nonzero subscription generation; false means the FIFO did not accept it. */
