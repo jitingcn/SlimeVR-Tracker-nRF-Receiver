@@ -6,7 +6,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(tracker_events, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(tracker_events, LOG_LEVEL_INF);
 
 #define OP_COUNT 8
 #define RX_COUNT 32
