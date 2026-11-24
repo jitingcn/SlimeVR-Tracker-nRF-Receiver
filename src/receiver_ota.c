@@ -1398,27 +1398,6 @@ static void rcv_ota_enter_ram_engine(uint32_t image_size, uint32_t image_crc32,
 		return;
 	}
 
-	/* The engine leaves the settings page alone and matches the stored
-	 * bank 0 CRC16 instead, so read what the bootloader will check. */
-	const struct bootloader_settings *bl =
-		(const struct bootloader_settings *)RCV_OTA_BOOTLOADER_SETTINGS_ADDR;
-	uint32_t check_size = 0;
-	uint16_t check_crc16 = 0;
-
-	if (bl->bank_0 == BANK_VALID_APP && bl->bank_0_crc != 0u) {
-		check_size = bl->bank_0_size;
-		check_crc16 = bl->bank_0_crc;
-		if (check_size < 0x20u || check_size > RCV_OTA_FLASH_END - RCV_OTA_FLASH_BASE) {
-			LOG_ERR("RCV OTA: unexpected bank 0 size %u", check_size);
-			rcv_ota_refuse(OTA_STATUS_ERROR);
-			return;
-		}
-	} else if (bl->bank_0 != BANK_VALID_APP && bl->bank_0 != 0xFFFFu) {
-		LOG_ERR("RCV OTA: unexpected bank 0 state 0x%04X", bl->bank_0);
-		rcv_ota_refuse(OTA_STATUS_ERROR);
-		return;
-	}
-
 	uint8_t in_ep = 0;
 	uint8_t out_ep = 0;
 
@@ -1438,15 +1417,14 @@ static void rcv_ota_enter_ram_engine(uint32_t image_size, uint32_t image_crc32,
 		.flash_end = RCV_OTA_FLASH_END,
 		.sram_base = sram_base,
 		.sram_end = sram_end,
-		.check_size = check_size,
-		.check_crc16 = check_crc16,
+		.settings_addr = RCV_OTA_BOOTLOADER_SETTINGS_ADDR,
 		.in_ep = in_ep,
 		.out_ep = out_ep,
 		.errata_199 = nrf52_errata_199(),
 	};
 
-	LOG_WRN("RCV OTA: in-place RAM engine, %u bytes, EP in %u out %u, bank0 %u/0x%04X",
-		image_size, params.in_ep, params.out_ep, check_size, check_crc16);
+	LOG_WRN("RCV OTA: in-place RAM engine, %u bytes, EP in %u out %u",
+		image_size, params.in_ep, params.out_ep);
 	rcv_ota_flush_logs();
 
 	if (!rcv_ota_ram_engine_run(&params)) {

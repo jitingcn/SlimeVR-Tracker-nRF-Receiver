@@ -15,8 +15,10 @@
  * Flow (host protocol unchanged, same reports as the staging updater):
  *   READY -> DATA... -> VERIFY (CRC32) -> ACTIVATE -> reset
  * Page 0 stays in RAM until ACTIVATE. It is validated (vector table, MCUboot
- * magic, zero reserved vector 7) and erased before any other page is modified,
- * so an interrupted transfer leaves the receiver in UF2 mode.
+ * magic) and erased before any other page is modified. At ACTIVATE the
+ * bootloader settings page is rewritten with the new size and CRC16, then
+ * page 0 is written last, so an interrupted transfer or activation leaves the
+ * receiver in UF2 mode.
  */
 #include "receiver_ota_ram.h"
 #include "esb_ota.h"
@@ -31,10 +33,11 @@
 #define PAGE_WORDS            (PAGE_SIZE / 4u)
 #define REPORT_SIZE           64u
 #define DATA_PAYLOAD          60u
-#define FIX_OFFSET            0x1Cu       /* Reserved vector 7, unused by Cortex-M4 */
 #define MIN_IMAGE_SIZE        0x20u       /* Minimum vector table size (8 words) */
 #define MCUBOOT_IMAGE_MAGIC   0x96F3B83Du
 #define UF2_RECOVERY_MAGIC    0x57u       /* Adafruit UF2 bootloader DFU magic */
+#define BL_BANK_VALID_APP     0x0001u     /* Adafruit bootloader settings: bank_0 */
+#define BL_BANK_INVALID_APP   0x00FFu     /* Adafruit bootloader settings: bank_1 */
 #define CYCLES_PER_MS         64000u      /* nRF52 HCLK (64 MHz) */
 #define MS(x)                 ((uint32_t)(x) * CYCLES_PER_MS)
 #define IDLE_TIMEOUT          MS(15000)
@@ -58,8 +61,7 @@ struct engine_ctx {
 	uint32_t flash_end;
 	uint32_t sram_base;
 	uint32_t sram_end;
-	uint32_t check_size;
-	uint16_t check_crc16;
+	uint32_t settings_addr;
 	uint8_t in_ep;
 	uint8_t out_ep;
 	uint8_t errata_199;
@@ -131,12 +133,15 @@ static OTA_RAM_TEXT void nvmc_wait(void)
 	}
 }
 
-static OTA_RAM_TEXT bool flash_erase(struct engine_ctx *ctx, uint32_t addr)
+static OTA_RAM_TEXT bool in_app(const struct engine_ctx *ctx, uint32_t addr)
 {
-	if (addr < ctx->base || addr >= ctx->flash_end ||
-	    (addr & PAGE_MASK) != 0u || ctx->flash_end - addr < PAGE_SIZE) {
-		return false;
-	}
+	return addr >= ctx->base && addr < ctx->flash_end &&
+	       (addr & PAGE_MASK) == 0u && ctx->flash_end - addr >= PAGE_SIZE;
+}
+
+/* Callers check the address: an application page or the settings page. */
+static OTA_RAM_TEXT bool nvmc_erase(struct engine_ctx *ctx, uint32_t addr)
+{
 
 	NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Een;
 	__DSB();
@@ -160,14 +165,9 @@ static OTA_RAM_TEXT bool flash_erase(struct engine_ctx *ctx, uint32_t addr)
 	return true;
 }
 
-static OTA_RAM_TEXT bool flash_program_page(struct engine_ctx *ctx, uint32_t addr,
-					    const uint8_t *src)
+static OTA_RAM_TEXT bool nvmc_program(struct engine_ctx *ctx, uint32_t addr,
+				      const uint8_t *src)
 {
-	if (addr < ctx->base || addr >= ctx->flash_end ||
-	    (addr & PAGE_MASK) != 0u || ctx->flash_end - addr < PAGE_SIZE) {
-		return false;
-	}
-
 	const uint32_t *words = (const uint32_t *)src;
 	volatile uint32_t *dst = (volatile uint32_t *)addr;
 
@@ -193,6 +193,17 @@ static OTA_RAM_TEXT bool flash_program_page(struct engine_ctx *ctx, uint32_t add
 		}
 	}
 	return true;
+}
+
+static OTA_RAM_TEXT bool flash_erase(struct engine_ctx *ctx, uint32_t addr)
+{
+	return in_app(ctx, addr) && nvmc_erase(ctx, addr);
+}
+
+static OTA_RAM_TEXT bool flash_program_page(struct engine_ctx *ctx, uint32_t addr,
+					    const uint8_t *src)
+{
+	return in_app(ctx, addr) && nvmc_program(ctx, addr, src);
 }
 
 /* ── USB (bare USBD, endpoints already configured by Zephyr) ─────── */
@@ -352,137 +363,6 @@ static OTA_RAM_TEXT uint16_t crc16_image(const struct engine_ctx *ctx, uint32_t 
 	return crc;
 }
 
-static OTA_RAM_TEXT uint16_t gf2_apply(const uint16_t mat[16], uint16_t v)
-{
-	uint16_t out = 0u;
-
-	for (uint32_t i = 0; i < 16u; i++) {
-		if (v & (1u << i)) {
-			out ^= mat[i];
-		}
-	}
-	return out;
-}
-
-static OTA_RAM_TEXT void gf2_compose(uint16_t dst[16], const uint16_t a[16],
-				     const uint16_t b[16])
-{
-	uint16_t tmp[16];
-
-	for (uint32_t i = 0; i < 16u; i++) {
-		tmp[i] = gf2_apply(a, b[i]);
-	}
-	for (uint32_t i = 0; i < 16u; i++) {
-		dst[i] = tmp[i];
-	}
-}
-
-static OTA_RAM_TEXT bool gf2_solve(const uint16_t col[16], uint16_t target, uint16_t *out)
-{
-	uint32_t rows[16];
-
-	for (uint32_t r = 0; r < 16u; r++) {
-		uint32_t row = ((uint32_t)((target >> r) & 1u)) << 16;
-
-		for (uint32_t c = 0; c < 16u; c++) {
-			if (col[c] & (1u << r)) {
-				row |= 1u << c;
-			}
-		}
-		rows[r] = row;
-	}
-
-	for (uint32_t c = 0; c < 16u; c++) {
-		uint32_t piv = c;
-
-		while (piv < 16u && !(rows[piv] & (1u << c))) {
-			piv++;
-		}
-		if (piv == 16u) {
-			return false;
-		}
-		if (piv != c) {
-			uint32_t tmp = rows[c];
-
-			rows[c] = rows[piv];
-			rows[piv] = tmp;
-		}
-		for (uint32_t r = 0; r < 16u; r++) {
-			if (r != c && (rows[r] & (1u << c))) {
-				rows[r] ^= rows[c];
-			}
-		}
-	}
-
-	uint16_t x = 0u;
-
-	for (uint32_t c = 0; c < 16u; c++) {
-		if (rows[c] & (1u << 16)) {
-			x |= (uint16_t)(1u << c);
-		}
-	}
-	*out = x;
-	return true;
-}
-
-/*
- * Choose page0[FIX_OFFSET..+1] so that the bootloader's CRC16 over
- * [0, check_size) equals check_crc16. Because crc16_step is affine over GF(2)
- * and crc16_step(0, 0) == 0, setting d = (b0 << 8) | b1 at FIX_OFFSET changes
- * the final CRC by M(crc16_step(crc16_step(0, b0), b1)), where M = S^suffix is
- * computed in O(log suffix) 16x16 GF(2) matrix squarings and inverted via
- * 16x16 Gauss-Jordan elimination.
- */
-static OTA_RAM_TEXT bool apply_crc16_fix(struct engine_ctx *ctx)
-{
-	const uint32_t k = FIX_OFFSET;
-	const uint32_t end = ctx->check_size;
-
-	if (end < MIN_IMAGE_SIZE) {
-		return false;
-	}
-	if (ctx->page0[k] | ctx->page0[k + 1] | ctx->page0[k + 2] | ctx->page0[k + 3]) {
-		return false;
-	}
-
-	uint16_t c0 = crc16_image(ctx, end);
-	uint16_t step[16];
-	uint16_t acc[16];
-
-	for (uint32_t i = 0; i < 16u; i++) {
-		step[i] = crc16_step((uint16_t)(1u << i), 0u);
-		acc[i] = (uint16_t)(1u << i);
-	}
-	for (uint32_t n = end - k - 2u; n != 0u; n >>= 1) {
-		if (n & 1u) {
-			gf2_compose(acc, step, acc);
-		}
-		if (n > 1u) {
-			gf2_compose(step, step, step);
-		}
-	}
-
-	uint16_t basis[16];
-
-	for (uint32_t i = 0; i < 16u; i++) {
-		uint8_t b0 = (i >= 8u) ? (uint8_t)(1u << (i - 8u)) : 0u;
-		uint8_t b1 = (i < 8u) ? (uint8_t)(1u << i) : 0u;
-		uint16_t s = crc16_step(crc16_step(0u, b0), b1);
-
-		basis[i] = gf2_apply(acc, s);
-	}
-
-	uint16_t d = 0u;
-
-	if (!gf2_solve(basis, (uint16_t)(ctx->check_crc16 ^ c0), &d)) {
-		return false;
-	}
-
-	ctx->page0[k] = (uint8_t)(d >> 8);
-	ctx->page0[k + 1] = (uint8_t)d;
-	return crc16_image(ctx, end) == ctx->check_crc16;
-}
-
 /* ── Protocol ────────────────────────────────────────────────────── */
 
 static OTA_RAM_TEXT void pad_page(uint8_t *buf, uint32_t from)
@@ -516,12 +396,28 @@ static OTA_RAM_TEXT uint8_t validate_page0(const struct engine_ctx *ctx)
 	    reset_vec < ctx->base || reset_vec >= ctx->base + ctx->image_size) {
 		return OTA_STATUS_VERIFY_FAIL;
 	}
-	if (ctx->check_size != 0u &&
-	    (ctx->page0[FIX_OFFSET] | ctx->page0[FIX_OFFSET + 1] |
-	     ctx->page0[FIX_OFFSET + 2] | ctx->page0[FIX_OFFSET + 3])) {
-		return OTA_STATUS_ERROR;
-	}
 	return 0u;
+}
+
+/*
+ * Point the bootloader at the new image: bank 0 valid, its CRC16 and size.
+ * The rest of the settings page is kept. Runs before page 0 is written, so a
+ * reset at any point here still finds page 0 erased and stays in UF2 mode.
+ */
+static OTA_RAM_TEXT bool write_settings(struct engine_ctx *ctx)
+{
+	const uint32_t addr = ctx->settings_addr;
+	const volatile uint32_t *cur = (const volatile uint32_t *)addr;
+	volatile uint32_t *buf = (volatile uint32_t *)ctx->page; /* no memcpy call */
+	uint16_t crc = crc16_image(ctx, ctx->image_size);
+
+	for (uint32_t i = 0; i < PAGE_WORDS; i++) {
+		buf[i] = cur[i];
+	}
+	buf[0] = BL_BANK_VALID_APP | ((uint32_t)crc << 16);      /* bank_0, bank_0_crc */
+	buf[1] = (buf[1] & 0xFFFF0000u) | BL_BANK_INVALID_APP;  /* bank_1, padding */
+	buf[2] = ctx->image_size;                                /* bank_0_size */
+	return nvmc_erase(ctx, addr) && nvmc_program(ctx, addr, ctx->page);
 }
 
 /* Called when page `index` is complete (or the image ends inside it). */
@@ -650,7 +546,7 @@ static OTA_RAM_TEXT void handle_activate(struct engine_ctx *ctx)
 	ctx->status = OTA_STATUS_ACTIVATING;
 	send_status(ctx, OTA_STATUS_ACTIVATING);
 
-	if (ctx->check_size != 0u && !apply_crc16_fix(ctx)) {
+	if (ctx->settings_addr != 0u && !write_settings(ctx)) {
 		/* Page 0 stays erased: the bootloader keeps the device in UF2. */
 		fail(ctx, OTA_STATUS_FLASH_ERROR);
 		return;
@@ -825,8 +721,8 @@ bool rcv_ota_ram_engine_run(const struct rcv_ota_ram_params *p)
 	if (p->image_size < MIN_IMAGE_SIZE || p->image_size > p->flash_end - p->flash_base) {
 		return false;
 	}
-	if (p->check_size != 0u &&
-	    (p->check_size < MIN_IMAGE_SIZE || p->check_size > p->flash_end - p->flash_base)) {
+	if (p->settings_addr != 0u &&
+	    ((p->settings_addr & PAGE_MASK) != 0u || p->settings_addr < p->flash_end)) {
 		return false;
 	}
 	if (p->in_ep == 0u || p->in_ep > 7u || p->out_ep == 0u || p->out_ep > 7u) {
@@ -929,8 +825,7 @@ bool rcv_ota_ram_engine_run(const struct rcv_ota_ram_params *p)
 	ctx->flash_end = lp.flash_end;
 	ctx->sram_base = lp.sram_base;
 	ctx->sram_end = lp.sram_end;
-	ctx->check_size = lp.check_size;
-	ctx->check_crc16 = lp.check_crc16;
+	ctx->settings_addr = lp.settings_addr;
 	ctx->in_ep = lp.in_ep;
 	ctx->out_ep = lp.out_ep;
 	ctx->errata_199 = lp.errata_199 ? 1u : 0u;

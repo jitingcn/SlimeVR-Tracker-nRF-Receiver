@@ -18,11 +18,11 @@
  * new image over the running application. There is no staging area, so the
  * image limit is the whole application partition instead of half of it.
  *
- * The engine never writes the bootloader settings page. When the bootloader
- * stored a CRC16 for bank 0, the engine sets two bytes of a reserved Cortex-M
- * vector slot (offset 0x1C, zero in Zephyr images) so the new image matches
- * the stored size and CRC16. This also works on bootloaders that write-protect
- * the settings page before starting the application.
+ * After the image is verified, the engine rewrites the bootloader settings
+ * page with the new bank 0 size and CRC16, then writes page 0 last. The
+ * bootloader must leave the settings page writable after starting the
+ * application (Adafruit nRF52 bootloader 0.11.1 or later; 0.11.0-slimenrf
+ * write-protects it).
  */
 
 struct rcv_ota_ram_params {
@@ -32,8 +32,7 @@ struct rcv_ota_ram_params {
 	uint32_t flash_end;       /* Exclusive application partition end (page aligned) */
 	uint32_t sram_base;       /* SRAM start address (e.g. 0x20000000) */
 	uint32_t sram_end;        /* Exclusive SRAM end address (e.g. 0x20020000) */
-	uint32_t check_size;      /* Bootloader bank_0_size; 0 = no CRC16 check */
-	uint16_t check_crc16;     /* Bootloader bank_0_crc */
+	uint32_t settings_addr;   /* Bootloader settings page; 0 = no bootloader */
 	uint8_t in_ep;            /* HID IN endpoint number (1-7) */
 	uint8_t out_ep;           /* HID OUT endpoint number (1-7) */
 	bool errata_199;          /* Apply nRF52 USBD anomaly 199 workaround */
