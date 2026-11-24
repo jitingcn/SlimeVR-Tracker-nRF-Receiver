@@ -108,6 +108,19 @@ config PAIRING_TIMEOUT
         Default is 300 seconds (5 minutes).
         Set to 0 to disable timeout.
 
+config RECEIVER_OTA_RAM_ENGINE
+    bool "In-place receiver self-OTA through a RAM engine"
+    default y if SOC_NRF52833 && BUILD_OUTPUT_UF2 && !BOOTLOADER_MCUBOOT
+    depends on SOC_SERIES_NRF52 && !BOOTLOADER_MCUBOOT
+    help
+        Write the new image over the running application from a RAM-resident
+        engine that serves the HID endpoints directly, instead of staging it
+        in the upper half of the application partition. The image may use the
+        whole application partition. The engine then rewrites the bootloader
+        settings page, so the UF2 bootloader must not write-protect it
+        (0.11.1 or later). An interrupted transfer leaves the receiver in its
+        UF2 bootloader.
+
 config DATA_COLLECT
     bool "Enable raw sensor data collection interface"
     default n
