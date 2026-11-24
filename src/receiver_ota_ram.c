@@ -174,7 +174,9 @@ static OTA_RAM_TEXT bool nvmc_program(struct engine_ctx *ctx, uint32_t addr,
 	NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Wen;
 	__DSB();
 	nvmc_wait();
-	for (uint32_t i = 0; i < PAGE_WORDS; i++) {
+	/* Descending, so word 0 lands last: the settings bank marker becomes
+	 * valid only after the size, and page 0's vector table after its body. */
+	for (uint32_t i = PAGE_WORDS; i-- > 0u;) {
 		if (words[i] != 0xFFFFFFFFu) {
 			dst[i] = words[i];
 			__DSB();
