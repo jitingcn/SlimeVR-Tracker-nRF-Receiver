@@ -46,7 +46,8 @@ def publication_function(name):
 
 functions = [
     "decision_accept", "esb_auto_loss_invalidate", "esb_rx_discontinuity", "packet_stats_refresh", "packet_stats_count", "check_packet_sequence",
-    "test_all_invalidate",
+    "test_all_capacity_tps", "test_all_requested_value", "test_all_wire_tps",
+    "test_all_invalidate", "test_all_reconcile",
     "esb_channel_is_busy", "radio_operation_begin", "esb_radio_operation_begin",
     "esb_radio_collection_begin", "esb_radio_operation_end",
     "channel_command_for_tracker", "esb_publish_remote_command_locked",
@@ -60,8 +61,11 @@ functions = [
     "esb_send_remote_command_sens_tx", "esb_send_remote_command_sens",
     "esb_send_remote_command_sens_auto_tx", "esb_send_remote_command_sens_auto",
     "esb_send_remote_command_sens_auto_all_tx", "esb_send_remote_command_sens_auto_all",
+    "esb_scan_active_mask", "esb_publish_test_flag_mask",
     "esb_send_remote_command_test_on_tx", "esb_send_remote_command_test_on",
-    "esb_send_remote_command_test_off_tx", "esb_send_remote_command_test_off", "esb_request_metadata",
+    "esb_send_remote_command_test_off_tx", "esb_send_remote_command_test_off",
+    "esb_send_remote_command_test_on_all", "esb_send_remote_command_test_off_all",
+    "esb_request_metadata",
 ]
 start = source.index("/* Migration owns an ACK overlay")
 end = source.index("bool esb_channel_is_busy", start)
@@ -131,7 +135,7 @@ with tempfile.TemporaryDirectory(prefix="receiver-channel-migration-") as direct
         flags = ["-DCONFIG_TDMA_DIAGNOSTICS=1"] if diagnostics else []
         subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
-            "-Wno-unused-function", "-Wno-unused-variable", "-g", "-O1",
+            "-Wno-unused-function", "-Wno-unused-variable", "-Wno-sign-compare", "-g", "-O1",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
             *flags, str(generated), "-o", str(binary),
         ], check=True)

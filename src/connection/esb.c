@@ -3674,7 +3674,7 @@ static void esb_publish_flag_mask(uint8_t command_flag, uint32_t mask, uint16_t 
 /* Test-only publication, called under the test irq_lock: publish only onto
  * idle slots (no pending command is stomped) whose recovery/join grace has
  * elapsed; skipped trackers converge via reconciliation after their grace. */
-static void esb_publish_test_flag_mask(uint8_t command_flag, uint32_t mask, uint32_t now_u32, uint16_t token)
+static void esb_publish_test_flag_mask(uint8_t command_flag, uint32_t mask, uint32_t now_u32)
 {
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
 		if (!(mask & BIT(i)) || tracker_slots[i].tracker_remote_command != ESB_PONG_FLAG_NORMAL) {
@@ -3684,7 +3684,7 @@ static void esb_publish_test_flag_mask(uint8_t command_flag, uint32_t mask, uint
 		if ((int32_t)(now_u32 - ready_after) < 0) {
 			continue;
 		}
-		tracker_slots[i].remote_cmd_token = token;
+		tracker_slots[i].remote_cmd_token = 0;
 		tracker_slots[i].tracker_remote_command = command_flag;
 	}
 }
@@ -3739,7 +3739,7 @@ uint32_t esb_send_remote_command_test_off(uint8_t tracker_id)
 	return esb_send_remote_command_test_off_tx(tracker_id, 0);
 }
 
-uint32_t esb_send_remote_command_test_on_all_tx(uint16_t tps, uint16_t token)
+uint32_t esb_send_remote_command_test_on_all(uint16_t tps)
 {
 	k_mutex_lock(&test_all_mutex, K_FOREVER);
 	/* Guard first, then own a generation token: anything that bumps the
@@ -3785,7 +3785,7 @@ uint32_t esb_send_remote_command_test_on_all_tx(uint16_t tps, uint16_t token)
 		}
 	}
 	__asm__ volatile("" ::: "memory");
-	esb_publish_test_flag_mask(ESB_PONG_FLAG_TEST_MODE_ON, mask, now_u32, token);
+	esb_publish_test_flag_mask(ESB_PONG_FLAG_TEST_MODE_ON, mask, now_u32);
 	atomic_set(&test_all_broadcasting, 0);
 	irq_unlock(key);
 	LOG_INF(
@@ -3799,12 +3799,7 @@ uint32_t esb_send_remote_command_test_on_all_tx(uint16_t tps, uint16_t token)
 	return mask;
 }
 
-uint32_t esb_send_remote_command_test_on_all(uint16_t tps)
-{
-	return esb_send_remote_command_test_on_all_tx(tps, 0);
-}
-
-uint32_t esb_send_remote_command_test_off_all_tx(uint16_t token)
+uint32_t esb_send_remote_command_test_off_all(void)
 {
 	k_mutex_lock(&test_all_mutex, K_FOREVER);
 	atomic_set(&test_all_broadcasting, 1);
@@ -3834,17 +3829,12 @@ uint32_t esb_send_remote_command_test_off_all_tx(uint16_t token)
 		}
 	}
 	__asm__ volatile("" ::: "memory");
-	esb_publish_test_flag_mask(ESB_PONG_FLAG_TEST_MODE_OFF, mask, now_u32, token);
+	esb_publish_test_flag_mask(ESB_PONG_FLAG_TEST_MODE_OFF, mask, now_u32);
 	atomic_set(&test_all_broadcasting, 0);
 	irq_unlock(key);
 	LOG_INF("Sticky TEST_MODE_OFF enabled for current and future active trackers");
 	k_mutex_unlock(&test_all_mutex);
 	return mask;
-}
-
-uint32_t esb_send_remote_command_test_off_all(void)
-{
-	return esb_send_remote_command_test_off_all_tx(0);
 }
 
 static const char *esb_pong_flag_name(uint8_t flag)

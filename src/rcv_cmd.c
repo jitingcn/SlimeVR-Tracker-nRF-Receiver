@@ -531,10 +531,11 @@ static void remote_hid_job_handler(struct k_work *work)
 		mask = esb_send_remote_command_sens_auto_all_tx(remote_hid_job_axis, remote_hid_job_rev, token);
 		break;
 	case REMOTE_HID_JOB_TEST_ON_ALL:
-		mask = esb_send_remote_command_test_on_all_tx(remote_hid_job_tps, token);
+		/* Sticky receiver policy: stamp token 0 so ENOENT never withdraws it. */
+		mask = esb_send_remote_command_test_on_all(remote_hid_job_tps);
 		break;
 	case REMOTE_HID_JOB_TEST_OFF_ALL:
-		mask = esb_send_remote_command_test_off_all_tx(token);
+		mask = esb_send_remote_command_test_off_all();
 		break;
 	case REMOTE_HID_JOB_WOM_COMMAND:
 		mask = esb_send_remote_wom_command(RCV_HID_TARGET_ALL, remote_wom_minutes,

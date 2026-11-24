@@ -230,11 +230,10 @@ uint32_t esb_send_remote_command_test_on(uint8_t tracker_id, uint16_t tps);
 uint32_t esb_send_remote_command_test_on_tx(uint8_t tracker_id, uint16_t tps, uint16_t token);
 uint32_t esb_send_remote_command_test_off(uint8_t tracker_id);
 uint32_t esb_send_remote_command_test_off_tx(uint8_t tracker_id, uint16_t token);
-/* Active-scan then queue. Return bitmask of targeted tracker ids. Blocks ~1s. */
+/* Active-scan then queue. Return bitmask of targeted tracker ids. Blocks ~1s.
+ * Sticky all-target test policies use token 0 and are not cancelled on timeout. */
 uint32_t esb_send_remote_command_test_on_all(uint16_t tps);
-uint32_t esb_send_remote_command_test_on_all_tx(uint16_t tps, uint16_t token);
 uint32_t esb_send_remote_command_test_off_all(void);
-uint32_t esb_send_remote_command_test_off_all_tx(uint16_t token);
 void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z);
 void esb_send_remote_command_sens_tx(uint8_t tracker_id, float x, float y, float z, uint16_t token);
 bool esb_send_remote_command_sens_auto(uint8_t tracker_id, uint8_t axis, uint16_t revolutions);
