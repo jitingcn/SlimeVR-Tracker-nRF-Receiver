@@ -107,7 +107,7 @@ static struct tracker_slot tracker_slots[MAX_TRACKERS];
 static atomic_t test_all_state_valid, test_all_enabled, test_all_broadcasting;
 static atomic_t test_all_confirmed_mask, test_all_generation;
 static atomic_t test_all_ready_after_ms[MAX_TRACKERS];
-static uint16_t test_all_requested_tps, test_all_effective_tps, test_all_token;
+static uint16_t test_all_requested_tps, test_all_effective_tps;
 static uint8_t tdma_dynamic_slot_ticks;
 static uint32_t tdma_active_mask;
 '''

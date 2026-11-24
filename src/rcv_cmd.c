@@ -404,7 +404,7 @@ static void remote_hid_finish(uint8_t status)
 	}
 	(void)k_work_cancel_delayable(&remote_hid_timeout_work);
 	remote_hid_job = REMOTE_HID_JOB_NONE;
-	if (status != RCV_HID_ST_OK && token != 0) {
+	if (status != RCV_HID_ST_OK && token != 0 && expected != 0) {
 		esb_cancel_remote_command(expected, flag, token);
 	}
 	remote_hid_send_completion(status);

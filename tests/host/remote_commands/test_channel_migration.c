@@ -130,15 +130,8 @@ static void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key)
     irq_unlock(key);
 }
 #endif
-#define TEST_ALL_RATE_QUANTUM_TPS 10U
-#define TDMA_BASE_SLOT_TICKS 16
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-static int test_all_mutex;
 static atomic_t test_all_state_valid, test_all_enabled, test_all_confirmed_mask;
-static atomic_t test_all_ready_after_ms[MAX_TRACKERS];
-static uint16_t test_all_requested_tps, test_all_effective_tps, test_all_token;
-static uint32_t tdma_active_mask;
-static uint8_t tdma_dynamic_active_count, tdma_dynamic_slot_ticks;
+static uint16_t test_all_wire_tps(void) { return 0; }
 static int fail_stop, fail_set, fail_start, fail_store;
 static int esb_stop_rx(void) {
     if (fail_stop) { fail_stop--; return -EIO; }
@@ -269,14 +262,7 @@ static void done(bool success) {
 static void reset(unsigned count) {
     radio_operation_busy = channel_change_pending = 0;
     radio_startup_state = ESB_RADIO_READY;
-    tracker_store_lock = test_all_mutex = 0;
-    test_all_state_valid = test_all_enabled = test_all_broadcasting = 0;
-    test_all_confirmed_mask = test_all_generation = 0;
-    test_all_requested_tps = test_all_effective_tps = test_all_token = 0;
-    memset(test_all_ready_after_ms, 0, sizeof(test_all_ready_after_ms));
-    tdma_active_mask = count ? ((1u << count) - 1u) : 0;
-    tdma_dynamic_active_count = count;
-    tdma_dynamic_slot_ticks = TDMA_BASE_SLOT_TICKS;
+    tracker_store_lock = 0;
     stored_trackers = count;
     memset(stored_tracker_addr, 0, sizeof(stored_tracker_addr));
     for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
@@ -563,90 +549,8 @@ static void test_hid_timeout_cancellation(void) {
     assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
     assert(tracker_slots[0].remote_cmd_token == 0);
 
-    /* 7. All-target HID TEST_MODE_ON timeout also cancels sticky-all policy so
-     * test_all_reconcile() cannot republish after ENOENT. */
-    reset(2);
-    remote_hid_pending = remote_hid_expected = remote_hid_confirmed = 0;
-    remote_hid_job = REMOTE_HID_JOB_NONE;
-    hid_status = -1;
-    tracker_slots[0].stats.last_packet_time = now + REMOTE_COMMAND_ACTIVE_SCAN_MS;
-    tracker_slots[1].stats.last_packet_time = now + REMOTE_COMMAND_ACTIVE_SCAN_MS;
-    assert(remote_hid_begin(8, ESB_PONG_FLAG_TEST_MODE_ON, ESB_PONG_FLAG_TEST_MODE_ON) == RCV_HID_ST_STARTED);
-    uint16_t all_tok = remote_hid_cmd_token;
-    uint32_t all_mask = esb_send_remote_command_test_on_all_tx(250, all_tok);
-    assert(all_mask == (BIT(0) | BIT(1)) && test_all_state_valid && test_all_enabled && test_all_token == all_tok);
-    remote_hid_arm_expected(all_mask);
-    now += REMOTE_HID_CONFIRM_TIMEOUT_MS;
-    remote_hid_timeout_handler(NULL);
-    assert(!remote_hid_pending && hid_status == RCV_HID_ST_ENOENT);
-    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
-    assert(tracker_slots[1].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
-    assert(!test_all_state_valid && !test_all_enabled && test_all_token == 0);
-    test_all_reconcile(now + 1000);
-    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
-    assert(tracker_slots[1].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
-
-    /* 8. Zero-active all-target HID TEST_MODE_ON (mask==0 -> immediate ENOENT)
-     * cancels its sticky-all policy so later trackers are not affected. */
-    reset(2);
-    tracker_slots[0].stats.last_packet_time = 0;
-    tracker_slots[1].stats.last_packet_time = 0;
-    remote_hid_pending = remote_hid_expected = remote_hid_confirmed = 0;
-    hid_status = -1;
-    assert(remote_hid_begin(9, ESB_PONG_FLAG_TEST_MODE_ON, ESB_PONG_FLAG_TEST_MODE_ON) == RCV_HID_ST_STARTED);
-    uint16_t empty_tok = remote_hid_cmd_token;
-    assert(esb_send_remote_command_test_on_all_tx(250, empty_tok) == 0);
-    assert(test_all_state_valid && test_all_token == empty_tok);
-    remote_hid_arm_expected(0);
-    assert(!remote_hid_pending && hid_status == RCV_HID_ST_ENOENT);
-    assert(!test_all_state_valid && !test_all_enabled && test_all_token == 0);
-    test_all_reconcile(now + 1000);
-    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
-
-    /* 9. Console-owned sticky-all policy (token 0) and newer HID sticky-all policy
-     * are both preserved when an older HID transaction is cancelled. */
-    reset(2);
-    remote_hid_pending = remote_hid_expected = remote_hid_confirmed = 0;
-    hid_status = -1;
-    tracker_slots[0].stats.last_packet_time = now + REMOTE_COMMAND_ACTIVE_SCAN_MS;
-    assert(remote_hid_begin(10, ESB_PONG_FLAG_TEST_MODE_ON, ESB_PONG_FLAG_TEST_MODE_ON) == RCV_HID_ST_STARTED);
-    uint16_t stale_all_tok = remote_hid_cmd_token;
-    remote_hid_arm_expected(esb_send_remote_command_test_on_all_tx(200, stale_all_tok));
-    tracker_slots[0].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
-    tracker_slots[0].stats.last_packet_time = now + REMOTE_COMMAND_ACTIVE_SCAN_MS;
-    assert(esb_send_remote_command_test_on_all(300) == BIT(0));
-    assert(test_all_state_valid && test_all_enabled && test_all_token == 0);
-    now += REMOTE_HID_CONFIRM_TIMEOUT_MS;
-    remote_hid_timeout_handler(NULL);
-    assert(!remote_hid_pending && hid_status == RCV_HID_ST_ENOENT);
-    assert(test_all_state_valid && test_all_enabled && test_all_token == 0);
-    tracker_slots[1].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
-    test_all_reconcile(now + 1000);
-    assert(tracker_slots[1].tracker_remote_command == ESB_PONG_FLAG_TEST_MODE_ON);
-    assert(tracker_slots[1].remote_cmd_token == 0);
-
-    /* 10. All-target HID TEST_MODE_OFF timeout cancels sticky-all OFF policy,
-     * while a stale cancel never disturbs a newer HID TEST_MODE_OFF policy. */
-    reset(2);
-    remote_hid_pending = remote_hid_expected = remote_hid_confirmed = 0;
-    hid_status = -1;
-    tracker_slots[0].stats.last_packet_time = now + REMOTE_COMMAND_ACTIVE_SCAN_MS;
-    assert(remote_hid_begin(11, ESB_PONG_FLAG_TEST_MODE_OFF, ESB_PONG_FLAG_TEST_MODE_OFF) == RCV_HID_ST_STARTED);
-    uint16_t off_tok = remote_hid_cmd_token;
-    remote_hid_arm_expected(esb_send_remote_command_test_off_all_tx(off_tok));
-    assert(test_all_state_valid && !test_all_enabled && test_all_token == off_tok);
-    esb_cancel_remote_command(BIT(0), ESB_PONG_FLAG_TEST_MODE_OFF, stale_all_tok);
-    assert(test_all_state_valid && test_all_token == off_tok);
-    now += REMOTE_HID_CONFIRM_TIMEOUT_MS;
-    remote_hid_timeout_handler(NULL);
-    assert(!remote_hid_pending && hid_status == RCV_HID_ST_ENOENT);
-    assert(!test_all_state_valid && test_all_token == 0);
-    test_all_reconcile(now + 1000);
-    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
-    assert(tracker_slots[1].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
-
     remote_confirm_cb = NULL;
-    puts("PASS HID timeout cancellation: clears expired commands and sticky-all policy, preserves console/newer commands, skips token 0");
+    puts("PASS HID timeout cancellation: clears expired commands, preserves console/newer commands, skips token 0");
 }
 static void assert_channel_confirm(struct esb_payload p, uint8_t channel) {
     assert(p.data[7] == ESB_PONG_FLAG_CHANNEL_CONFIRM);

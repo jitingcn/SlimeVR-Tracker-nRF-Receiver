@@ -255,7 +255,6 @@ static atomic_t test_all_broadcasting;
 static atomic_t test_all_confirmed_mask;
 static uint16_t test_all_requested_tps;
 static uint16_t test_all_effective_tps;
-static uint16_t test_all_token;
 static atomic_t test_all_ready_after_ms[MAX_TRACKERS];
 static atomic_t test_all_generation; /* bumped by every test command; stale broadcasts abort */
 static K_MUTEX_DEFINE(test_all_mutex); /* serializes whole all-target helper bodies */
@@ -462,7 +461,6 @@ static void test_all_invalidate(void)
 	atomic_set(&test_all_state_valid, 0);
 	atomic_set(&test_all_confirmed_mask, 0);
 	atomic_set(&test_all_broadcasting, 0);
-	test_all_token = 0;
 }
 
 /* After a restart or a >5s PING gap: drop the sticky confirmation, park a
@@ -3535,33 +3533,17 @@ void esb_cancel_remote_wom_command(uint32_t mask, uint16_t token)
 
 void esb_cancel_remote_command(uint32_t mask, uint8_t command_flag, uint16_t token)
 {
-	if (command_flag == ESB_PONG_FLAG_NORMAL || token == 0) {
+	if (!mask || command_flag == ESB_PONG_FLAG_NORMAL || token == 0) {
 		return;
 	}
 	unsigned int key = irq_lock();
-	if (mask != 0) {
-		for (uint8_t id = 0; id < MAX_TRACKERS; id++) {
-			if ((mask & BIT(id)) &&
-			    tracker_slots[id].tracker_remote_command == command_flag &&
-			    tracker_slots[id].remote_cmd_token == token) {
-				tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
-				tracker_slots[id].remote_cmd_token = 0;
-			}
+	for (uint8_t id = 0; id < MAX_TRACKERS; id++) {
+		if ((mask & BIT(id)) &&
+		    tracker_slots[id].tracker_remote_command == command_flag &&
+		    tracker_slots[id].remote_cmd_token == token) {
+			tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
+			tracker_slots[id].remote_cmd_token = 0;
 		}
-	}
-	/* Also cancel sticky-all deferred publication owned by this expired token,
-	 * without disturbing a console policy (token 0), a newer token, or an
-	 * in-flight scan's broadcast guard. */
-	if ((command_flag == ESB_PONG_FLAG_TEST_MODE_ON || command_flag == ESB_PONG_FLAG_TEST_MODE_OFF) &&
-	    atomic_get(&test_all_state_valid) &&
-	    (atomic_get(&test_all_enabled) != 0) == (command_flag == ESB_PONG_FLAG_TEST_MODE_ON) &&
-	    test_all_token == token) {
-		atomic_set(&test_all_state_valid, 0);
-		atomic_set(&test_all_enabled, 0);
-		atomic_set(&test_all_confirmed_mask, 0);
-		test_all_requested_tps = 0;
-		test_all_effective_tps = 0;
-		test_all_token = 0;
 	}
 	irq_unlock(key);
 }
@@ -3787,7 +3769,6 @@ uint32_t esb_send_remote_command_test_on_all_tx(uint16_t tps, uint16_t token)
 	esb_auto_loss_invalidate();
 	atomic_set(&test_all_confirmed_mask, 0);
 	test_all_requested_tps = tps;
-	test_all_token = token;
 	requested = test_all_requested_value();
 	uint8_t active_count = tdma_dynamic_active_count;
 	uint16_t effective = MIN(requested, test_all_capacity_tps(active_count));
@@ -3844,7 +3825,6 @@ uint32_t esb_send_remote_command_test_off_all_tx(uint16_t token)
 	atomic_set(&test_all_enabled, 0);
 	atomic_set(&test_all_confirmed_mask, 0);
 	test_all_effective_tps = 0;
-	test_all_token = token;
 	uint32_t now_u32 = (uint32_t)k_uptime_get();
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
 		tracker_slots[i].tracker_test_on_tps = 0;
