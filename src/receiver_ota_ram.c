@@ -15,10 +15,10 @@
  * Flow (host protocol unchanged, same reports as the staging updater):
  *   READY -> DATA... -> VERIFY (CRC32) -> ACTIVATE -> reset
  * Page 0 stays in RAM until ACTIVATE. It is validated (vector table, MCUboot
- * magic) and erased before any other page is modified. At ACTIVATE the
- * bootloader settings page is rewritten with the new size and CRC16, then
- * page 0 is written last, so an interrupted transfer or activation leaves the
- * receiver in UF2 mode.
+ * magic) and erased before any other page is modified. At ACTIVATE bank 0
+ * is marked invalid in the bootloader settings page, page 0 is written, and
+ * bank 0 is then marked valid with the new size and CRC16, so an interrupted
+ * transfer or activation leaves the receiver in UF2 mode.
  */
 #include "receiver_ota_ram.h"
 #include "esb_ota.h"
@@ -37,7 +37,7 @@
 #define MCUBOOT_IMAGE_MAGIC   0x96F3B83Du
 #define UF2_RECOVERY_MAGIC    0x57u       /* Adafruit UF2 bootloader DFU magic */
 #define BL_BANK_VALID_APP     0x0001u     /* Adafruit bootloader settings: bank_0 */
-#define BL_BANK_INVALID_APP   0x00FFu     /* Adafruit bootloader settings: bank_1 */
+#define BL_BANK_INVALID_APP   0x00FFu     /* Adafruit bootloader settings: invalid bank */
 #define CYCLES_PER_MS         64000u      /* nRF52 HCLK (64 MHz) */
 #define MS(x)                 ((uint32_t)(x) * CYCLES_PER_MS)
 #define IDLE_TIMEOUT          MS(15000)
@@ -400,11 +400,12 @@ static OTA_RAM_TEXT uint8_t validate_page0(const struct engine_ctx *ctx)
 }
 
 /*
- * Point the bootloader at the new image: bank 0 valid, its CRC16 and size.
- * The rest of the settings page is kept. Runs before page 0 is written, so a
- * reset at any point here still finds page 0 erased and stays in UF2 mode.
+ * Rewrite bank 0 of the bootloader settings page, keeping the rest of the
+ * page. With valid=false bank 0 is marked invalid, so the bootloader stays in
+ * UF2 mode whatever state page 0 is in. With valid=true it gets the new
+ * image's CRC16 and size.
  */
-static OTA_RAM_TEXT bool write_settings(struct engine_ctx *ctx)
+static OTA_RAM_TEXT bool write_settings(struct engine_ctx *ctx, bool valid)
 {
 	const uint32_t addr = ctx->settings_addr;
 	const volatile uint32_t *cur = (const volatile uint32_t *)addr;
@@ -414,7 +415,8 @@ static OTA_RAM_TEXT bool write_settings(struct engine_ctx *ctx)
 	for (uint32_t i = 0; i < PAGE_WORDS; i++) {
 		buf[i] = cur[i];
 	}
-	buf[0] = BL_BANK_VALID_APP | ((uint32_t)crc << 16);      /* bank_0, bank_0_crc */
+	buf[0] = (valid ? BL_BANK_VALID_APP : BL_BANK_INVALID_APP) |
+		 ((uint32_t)crc << 16);                         /* bank_0, bank_0_crc */
 	buf[1] = (buf[1] & 0xFFFF0000u) | BL_BANK_INVALID_APP;  /* bank_1, padding */
 	buf[2] = ctx->image_size;                                /* bank_0_size */
 	return nvmc_erase(ctx, addr) && nvmc_program(ctx, addr, ctx->page);
@@ -546,12 +548,15 @@ static OTA_RAM_TEXT void handle_activate(struct engine_ctx *ctx)
 	ctx->status = OTA_STATUS_ACTIVATING;
 	send_status(ctx, OTA_STATUS_ACTIVATING);
 
-	if (ctx->settings_addr != 0u && !write_settings(ctx)) {
-		/* Page 0 stays erased: the bootloader keeps the device in UF2. */
+	/* Bank 0 stays invalid while page 0 is programmed, so a power loss
+	 * here cannot boot a partly written page 0. A loss while the final
+	 * settings write erases the page only exposes the complete image. */
+	if (ctx->settings_addr != 0u && !write_settings(ctx, false)) {
 		fail(ctx, OTA_STATUS_FLASH_ERROR);
 		return;
 	}
-	if (!flash_program_page(ctx, ctx->base, ctx->page0)) {
+	if (!flash_program_page(ctx, ctx->base, ctx->page0) ||
+	    (ctx->settings_addr != 0u && !write_settings(ctx, true))) {
 		fail(ctx, OTA_STATUS_FLASH_ERROR);
 		return;
 	}

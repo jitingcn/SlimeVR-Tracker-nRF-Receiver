@@ -18,8 +18,9 @@
  * new image over the running application. There is no staging area, so the
  * image limit is the whole application partition instead of half of it.
  *
- * After the image is verified, the engine rewrites the bootloader settings
- * page with the new bank 0 size and CRC16, then writes page 0 last. The
+ * After the image is verified, the engine marks bank 0 invalid in the
+ * bootloader settings page, writes page 0, then marks bank 0 valid with the
+ * new size and CRC16. The
  * bootloader must leave the settings page writable after starting the
  * application (Adafruit nRF52 bootloader 0.11.1 or later; 0.11.0-slimenrf
  * write-protects it).
