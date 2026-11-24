@@ -218,6 +218,38 @@ static void esb_ota_relay_fill_ack(uint8_t id, uint32_t pipe, struct esb_payload
     *has = ota_payload;
     if (*has) { p->length = 17; p->data[0] = 0xAB; }
 }
+struct k_work { int unused; };
+enum {
+    REMOTE_HID_JOB_NONE = 0,
+    REMOTE_HID_JOB_FLAG_ALL,
+    REMOTE_HID_JOB_SENS_AUTO_ALL,
+    REMOTE_HID_JOB_TEST_ON_ALL,
+    REMOTE_HID_JOB_TEST_OFF_ALL,
+    REMOTE_HID_JOB_WOM_COMMAND,
+};
+static int remote_hid_job, remote_hid_pending, remote_hid_expected, remote_hid_confirmed;
+static uint8_t remote_hid_seq, remote_hid_opcode, remote_hid_flag;
+static uint8_t remote_hid_job_flag, remote_hid_job_axis;
+static uint16_t remote_hid_job_rev, remote_hid_job_tps;
+static uint16_t remote_hid_next_token, remote_hid_cmd_token;
+#define RCV_HID_ST_STARTED 7
+#define RCV_HID_TARGET_ALL 0xff
+#define REMOTE_HID_CONFIRM_TIMEOUT_MS 5000
+#define K_MSEC(ms) (ms)
+static int remote_hid_timeout_work, remote_hid_job_work, rssi_wq;
+static int hid_status;
+static int64_t hid_timer_due;
+static int k_work_cancel_delayable(int *w) { ARG_UNUSED(w); hid_timer_due = -1; return 0; }
+static int k_work_reschedule(int *w, int delay) { ARG_UNUSED(w); hid_timer_due = now + delay; return 0; }
+static int k_work_submit_to_queue(int *q, int *w) { ARG_UNUSED(q); ARG_UNUSED(w); return 0; }
+static void remote_wom_poll(void) { assert(false); }
+static void remote_hid_send_completion(uint8_t status) { hid_status = status; }
+static bool rcv_hid_opcode_is_pong_flag(uint8_t flag) { return flag != ESB_PONG_FLAG_NORMAL; }
+static uint8_t rcv_cmd_remote_flag(uint8_t target_id, uint8_t pong_flag) {
+    ARG_UNUSED(target_id);
+    ARG_UNUSED(pong_flag);
+    return RCV_HID_ST_EINVAL;
+}
 /* PRODUCTION BODIES */
 static unsigned completed;
 static bool succeeded;
@@ -235,6 +267,7 @@ static void reset(unsigned count) {
     memset(stored_tracker_addr, 0, sizeof(stored_tracker_addr));
     for (unsigned i = 0; i < MAX_TRACKERS; ++i) {
         tracker_slots[i].tracker_remote_command = 0;
+        tracker_slots[i].remote_cmd_token = 0;
         tracker_slots[i].metadata_active_mask = 0;
         tracker_slots[i].metadata_pending_mask = 0;
         tracker_slots[i].ping_counter_initialized = false;
@@ -345,30 +378,30 @@ static void test_command_publication(void) {
     esb_send_remote_command_sens(0, 1, 2, 3);
     arm_publication(sens_old, sens_new);
     esb_send_remote_command_sens(0, 4, -5, 6);
-    finish_publication(4);
+    finish_publication(5);
 
     reset(1);
     tracker_slots[0].stats.last_packet_time = now;
     assert(esb_send_remote_command_sens_auto(0, 1, 0x1234));
     arm_publication(auto_old, auto_new);
     assert(esb_send_remote_command_sens_auto(0, 2, 0xabcd));
-    finish_publication(3);
+    finish_publication(4);
 
     reset(1);
     tracker_slots[0].stats.last_packet_time = now;
     assert(esb_send_remote_command_sens_auto(0, 1, 0x1234));
     arm_publication(auto_old, auto_new);
     assert(esb_send_remote_command_sens_auto_all(2, 0xabcd) == BIT(0));
-    finish_publication(3);
+    finish_publication(4);
 
     reset(1);
     assert(esb_send_remote_command_test_on(0, 0x1234) == BIT(0));
     arm_publication(tps_old, tps_new);
     assert(esb_send_remote_command_test_on(0, 0x2468) == BIT(0));
-    finish_publication(2);
+    finish_publication(3);
     arm_publication(tps_new, tps_off);
     assert(esb_send_remote_command_test_off(0) == BIT(0));
-    finish_publication(2);
+    finish_publication(3);
 
     reset(1);
     tracker_slots[0].stats.last_packet_time = now;
@@ -415,6 +448,109 @@ static void test_command_publication(void) {
            tracker_slots[0].metadata_active_chunk == 5 &&
            tracker_slots[0].metadata_active_token == 0x1235 &&
            tracker_slots[0].metadata_pending_mask == 0);
+}
+static void test_hid_timeout_cancellation(void) {
+    reset(3);
+    remote_hid_pending = remote_hid_expected = remote_hid_confirmed = 0;
+    remote_hid_job = REMOTE_HID_JOB_NONE;
+    remote_hid_next_token = remote_hid_cmd_token = 0;
+    remote_confirm_cb = on_remote_confirm;
+
+    /* 1. Ordinary 5s timeout clears matching unconfirmed command. */
+    hid_status = -1;
+    assert(rcv_cmd_remote_sens_set_hid(1, ESB_PONG_FLAG_SENS_SET, 0, 1, 2, 3) == RCV_HID_ST_STARTED);
+    uint16_t first_token = remote_hid_cmd_token;
+    assert(first_token != 0 && tracker_slots[0].remote_cmd_token == first_token);
+    assert(hid_timer_due == now + REMOTE_HID_CONFIRM_TIMEOUT_MS);
+    now += REMOTE_HID_CONFIRM_TIMEOUT_MS;
+    remote_hid_timeout_handler(NULL);
+    assert(!remote_hid_pending && hid_status == RCV_HID_ST_ENOENT);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
+    assert(tracker_slots[0].remote_cmd_token == 0);
+    assert(test_pong(0).data[7] == ESB_PONG_FLAG_NORMAL);
+
+    /* 1b. Targeted generic flag HID timeout also clears pending command. */
+    hid_status = -1;
+    assert(rcv_cmd_remote_flag_hid(2, ESB_PONG_FLAG_MEOW, 0, ESB_PONG_FLAG_MEOW) == RCV_HID_ST_STARTED);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_MEOW);
+    assert(tracker_slots[0].remote_cmd_token == remote_hid_cmd_token && remote_hid_cmd_token != 0);
+    now += REMOTE_HID_CONFIRM_TIMEOUT_MS;
+    remote_hid_timeout_handler(NULL);
+    assert(!remote_hid_pending && hid_status == RCV_HID_ST_ENOENT);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
+    assert(tracker_slots[0].remote_cmd_token == 0);
+
+    /* 2. Later same-flag console command (token 0) is preserved on HID timeout. */
+    hid_status = -1;
+    assert(rcv_cmd_remote_sens_set_hid(3, ESB_PONG_FLAG_SENS_SET, 0, 1, 2, 3) == RCV_HID_ST_STARTED);
+    assert(tracker_slots[0].remote_cmd_token == remote_hid_cmd_token);
+    esb_send_remote_command_sens(0, 4, 5, 6);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_SENS_SET);
+    assert(tracker_slots[0].remote_cmd_token == 0);
+    now += REMOTE_HID_CONFIRM_TIMEOUT_MS;
+    remote_hid_timeout_handler(NULL);
+    assert(!remote_hid_pending && hid_status == RCV_HID_ST_ENOENT);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_SENS_SET);
+    assert(tracker_slots[0].pending_sens_data[0] == 400 &&
+           tracker_slots[0].pending_sens_data[1] == 500 &&
+           tracker_slots[0].pending_sens_data[2] == 600);
+    assert(test_pong(0).data[7] == ESB_PONG_FLAG_SENS_SET);
+    /* Direct cancellation with token 0 never clears console commands. */
+    esb_cancel_remote_command(BIT(0), ESB_PONG_FLAG_SENS_SET, 0);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_SENS_SET);
+
+    /* 3. Later different-flag command is also preserved on HID timeout. */
+    hid_status = -1;
+    assert(rcv_cmd_remote_sens_set_hid(4, ESB_PONG_FLAG_SENS_SET, 0, 1, 2, 3) == RCV_HID_ST_STARTED);
+    esb_send_remote_command(0, ESB_PONG_FLAG_MEOW);
+    now += REMOTE_HID_CONFIRM_TIMEOUT_MS;
+    remote_hid_timeout_handler(NULL);
+    assert(!remote_hid_pending && hid_status == RCV_HID_ST_ENOENT);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_MEOW);
+
+    /* 4. Stale token never cancels a newer HID transaction with the same flag. */
+    hid_status = -1;
+    assert(rcv_cmd_remote_sens_set_hid(5, ESB_PONG_FLAG_SENS_SET, 0, 7, 8, 9) == RCV_HID_ST_STARTED);
+    uint16_t live_token = remote_hid_cmd_token;
+    assert(live_token != first_token);
+    esb_cancel_remote_command(BIT(0), ESB_PONG_FLAG_SENS_SET, first_token);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_SENS_SET);
+    assert(tracker_slots[0].remote_cmd_token == live_token);
+    echo(0, ESB_PONG_FLAG_SENS_SET);
+    assert(!remote_hid_pending && hid_status == RCV_HID_ST_OK);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
+    assert(tracker_slots[0].remote_cmd_token == 0);
+
+    /* 5. Multi-target timeout clears unconfirmed slots without touching a confirmed slot's new command. */
+    hid_status = -1;
+    assert(rcv_cmd_remote_sens_set_hid(6, ESB_PONG_FLAG_SENS_SET, RCV_HID_TARGET_ALL, 1, 2, 3) == RCV_HID_ST_STARTED);
+    echo(0, ESB_PONG_FLAG_SENS_SET);
+    assert(remote_hid_pending && hid_status == -1);
+    esb_send_remote_command_sens(0, 9, 9, 9);
+    now += REMOTE_HID_CONFIRM_TIMEOUT_MS;
+    remote_hid_timeout_handler(NULL);
+    assert(!remote_hid_pending && hid_status == RCV_HID_ST_ENOENT);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_SENS_SET);
+    assert(tracker_slots[1].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
+    assert(tracker_slots[1].remote_cmd_token == 0);
+    assert(tracker_slots[2].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
+    assert(tracker_slots[2].remote_cmd_token == 0);
+
+    /* 6. Token wraparound skips 0 and targeted TEST_MODE_ON timeout clears slot. */
+    remote_hid_next_token = UINT16_MAX;
+    hid_status = -1;
+    assert(rcv_cmd_remote_test_on_hid(7, ESB_PONG_FLAG_TEST_MODE_ON, 0, 250) == RCV_HID_ST_STARTED);
+    assert(remote_hid_cmd_token == 1);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_TEST_MODE_ON);
+    assert(tracker_slots[0].remote_cmd_token == 1);
+    now += REMOTE_HID_CONFIRM_TIMEOUT_MS;
+    remote_hid_timeout_handler(NULL);
+    assert(!remote_hid_pending && hid_status == RCV_HID_ST_ENOENT);
+    assert(tracker_slots[0].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
+    assert(tracker_slots[0].remote_cmd_token == 0);
+
+    remote_confirm_cb = NULL;
+    puts("PASS HID timeout cancellation: clears expired commands, preserves console/newer commands, skips token 0");
 }
 static void assert_channel_confirm(struct esb_payload p, uint8_t channel) {
     assert(p.data[7] == ESB_PONG_FLAG_CHANNEL_CONFIRM);
@@ -981,6 +1117,7 @@ int main(void) {
     assert(rcv_cmd_collect_batch_start(50) == RCV_HID_ST_OK);
     assert(rcv_cmd_collect_batch_stop() == RCV_HID_ST_OK);
     assert(!batch && auto_loss_reset_epoch != epoch);
+    test_hid_timeout_cancellation();
     puts("PASS receiver channel migration: offline/partial/all, fixed deadline, pending command isolation, snapshot, repeat/clear/zero, RF/storage rollback and exclusion");
     return 0;
 }

@@ -16,15 +16,17 @@ spec.loader.exec_module(extract)
 source = (ROOT / "src/connection/esb.c").read_text()
 header = (ROOT / "src/connection/esb.h").read_text()
 publication_stores = {
-    "esb_send_remote_command_sens": {"pending_sens_data": 3, "tracker_remote_command": 1},
-    "esb_send_remote_command_sens_auto": {
-        "pending_sens_auto_axis": 1, "pending_sens_auto_revolutions": 1, "tracker_remote_command": 1,
+    "esb_send_remote_command_sens_tx": {"pending_sens_data": 3, "remote_cmd_token": 1, "tracker_remote_command": 1},
+    "esb_send_remote_command_sens_auto_tx": {
+        "pending_sens_auto_axis": 1, "pending_sens_auto_revolutions": 1,
+        "remote_cmd_token": 1, "tracker_remote_command": 1,
     },
-    "esb_send_remote_command_sens_auto_all": {
-        "pending_sens_auto_axis": 1, "pending_sens_auto_revolutions": 1, "tracker_remote_command": 1,
+    "esb_send_remote_command_sens_auto_all_tx": {
+        "pending_sens_auto_axis": 1, "pending_sens_auto_revolutions": 1,
+        "remote_cmd_token": 1, "tracker_remote_command": 1,
     },
-    "esb_send_remote_command_test_on": {"tracker_test_on_tps": 1, "tracker_remote_command": 1},
-    "esb_send_remote_command_test_off": {"tracker_test_on_tps": 1, "tracker_remote_command": 1},
+    "esb_send_remote_command_test_on_tx": {"tracker_test_on_tps": 1, "remote_cmd_token": 1, "tracker_remote_command": 1},
+    "esb_send_remote_command_test_off_tx": {"tracker_test_on_tps": 1, "remote_cmd_token": 1, "tracker_remote_command": 1},
     "esb_request_metadata": {
         "metadata_pending_token": 1, "metadata_pending_mask": 1, "metadata_pending_chunk": 1,
     },
@@ -48,16 +50,18 @@ functions = [
     "esb_channel_is_busy", "radio_operation_begin", "esb_radio_operation_begin",
     "esb_radio_collection_begin", "esb_radio_operation_end",
     "channel_command_for_tracker", "esb_publish_remote_command_locked",
-    "esb_send_remote_command_arg", "esb_send_remote_command",
+    "esb_send_remote_command_arg_tx", "esb_send_remote_command_arg", "esb_send_remote_command",
     "channel_apply", "channel_change_begin", "channel_change_poll",
     "esb_set_all_trackers_channel", "esb_clear_all_trackers_channel",
     "esb_auto_channel_request", "esb_set_receiver_channel", "esb_clear_receiver_channel",
     "esb_get_receiver_channel",
     "remote_wom_receive", "esb_send_remote_wom_command",
-    "esb_get_remote_wom_result", "esb_cancel_remote_wom_command",
-    "esb_send_remote_command_sens", "esb_send_remote_command_sens_auto",
-    "esb_send_remote_command_sens_auto_all", "esb_send_remote_command_test_on",
-    "esb_send_remote_command_test_off", "esb_request_metadata",
+    "esb_get_remote_wom_result", "esb_cancel_remote_wom_command", "esb_cancel_remote_command",
+    "esb_send_remote_command_sens_tx", "esb_send_remote_command_sens",
+    "esb_send_remote_command_sens_auto_tx", "esb_send_remote_command_sens_auto",
+    "esb_send_remote_command_sens_auto_all_tx", "esb_send_remote_command_sens_auto_all",
+    "esb_send_remote_command_test_on_tx", "esb_send_remote_command_test_on",
+    "esb_send_remote_command_test_off_tx", "esb_send_remote_command_test_off", "esb_request_metadata",
 ]
 start = source.index("/* Migration owns an ACK overlay")
 end = source.index("bool esb_channel_is_busy", start)
@@ -112,7 +116,12 @@ static void echo(uint8_t tracker_id, uint8_t flag) {
 control = (ROOT / "src/rcv_cmd.c").read_text()
 production += "\n".join(extract.function(control, name) for name in (
     "rcv_cmd_collect_start", "rcv_cmd_collect_stop",
-    "rcv_cmd_collect_batch_start", "rcv_cmd_collect_batch_stop"))
+    "rcv_cmd_collect_batch_start", "rcv_cmd_collect_batch_stop",
+    "remote_hid_abort", "remote_hid_finish", "remote_hid_arm_expected",
+    "remote_hid_timeout_handler", "on_remote_confirm", "remote_hid_begin",
+    "rcv_cmd_remote_flag_hid", "rcv_cmd_remote_sens_set_hid",
+    "rcv_cmd_remote_sens_auto_hid", "rcv_cmd_remote_test_on_hid",
+    "rcv_cmd_remote_test_off_hid"))
 with tempfile.TemporaryDirectory(prefix="receiver-channel-migration-") as directory:
     temporary = Path(directory)
     generated = temporary / "test.c"

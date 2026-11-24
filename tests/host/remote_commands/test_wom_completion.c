@@ -39,6 +39,7 @@ static int k_work_cancel_delayable(int *w) { return 0; }
 static int k_work_reschedule(int *w, int delay) { scheduled = delay; return 0; }
 static int k_work_submit_to_queue(int *q, int *w) { submitted++; return 0; }
 static atomic_t remote_hid_pending, remote_hid_expected, remote_hid_confirmed;
+static uint16_t remote_hid_next_token, remote_hid_cmd_token;
 static uint8_t remote_hid_seq, remote_hid_opcode, remote_hid_flag;
 static bool remote_wom_console;
 static uint16_t remote_wom_token, remote_wom_minutes;

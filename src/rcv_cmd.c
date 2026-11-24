@@ -345,6 +345,8 @@ static uint8_t remote_hid_opcode;
 static uint8_t remote_hid_flag;
 static atomic_t remote_hid_expected = ATOMIC_INIT(0);
 static atomic_t remote_hid_confirmed = ATOMIC_INIT(0);
+static uint16_t remote_hid_next_token;
+static uint16_t remote_hid_cmd_token;
 static bool remote_wom_console;
 static uint16_t remote_wom_token;
 static uint32_t remote_wom_failed;
@@ -394,11 +396,17 @@ static void remote_hid_abort(void)
 
 static void remote_hid_finish(uint8_t status)
 {
+	uint8_t flag = remote_hid_flag;
+	uint32_t expected = (uint32_t)atomic_get(&remote_hid_expected);
+	uint16_t token = remote_hid_cmd_token;
 	if (!atomic_cas(&remote_hid_pending, 1, 0)) {
 		return;
 	}
 	(void)k_work_cancel_delayable(&remote_hid_timeout_work);
 	remote_hid_job = REMOTE_HID_JOB_NONE;
+	if (status != RCV_HID_ST_OK && token != 0 && expected != 0) {
+		esb_cancel_remote_command(expected, flag, token);
+	}
 	remote_hid_send_completion(status);
 }
 
@@ -513,19 +521,20 @@ static void remote_hid_job_handler(struct k_work *work)
 		return;
 	}
 
+	uint16_t token = remote_hid_cmd_token;
 	uint32_t mask = 0;
 	switch (remote_hid_job) {
 	case REMOTE_HID_JOB_FLAG_ALL:
-		mask = esb_send_remote_command_all(remote_hid_job_flag);
+		mask = esb_send_remote_command_all_tx(remote_hid_job_flag, token);
 		break;
 	case REMOTE_HID_JOB_SENS_AUTO_ALL:
-		mask = esb_send_remote_command_sens_auto_all(remote_hid_job_axis, remote_hid_job_rev);
+		mask = esb_send_remote_command_sens_auto_all_tx(remote_hid_job_axis, remote_hid_job_rev, token);
 		break;
 	case REMOTE_HID_JOB_TEST_ON_ALL:
-		mask = esb_send_remote_command_test_on_all(remote_hid_job_tps);
+		mask = esb_send_remote_command_test_on_all_tx(remote_hid_job_tps, token);
 		break;
 	case REMOTE_HID_JOB_TEST_OFF_ALL:
-		mask = esb_send_remote_command_test_off_all();
+		mask = esb_send_remote_command_test_off_all_tx(token);
 		break;
 	case REMOTE_HID_JOB_WOM_COMMAND:
 		mask = esb_send_remote_wom_command(RCV_HID_TARGET_ALL, remote_wom_minutes,
@@ -571,6 +580,10 @@ static uint8_t remote_hid_begin(uint8_t seq, uint8_t opcode, uint8_t flag)
 	if (!atomic_cas(&remote_hid_pending, 0, 1)) {
 		return RCV_HID_ST_EBUSY;
 	}
+	if (++remote_hid_next_token == 0) {
+		remote_hid_next_token = 1;
+	}
+	remote_hid_cmd_token = remote_hid_next_token;
 	remote_hid_seq = seq;
 	remote_hid_opcode = opcode;
 	remote_hid_flag = flag;
@@ -630,6 +643,7 @@ static uint8_t rcv_cmd_remote_flag_hid(uint8_t seq, uint8_t opcode, uint8_t targ
 	if (st != RCV_HID_ST_STARTED) {
 		return st;
 	}
+	uint16_t token = remote_hid_cmd_token;
 
 	if (target_id == RCV_HID_TARGET_ALL) {
 		/* Defer 1s active-scan so HID IN FIFO keeps draining. */
@@ -645,7 +659,7 @@ static uint8_t rcv_cmd_remote_flag_hid(uint8_t seq, uint8_t opcode, uint8_t targ
 
 	/* Arm before queue so a fast confirm cannot race expected==0. */
 	remote_hid_arm_expected(1u << target_id);
-	esb_send_remote_command(target_id, pong_flag);
+	esb_send_remote_command_arg_tx(target_id, pong_flag, 0, token);
 	return RCV_HID_ST_STARTED;
 }
 
@@ -656,6 +670,7 @@ static uint8_t rcv_cmd_remote_sens_set_hid(uint8_t seq, uint8_t opcode, uint8_t 
 	if (st != RCV_HID_ST_STARTED) {
 		return st;
 	}
+	uint16_t token = remote_hid_cmd_token;
 
 	if (target_id == RCV_HID_TARGET_ALL) {
 		uint32_t mask = 0;
@@ -666,8 +681,10 @@ static uint8_t rcv_cmd_remote_sens_set_hid(uint8_t seq, uint8_t opcode, uint8_t 
 		if (mask == 0) {
 			return RCV_HID_ST_STARTED;
 		}
-		for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
-			esb_send_remote_command_sens(i, x, y, z);
+		for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+			if (mask & (1u << i)) {
+				esb_send_remote_command_sens_tx(i, x, y, z, token);
+			}
 		}
 		return RCV_HID_ST_STARTED;
 	}
@@ -676,7 +693,7 @@ static uint8_t rcv_cmd_remote_sens_set_hid(uint8_t seq, uint8_t opcode, uint8_t 
 		return RCV_HID_ST_EINVAL;
 	}
 	remote_hid_arm_expected(1u << target_id);
-	esb_send_remote_command_sens(target_id, x, y, z);
+	esb_send_remote_command_sens_tx(target_id, x, y, z, token);
 	return RCV_HID_ST_STARTED;
 }
 
@@ -691,6 +708,7 @@ static uint8_t rcv_cmd_remote_sens_auto_hid(uint8_t seq, uint8_t opcode, uint8_t
 	if (st != RCV_HID_ST_STARTED) {
 		return st;
 	}
+	uint16_t token = remote_hid_cmd_token;
 
 	if (target_id == RCV_HID_TARGET_ALL) {
 		remote_hid_job = REMOTE_HID_JOB_SENS_AUTO_ALL;
@@ -704,7 +722,7 @@ static uint8_t rcv_cmd_remote_sens_auto_hid(uint8_t seq, uint8_t opcode, uint8_t
 		return RCV_HID_ST_EINVAL;
 	}
 	remote_hid_arm_expected(1u << target_id);
-	if (!esb_send_remote_command_sens_auto(target_id, axis, revolutions)) {
+	if (!esb_send_remote_command_sens_auto_tx(target_id, axis, revolutions, token)) {
 		remote_hid_abort();
 		return RCV_HID_ST_EINVAL;
 	}
@@ -720,6 +738,7 @@ static uint8_t rcv_cmd_remote_test_on_hid(uint8_t seq, uint8_t opcode, uint8_t t
 	if (st != RCV_HID_ST_STARTED) {
 		return st;
 	}
+	uint16_t token = remote_hid_cmd_token;
 	if (target_id == RCV_HID_TARGET_ALL) {
 		/* Defer 1s active-scan so HID IN FIFO keeps draining. */
 		remote_hid_job = REMOTE_HID_JOB_TEST_ON_ALL;
@@ -733,7 +752,7 @@ static uint8_t rcv_cmd_remote_test_on_hid(uint8_t seq, uint8_t opcode, uint8_t t
 	}
 	/* Arm before queue so a fast confirm cannot race expected==0. */
 	remote_hid_arm_expected(1u << target_id);
-	esb_send_remote_command_test_on((uint8_t)target_id, tps);
+	esb_send_remote_command_test_on_tx((uint8_t)target_id, tps, token);
 	return RCV_HID_ST_STARTED;
 }
 
@@ -743,6 +762,7 @@ static uint8_t rcv_cmd_remote_test_off_hid(uint8_t seq, uint8_t opcode, uint8_t 
 	if (st != RCV_HID_ST_STARTED) {
 		return st;
 	}
+	uint16_t token = remote_hid_cmd_token;
 	if (target_id == RCV_HID_TARGET_ALL) {
 		remote_hid_job = REMOTE_HID_JOB_TEST_OFF_ALL;
 		k_work_submit_to_queue(&rssi_wq, &remote_hid_job_work);
@@ -753,7 +773,7 @@ static uint8_t rcv_cmd_remote_test_off_hid(uint8_t seq, uint8_t opcode, uint8_t 
 		return RCV_HID_ST_EINVAL;
 	}
 	remote_hid_arm_expected(1u << target_id);
-	esb_send_remote_command_test_off((uint8_t)target_id);
+	esb_send_remote_command_test_off_tx((uint8_t)target_id, token);
 	return RCV_HID_ST_STARTED;
 }
 

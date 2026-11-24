@@ -113,7 +113,8 @@ static uint32_t tdma_active_mask;
 '''
 helpers = "\n".join(extract.function(source, name) for name in (
     "test_all_capacity_tps", "test_all_requested_value", "test_all_wire_tps",
-    "test_all_invalidate", "esb_send_remote_command_test_on",
+    "test_all_invalidate", "esb_send_remote_command_test_on_tx",
+    "esb_send_remote_command_test_on",
 ))
 helpers += "\n" + "\n".join(instrument(name) for name in (
     "test_all_note_layout", "test_all_update_effective",

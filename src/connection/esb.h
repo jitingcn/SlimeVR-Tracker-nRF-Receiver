@@ -216,23 +216,35 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
 /* Clear only a pending OTA abort command; preserves unrelated commands. */
 void esb_clear_remote_ota_abort(uint8_t tracker_id);
 void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8_t arg);
+void esb_send_remote_command_arg_tx(uint8_t tracker_id, uint8_t command_flag, uint8_t arg, uint16_t token);
 /* Publish a validated target/flag with IRQs already locked by the caller.
  * Stores only: no blocking or logging. Used to commit raw session flags with
  * the matching local session transition. */
 void esb_publish_remote_command_locked(uint8_t tracker_id, uint8_t command_flag, uint8_t arg);
 /* Active-scan then queue. Returns bitmask of targeted tracker ids. Blocks ~1s. */
 uint32_t esb_send_remote_command_all(uint8_t command_flag);
+uint32_t esb_send_remote_command_all_tx(uint8_t command_flag, uint16_t token);
 /* Targeted test commands: publish TPS, then queue the flag. Return the
  * targeted-tracker bitmask; invalidate sticky-all state. */
 uint32_t esb_send_remote_command_test_on(uint8_t tracker_id, uint16_t tps);
+uint32_t esb_send_remote_command_test_on_tx(uint8_t tracker_id, uint16_t tps, uint16_t token);
 uint32_t esb_send_remote_command_test_off(uint8_t tracker_id);
+uint32_t esb_send_remote_command_test_off_tx(uint8_t tracker_id, uint16_t token);
 /* Active-scan then queue. Return bitmask of targeted tracker ids. Blocks ~1s. */
 uint32_t esb_send_remote_command_test_on_all(uint16_t tps);
+uint32_t esb_send_remote_command_test_on_all_tx(uint16_t tps, uint16_t token);
 uint32_t esb_send_remote_command_test_off_all(void);
+uint32_t esb_send_remote_command_test_off_all_tx(uint16_t token);
 void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z);
+void esb_send_remote_command_sens_tx(uint8_t tracker_id, float x, float y, float z, uint16_t token);
 bool esb_send_remote_command_sens_auto(uint8_t tracker_id, uint8_t axis, uint16_t revolutions);
+bool esb_send_remote_command_sens_auto_tx(uint8_t tracker_id, uint8_t axis, uint16_t revolutions, uint16_t token);
 /* Active-scan then queue. Returns bitmask of targeted tracker ids. Blocks ~1s. */
 uint32_t esb_send_remote_command_sens_auto_all(uint8_t axis, uint16_t revolutions);
+uint32_t esb_send_remote_command_sens_auto_all_tx(uint8_t axis, uint16_t revolutions, uint16_t token);
+/* Clear pending commands in mask that still match both command_flag and the
+ * receiver-local non-zero transaction token; leaves newer commands intact. */
+void esb_cancel_remote_command(uint32_t mask, uint8_t command_flag, uint16_t token);
 /* Queue a metadata repair request without replacing an existing control flag.
  * mask selects metadata sections; chunk selects a dense tcal block (0..254) or all (255). */
 bool esb_request_metadata(uint8_t tracker_id, uint8_t mask, uint8_t chunk);
