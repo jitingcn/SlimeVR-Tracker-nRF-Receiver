@@ -30,6 +30,13 @@
 #define RCV_OTA_USE_MCUBOOT 0
 #endif
 #include <hal/nrf_nvmc.h>
+#if CONFIG_RECEIVER_OTA_RAM_ENGINE
+#include "receiver_ota_ram.h"
+#include <zephyr/logging/log_ctrl.h>
+#include <zephyr/usb/usb_ch9.h>
+#include <zephyr/usb/usbd.h>
+#include <nrfx.h>
+#endif
 #include <string.h>
 
 LOG_MODULE_REGISTER(receiver_ota, LOG_LEVEL_INF);
@@ -60,6 +67,9 @@ LOG_MODULE_REGISTER(receiver_ota, LOG_LEVEL_INF);
 /* Max image size: half of app region (staging needs the other half) */
 #if defined(CONFIG_BOOTLOADER_MCUBOOT)
 #define RCV_OTA_MAX_IMAGE_SIZE   0
+#elif CONFIG_RECEIVER_OTA_RAM_ENGINE
+/* In-place writes: the whole application region */
+#define RCV_OTA_MAX_IMAGE_SIZE   (RCV_OTA_FLASH_END - RCV_OTA_FLASH_BASE)
 #else
 #define RCV_OTA_MAX_IMAGE_SIZE   ((RCV_OTA_FLASH_END - RCV_OTA_FLASH_BASE) / 2)
 #endif
@@ -71,6 +81,7 @@ LOG_MODULE_REGISTER(receiver_ota, LOG_LEVEL_INF);
 #define RCV_BOARD_TARGET_STRING CONFIG_BOARD_TARGET
 #endif
 
+#if !CONFIG_RECEIVER_OTA_RAM_ENGINE
 /* ── Flash writer thread ─────────────────────────────────────────── */
 
 /*
@@ -116,6 +127,7 @@ static atomic_t writer_stop_requested;
 /* HID command thread owns this flag. It remains set after natural exit or a
  * stop timeout, until join proves the thread and stack can be reused. */
 static bool writer_created;
+#endif /* !CONFIG_RECEIVER_OTA_RAM_ENGINE */
 
 /* ── Bootloader settings (Adafruit UF2 bootloader) ───────────────── */
 
@@ -169,17 +181,20 @@ static struct {
 	int64_t  last_status_time;
 } rcv_ota;
 
+#if !CONFIG_RECEIVER_OTA_RAM_ENGINE
 static const struct device *flash_dev;
 
 /* Prepared bootloader settings */
 static struct bootloader_settings prepared_bl_settings;
 static bool bl_settings_prepared;
+#endif
 
 /* ── Forward declarations ────────────────────────────────────────── */
 
 static void rcv_ota_send_status(void);
 static void rcv_ota_send_fw_info(void);
 static void rcv_ota_handle_begin(const uint8_t *data, size_t len);
+#if !CONFIG_RECEIVER_OTA_RAM_ENGINE
 static void rcv_ota_handle_data(const uint8_t *data, size_t len);
 static void rcv_ota_handle_verify(void);
 static void rcv_ota_handle_activate(void);
@@ -190,6 +205,10 @@ static int rcv_ota_stop_writer(void);
 static void rcv_ota_do_verify(void);
 static void rcv_ota_do_activate(void);
 static void rcv_ota_activate_and_reset(void);
+#else
+static void rcv_ota_enter_ram_engine(uint32_t image_size, uint32_t image_crc32,
+				     uint32_t flash_base);
+#endif
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
@@ -206,6 +225,7 @@ void receiver_ota_process_hid(const uint8_t *data, size_t len)
 
 	uint8_t report_type = data[0];
 
+#if !CONFIG_RECEIVER_OTA_RAM_ENGINE
 	/* Initialize flash device on first use */
 	if (!flash_dev) {
 		flash_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_flash_controller));
@@ -223,6 +243,7 @@ void receiver_ota_process_hid(const uint8_t *data, size_t len)
 		rcv_ota_send_status();
 		return;
 	}
+#endif
 
 	switch (report_type) {
 	case HID_OTA_QUERY_INFO:
@@ -237,11 +258,17 @@ void receiver_ota_process_hid(const uint8_t *data, size_t len)
 		}
 		esb_auto_loss_invalidate();
 		rcv_ota_handle_begin(data, len);
+#if CONFIG_RECEIVER_OTA_RAM_ENGINE
+		/* Returning here means BEGIN was refused before takeover; do not leave
+		 * receiver_ota_is_active() wedged in ERROR for subsequent operations. */
+		rcv_ota.state = RCV_OTA_IDLE;
+#endif
 		if (acquired_radio) {
 			esb_radio_operation_end();
 		}
 		break;
 	}
+#if !CONFIG_RECEIVER_OTA_RAM_ENGINE
 	case HID_OTA_DATA:
 		rcv_ota_handle_data(data, len);
 		break;
@@ -254,6 +281,15 @@ void receiver_ota_process_hid(const uint8_t *data, size_t len)
 	case HID_OTA_ABORT:
 		rcv_ota_handle_abort();
 		break;
+#else
+	case HID_OTA_DATA:
+	case HID_OTA_VERIFY:
+	case HID_OTA_ACTIVATE:
+		break;
+	case HID_OTA_ABORT:
+		memset(&rcv_ota, 0, sizeof(rcv_ota));
+		break;
+#endif
 	default:
 		LOG_WRN("RCV OTA: unknown report type 0x%02X", report_type);
 		break;
@@ -346,9 +382,11 @@ static void rcv_ota_send_status(void)
 	default:                 status_code = OTA_STATUS_ERROR; break;
 	}
 
+#if !CONFIG_RECEIVER_OTA_RAM_ENGINE
 	if (atomic_get(&writer_stop_requested)) {
 		status_code = OTA_STATUS_TIMEOUT;
 	}
+#endif
 
 	uint8_t hid_report[16] = {0};
 	hid_report[0] = HID_OTA_STATUS;
@@ -359,9 +397,11 @@ static void rcv_ota_send_status(void)
 	/* hid_report[9] = ring_count (0 for receiver self-OTA, no ring buffer) */
 
 	hid_write_packet_n(hid_report, 0);
+#if !CONFIG_RECEIVER_OTA_RAM_ENGINE
 	if (!atomic_get(&writer_stop_requested)) {
 		rcv_ota.last_status_time = k_uptime_get();
 	}
+#endif
 }
 
 /* ── BEGIN ────────────────────────────────────────────────────────── */
@@ -392,6 +432,7 @@ static void rcv_ota_handle_begin(const uint8_t *data, size_t len)
 	return;
 #endif
 
+#if !CONFIG_RECEIVER_OTA_RAM_ENGINE
 	/* Reject duplicate if already in progress */
 	if (rcv_ota.state != RCV_OTA_IDLE && rcv_ota.state != RCV_OTA_ERROR &&
 	    rcv_ota.state != RCV_OTA_COMPLETE && !atomic_get(&writer_stop_requested)) {
@@ -406,6 +447,7 @@ static void rcv_ota_handle_begin(const uint8_t *data, size_t len)
 		rcv_ota_send_status();
 		return;
 	}
+#endif
 
 	/* Parse parameters (same format as tracker BEGIN) */
 	uint32_t image_size = sys_get_le32(&data[2]);
@@ -519,6 +561,11 @@ static void rcv_ota_handle_begin(const uint8_t *data, size_t len)
 		return;
 	}
 
+#if CONFIG_RECEIVER_OTA_RAM_ENGINE
+	/* Only returns when the session is refused before taking over. */
+	rcv_ota_enter_ram_engine(image_size, image_crc32, flash_base);
+	return;
+#else
 	/* Calculate staging area (page-aligned, at end of app partition) */
 #if RCV_OTA_USE_MCUBOOT
 	uint32_t staging_base = secondary->fa_off + image_offset;
@@ -580,8 +627,10 @@ static void rcv_ota_handle_begin(const uint8_t *data, size_t len)
 	rcv_ota_start_writer();
 
 	rcv_ota_send_status();
+#endif /* CONFIG_RECEIVER_OTA_RAM_ENGINE */
 }
 
+#if !CONFIG_RECEIVER_OTA_RAM_ENGINE
 /* ── DATA ────────────────────────────────────────────────────────── */
 
 static void rcv_ota_handle_data(const uint8_t *data, size_t len)
@@ -1044,9 +1093,11 @@ static int rcv_ota_flush_page_buf(void)
 
 	return 0;
 }
+#endif /* !CONFIG_RECEIVER_OTA_RAM_ENGINE */
 
 /* ── RAM-resident flash copier ───────────────────────────────────── */
 
+#if !CONFIG_RECEIVER_OTA_RAM_ENGINE
 /*
  * Copies staging area to app region with IRQs disabled.
  * Same approach as tracker OTA: copy function to RAM, disable IRQs + MPU, execute.
@@ -1195,3 +1246,212 @@ static void rcv_ota_activate_and_reset(void)
 	ram_copy(&params);
 	/* Never reached */
 }
+#endif /* !CONFIG_RECEIVER_OTA_RAM_ENGINE */
+
+#if CONFIG_RECEIVER_OTA_RAM_ENGINE
+/* ── In-place RAM engine ─────────────────────────────────────────── */
+
+static void rcv_ota_refuse(uint8_t code)
+{
+	rcv_ota.state = RCV_OTA_ERROR;
+	rcv_ota.error_code = code;
+	rcv_ota_send_status();
+	rcv_ota.state = RCV_OTA_IDLE;
+}
+
+static bool rcv_ota_range_acl_protected(uint32_t start, uint32_t size)
+{
+	uint32_t end = start + size;
+
+	for (uint32_t i = 0; i < 8u; i++) {
+		uint32_t r_start = NRF_ACL->ACL[i].ADDR;
+		uint32_t r_size = NRF_ACL->ACL[i].SIZE;
+		uint32_t r_perm = NRF_ACL->ACL[i].PERM;
+
+		if (r_size == 0u || !(r_perm & ACL_ACL_PERM_WRITE_Msk)) {
+			continue;
+		}
+		uint32_t r_end = r_start + r_size;
+
+		if (r_end < r_start) {
+			r_end = UINT32_MAX;
+		}
+		if (start < r_end && r_start < end) {
+			LOG_ERR("RCV OTA: ACL[%u] write-protects 0x%08X..0x%08X",
+				i, r_start, r_end);
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool rcv_ota_find_hid_endpoints(uint8_t *in_ep_out, uint8_t *out_ep_out)
+{
+	const struct device *hid = DEVICE_DT_GET(DT_NODELABEL(hid_dev_0));
+
+	if (!device_is_ready(hid)) {
+		return false;
+	}
+
+	uint8_t in_ep = 0;
+	uint8_t out_ep = 0;
+	uint32_t ep_active = 0;
+	bool found = false;
+
+	STRUCT_SECTION_FOREACH_ALTERNATE(usbd_class_fs, usbd_class_node, c_nd) {
+		if (c_nd->c_data == NULL || usbd_class_get_private(c_nd->c_data) != hid) {
+			continue;
+		}
+		if (c_nd->c_data->api == NULL || c_nd->c_data->api->get_desc == NULL) {
+			return false;
+		}
+		const struct usb_desc_header *const *dhp =
+			c_nd->c_data->api->get_desc(c_nd->c_data, USBD_SPEED_FS);
+
+		if (dhp == NULL) {
+			return false;
+		}
+		ep_active = c_nd->ep_active;
+		for (; *dhp != NULL; dhp++) {
+			if ((*dhp)->bDescriptorType != USB_DESC_ENDPOINT ||
+			    (*dhp)->bLength < sizeof(struct usb_ep_descriptor)) {
+				continue;
+			}
+			const struct usb_ep_descriptor *ep =
+				(const struct usb_ep_descriptor *)(*dhp);
+			uint8_t addr = ep->bEndpointAddress;
+			uint8_t idx = USB_EP_GET_IDX(addr);
+
+			if (idx == 0u || idx > 7u) {
+				return false;
+			}
+			if (USB_EP_DIR_IS_IN(addr)) {
+				if (in_ep != 0u) {
+					return false;
+				}
+				in_ep = idx;
+			} else {
+				if (out_ep != 0u) {
+					return false;
+				}
+				out_ep = idx;
+			}
+		}
+		found = true;
+		break;
+	}
+
+	if (!found || in_ep == 0u || out_ep == 0u) {
+		return false;
+	}
+	if (!(ep_active & BIT(in_ep + 16U)) || !(ep_active & BIT(out_ep))) {
+		return false;
+	}
+	if (!(NRF_USBD->EPINEN & BIT(in_ep)) || !(NRF_USBD->EPOUTEN & BIT(out_ep)) ||
+	    NRF_USBD->HALTED.EPIN[in_ep] || NRF_USBD->HALTED.EPOUT[out_ep] ||
+	    !NRF_USBD->USBPULLUP || NRF_USBD->USBADDR == 0u) {
+		return false;
+	}
+
+	*in_ep_out = in_ep;
+	*out_ep_out = out_ep;
+	return true;
+}
+
+static void rcv_ota_flush_logs(void)
+{
+#ifdef CONFIG_LOG_MODE_DEFERRED
+	/* CONFIG_LOG_PROCESS_THREAD_SLEEP_MS is 100 ms; explicitly wake the
+	 * log thread and give it a bounded window to drain before takeover. */
+	log_thread_trigger();
+	for (int i = 0; i < 30 && log_buffered_cnt() > 0u; i++) {
+		k_msleep(5);
+	}
+#endif
+	k_msleep(20);
+}
+
+static void rcv_ota_enter_ram_engine(uint32_t image_size, uint32_t image_crc32,
+				     uint32_t flash_base)
+{
+	if (image_size < 0x20u) {
+		LOG_ERR("RCV OTA: image too small (%u bytes)", image_size);
+		rcv_ota_refuse(OTA_STATUS_SIZE_ERROR);
+		return;
+	}
+	if (flash_base != 0u && flash_base != RCV_OTA_FLASH_BASE) {
+		LOG_ERR("RCV OTA: in-place update needs the running base 0x%X",
+			RCV_OTA_FLASH_BASE);
+		rcv_ota_refuse(OTA_STATUS_SIZE_ERROR);
+		return;
+	}
+
+	uint32_t aligned_size = ROUND_UP(image_size, RCV_OTA_FLASH_PAGE_SIZE);
+
+	if (aligned_size > RCV_OTA_FLASH_END - RCV_OTA_FLASH_BASE) {
+		LOG_ERR("RCV OTA: aligned image size %u exceeds app partition", aligned_size);
+		rcv_ota_refuse(OTA_STATUS_SIZE_ERROR);
+		return;
+	}
+	if (rcv_ota_range_acl_protected(RCV_OTA_FLASH_BASE, aligned_size)) {
+		rcv_ota_refuse(OTA_STATUS_FLASH_ERROR);
+		return;
+	}
+
+	/* The engine leaves the settings page alone and matches the stored
+	 * bank 0 CRC16 instead, so read what the bootloader will check. */
+	const struct bootloader_settings *bl =
+		(const struct bootloader_settings *)RCV_OTA_BOOTLOADER_SETTINGS_ADDR;
+	uint32_t check_size = 0;
+	uint16_t check_crc16 = 0;
+
+	if (bl->bank_0 == BANK_VALID_APP && bl->bank_0_crc != 0u) {
+		check_size = bl->bank_0_size;
+		check_crc16 = bl->bank_0_crc;
+		if (check_size < 0x20u || check_size > RCV_OTA_FLASH_END - RCV_OTA_FLASH_BASE) {
+			LOG_ERR("RCV OTA: unexpected bank 0 size %u", check_size);
+			rcv_ota_refuse(OTA_STATUS_ERROR);
+			return;
+		}
+	} else if (bl->bank_0 != BANK_VALID_APP && bl->bank_0 != 0xFFFFu) {
+		LOG_ERR("RCV OTA: unexpected bank 0 state 0x%04X", bl->bank_0);
+		rcv_ota_refuse(OTA_STATUS_ERROR);
+		return;
+	}
+
+	uint8_t in_ep = 0;
+	uint8_t out_ep = 0;
+
+	if (!rcv_ota_find_hid_endpoints(&in_ep, &out_ep)) {
+		LOG_ERR("RCV OTA: HID endpoints not active or not recognized");
+		rcv_ota_refuse(OTA_STATUS_ERROR);
+		return;
+	}
+
+	uint32_t sram_base = DT_REG_ADDR(DT_CHOSEN(zephyr_sram));
+	uint32_t sram_end = sram_base + DT_REG_SIZE(DT_CHOSEN(zephyr_sram));
+
+	struct rcv_ota_ram_params params = {
+		.image_size = image_size,
+		.image_crc32 = image_crc32,
+		.flash_base = RCV_OTA_FLASH_BASE,
+		.flash_end = RCV_OTA_FLASH_END,
+		.sram_base = sram_base,
+		.sram_end = sram_end,
+		.check_size = check_size,
+		.check_crc16 = check_crc16,
+		.in_ep = in_ep,
+		.out_ep = out_ep,
+		.errata_199 = nrf52_errata_199(),
+	};
+
+	LOG_WRN("RCV OTA: in-place RAM engine, %u bytes, EP in %u out %u, bank0 %u/0x%04X",
+		image_size, params.in_ep, params.out_ep, check_size, check_crc16);
+	rcv_ota_flush_logs();
+
+	if (!rcv_ota_ram_engine_run(&params)) {
+		LOG_ERR("RCV OTA: RAM engine refused launch parameters");
+		rcv_ota_refuse(OTA_STATUS_ERROR);
+	}
+}
+#endif

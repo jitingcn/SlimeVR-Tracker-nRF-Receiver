@@ -97,6 +97,17 @@ else()
   # No data collection: exclude both
   list(FILTER app_sources EXCLUDE REGEX ".*data_collect.*\\.c$")
 endif()
+if(CONFIG_RECEIVER_OTA_RAM_ENGINE)
+  # Build the RAM-copied OTA engine blob without LTO, jump tables, or
+  # implicit libc pattern replacements so every instruction and literal
+  # stays self-contained inside .ota_ram_engine.
+  set_source_files_properties(src/receiver_ota_ram.c PROPERTIES
+    COMPILE_OPTIONS "-fno-lto;-Os;-fno-jump-tables;-fno-tree-loop-distribute-patterns;-fno-builtin"
+  )
+  zephyr_linker_sources(ROM_SECTIONS src/ota_ram_engine.ld)
+else()
+  list(FILTER app_sources EXCLUDE REGEX ".*receiver_ota_ram\\.c$")
+endif()
 # NORDIC SDK APP START
 target_sources(app PRIVATE ${app_sources})
 # NORDIC SDK APP END
