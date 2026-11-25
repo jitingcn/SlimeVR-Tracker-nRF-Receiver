@@ -130,7 +130,7 @@ static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t length)
 /* DIAGNOSTIC DECLARATIONS */
 static uint32_t decision_ready_mask, decision_fence_mask;
 static atomic_t test_all_state_valid, test_all_confirmed_mask;
-static void (*remote_confirm_cb)(uint8_t, uint8_t);
+static void (*remote_confirm_cb)(uint8_t, uint8_t, uint16_t);
 static uint32_t k_ticks_to_us_floor32(uint32_t ticks) { return ticks; }
 /* SDK conversion and console policy leaves; admission cases keep detail off. */
 static uint64_t k_ticks_to_us_floor64(uint64_t ticks) { return ticks * 1000000 / 32768; }

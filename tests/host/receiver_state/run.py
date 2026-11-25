@@ -38,7 +38,7 @@ pending_sens_data pending_sens_auto_axis pending_sens_auto_revolutions
 metadata_active_mask metadata_active_chunk metadata_active_token
 metadata_pending_mask metadata_pending_chunk metadata_pending_token
 wom_token wom_minutes wom_error wom_complete wom_advertised wom_first_ping_counter
-stats decision_received decision_gaps'''.split()
+remote_cmd_token stats decision_received decision_gaps'''.split()
 diagnostic_fields = '''stats g_last_ping_rx_time_diff_ticks
 g_last_ping_rx_time_diff_valid g_ping_isr_rx_ticks g_ping_isr_rx_ticks_valid
 g_last_isr_rx_ticks g_last_isr_rx_valid g_bias_ppb_valid g_bias_ppb
@@ -66,14 +66,14 @@ def declaration(name):
 
 
 def function(name):
-    return extract_block(source, rf'^(?:static\s+)?(?:void|bool|int|uint32_t)\s+{name}\([^;{{]*\)\s*\{{')
+    return extract_block(source, rf'^(?:static\s+)?(?:void|bool|int|uint16_t|uint32_t)\s+{name}\([^;{{]*\)\s*\{{')
 
 
 constants = '\n'.join(re.findall(
-    r'^#define (?:PING_TIMEOUT_MS|REMOTE_COMMAND_ACTIVE_SCAN_MS|TDMA_SHADOW_\w+|TDMA_MEMBERSHIP_COHORT_MS|RX_PHASE_BUCKETS|RX_RSSI_BUCKETS)\b[^\n]*', live, re.M))
+    r'^#define (?:PING_TIMEOUT_MS|REMOTE_COMMAND_ACTIVE_SCAN_MS|ESB_REMOTE_CMD_RETAIN_BIT|TDMA_SHADOW_\w+|TDMA_MEMBERSHIP_COHORT_MS|RX_PHASE_BUCKETS|RX_RSSI_BUCKETS)\b[^\n]*', live, re.M))
 protocol = (ROOT / 'src/connection/esb.h').read_text()
 constants += '\n' + '\n'.join(re.findall(
-    r'^#define ESB_(?:PONG_FLAG_\w+|PING_FLAG_WOM_(?:RESULT|ERROR)|WOM_\w+|METADATA_MASK_VALID)\b[^\n]*',
+    r'^#define ESB_(?:PONG_FLAG_\w+|PING_FLAG_WOM_(?:RESULT|ERROR)|WOM_\w+|METADATA_MASK_VALID|REMOTE_CMD_TOKEN_MAX)\b[^\n]*',
     protocol, re.M))
 declarations = constants + '\n' + '\n'.join(
     extract_block(live, rf'^{kind} {name}\s*\{{', semicolon=True)
@@ -91,11 +91,19 @@ if 'pairing' in cases:
     declarations += '\n' + extract_block(live, r'^struct pairing_event\s*\{', semicolon=True)
 
 names = ['esb_auto_loss_invalidate',
-         'tdma_shadow_observe', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
-         'esb_send_remote_command_sens', 'esb_send_remote_command_sens_auto',
-         'esb_send_remote_command_sens_auto_all']
+         'tdma_shadow_observe', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update']
+if re.search(r'^static uint16_t esb_remote_cmd_publish_token\(', source, re.M):
+    names.append('esb_remote_cmd_publish_token')
+for tx_name in ('esb_send_remote_command_sens_tx', 'esb_send_remote_command_sens_auto_tx',
+                'esb_send_remote_command_sens_auto_all_tx'):
+    if re.search(rf'^(?:void|bool|uint32_t)\s+{tx_name}\(', source, re.M):
+        names.append(tx_name)
+names += ['esb_send_remote_command_sens', 'esb_send_remote_command_sens_auto',
+          'esb_send_remote_command_sens_auto_all']
 if re.search(r'^void esb_publish_remote_command_locked\(', source, re.M):
     names.append('esb_publish_remote_command_locked')
+if re.search(r'^void esb_send_remote_command_arg_tx\(', source, re.M):
+    names.append('esb_send_remote_command_arg_tx')
 names.append('esb_send_remote_command_arg')
 if 'slots' in cases or 'pairing' in cases:
     names += ['tracker_slot_reset', 'esb_add_pair']
@@ -114,7 +122,7 @@ for name in names:
     body = function(name)
     if name.startswith('esb_send_remote_command_') or name == 'esb_publish_remote_command_locked':
         body = re.sub(
-            r'(^[ \t]*tracker_slots\[[^\]\n]+\]\.(?:pending_sens_data(?:\[[^\]]+\])?|pending_sens_auto_axis|pending_sens_auto_revolutions|pending_cmd_arg|tracker_remote_command)\s*=[^\n;]*;)',
+            r'(^[ \t]*tracker_slots\[[^\]\n]+\]\.(?:pending_sens_data(?:\[[^\]]+\])?|pending_sens_auto_axis|pending_sens_auto_revolutions|pending_cmd_arg|remote_cmd_token|tracker_remote_command)\s*=[^\n;]*;)',
             r'\1 preempt();', body, flags=re.M)
     functions.append(body)
 

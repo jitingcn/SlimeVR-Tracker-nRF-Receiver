@@ -117,7 +117,8 @@ struct observation { uint8_t frame[AC_FRAME_SIZE], home; uint32_t generation; in
 static struct observation queued_observation;
 static int observations;
 static uint8_t confirmed_id, confirmed_flag;
-static void (*remote_confirm_cb)(uint8_t, uint8_t);
+static uint16_t confirmed_token;
+static void (*remote_confirm_cb)(uint8_t, uint8_t, uint16_t);
 
 enum tdma_shadow_evidence { TDMA_SHADOW_EVIDENCE_PING, TDMA_SHADOW_EVIDENCE_DATA };
 static void tdma_shadow_observe(uint8_t id, enum tdma_shadow_evidence evidence)
@@ -363,11 +364,12 @@ static void dispatch(const struct esb_payload *p)
     event_handler(&event);
     assert(!incoming_ready);
 }
-static void confirm(uint8_t id, uint8_t flag)
+static void confirm(uint8_t id, uint8_t flag, uint16_t token)
 {
     ++confirmations;
     confirmed_id = id;
     confirmed_flag = flag;
+    confirmed_token = token;
 }
 static void test_late_metadata(void)
 {
@@ -406,6 +408,7 @@ static void test_invalid(const char *which)
     } else if (strcmp(which, "wrong-pipe") == 0) {
         p = packet(ESB_PING_TYPE, id, 4, 1, 0, ESB_PONG_FLAG_CALIBRATE);
         tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
+        tracker_slots[id].remote_cmd_token = 0;
         remote_confirm_cb = confirm;
     } else if (strcmp(which, "out-of-range") == 0) {
         p = packet(ESB_PING_TYPE, MAX_TRACKERS, 3, 1, 0, ESB_PONG_FLAG_NORMAL);
@@ -435,7 +438,8 @@ static void test_invalid(const char *which)
         assert(tracker_slots[id].pipe_mismatch_count == 1);
         assert(tracker_slots[id].ping_counter_initialized && tracker_slots[id].last_ping_counter == 1);
         assert(tracker_slots[id].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
-        assert(confirmations == 1 && confirmed_id == id && confirmed_flag == ESB_PONG_FLAG_CALIBRATE);
+        assert(confirmations == 1 && confirmed_id == id && confirmed_flag == ESB_PONG_FLAG_CALIBRATE &&
+               confirmed_token == 0);
     }
     if (strcmp(which, "bad-crc") == 0) assert(tracker_slots[id].crc_error_count == 1);
 }
@@ -747,6 +751,7 @@ static void test_drain(void)
     esb_pairing = true;
     raw_target = true;
     tracker_slots[2].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
+    tracker_slots[2].remote_cmd_token = 0x8000u | 0x1234u;
     remote_confirm_cb = confirm;
 
     fifo_push(p, 1000);
@@ -826,7 +831,8 @@ static void test_drain(void)
     const uint8_t discovery[8] = {0xfe, 0, 1, 2, 3, 4, 5, 4};
     assert(memcmp(esb_pairing_msgq.item.packet, discovery, sizeof(discovery)) == 0);
     assert(tracker_slots[2].crc_error_count == 1 && tracker_slots[2].last_ping_counter == 6);
-    assert(confirmations == 1 && confirmed_id == 2 && confirmed_flag == ESB_PONG_FLAG_CALIBRATE);
+    assert(confirmations == 1 && confirmed_id == 2 && confirmed_flag == ESB_PONG_FLAG_CALIBRATE &&
+           confirmed_token == 0x1234u);
     assert(tracker_slots[2].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
     assert(tracker_slots[3].last_ping_counter == 1);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)

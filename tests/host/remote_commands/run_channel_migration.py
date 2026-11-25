@@ -16,15 +16,18 @@ spec.loader.exec_module(extract)
 source = (ROOT / "src/connection/esb.c").read_text()
 header = (ROOT / "src/connection/esb.h").read_text()
 publication_stores = {
-    "esb_send_remote_command_sens": {"pending_sens_data": 3, "tracker_remote_command": 1},
-    "esb_send_remote_command_sens_auto": {
-        "pending_sens_auto_axis": 1, "pending_sens_auto_revolutions": 1, "tracker_remote_command": 1,
+    "esb_send_remote_command_sens_tx": {"pending_sens_data": 3, "remote_cmd_token": 1, "tracker_remote_command": 1},
+    "esb_send_remote_command_sens_auto_tx": {
+        "pending_sens_auto_axis": 1, "pending_sens_auto_revolutions": 1,
+        "remote_cmd_token": 1, "tracker_remote_command": 1,
     },
-    "esb_send_remote_command_sens_auto_all": {
-        "pending_sens_auto_axis": 1, "pending_sens_auto_revolutions": 1, "tracker_remote_command": 1,
+    "esb_send_remote_command_sens_auto_all_tx": {
+        "pending_sens_auto_axis": 1, "pending_sens_auto_revolutions": 1,
+        "remote_cmd_token": 1, "tracker_remote_command": 1,
     },
-    "esb_send_remote_command_test_on": {"tracker_test_on_tps": 1, "tracker_remote_command": 1},
-    "esb_send_remote_command_test_off": {"tracker_test_on_tps": 1, "tracker_remote_command": 1},
+    "esb_send_remote_command_test_on_tx": {"tracker_test_on_tps": 1, "remote_cmd_token": 1, "tracker_remote_command": 1},
+    "esb_send_remote_command_test_off_tx": {"tracker_test_on_tps": 1, "remote_cmd_token": 1, "tracker_remote_command": 1},
+    "esb_publish_flag_mask": {"tracker_remote_command": 1},
     "esb_request_metadata": {
         "metadata_pending_token": 1, "metadata_pending_mask": 1, "metadata_pending_chunk": 1,
     },
@@ -35,7 +38,7 @@ def publication_function(name):
     body = extract.function(source, name)
     for field, expected in publication_stores.get(name, {}).items():
         pattern = (r"(?m)^([ \t]*tracker_slots\[[^\]\n]+\]\." + re.escape(field) +
-                   r"(?:\[[^\]\n]+\])?[ \t]*=[^;\n]*;)")
+                   r"(?:\[[^\]\n]+\])?[ \t]*=(?!=)[^;\n]*;)")
         body, count = re.subn(pattern, r"\1\n\thost_radio_preempt();", body)
         if count != expected:
             raise ValueError(f"{name}: expected {expected} stores to {field}, found {count}")
@@ -43,21 +46,30 @@ def publication_function(name):
 
 
 functions = [
+    "esb_remote_cmd_publish_token",
     "decision_accept", "esb_auto_loss_invalidate", "esb_rx_discontinuity", "packet_stats_refresh", "packet_stats_count", "check_packet_sequence",
-    "test_all_invalidate",
+    "test_all_capacity_tps", "test_all_requested_value", "test_all_wire_tps",
+    "test_all_invalidate", "test_all_reconcile",
     "esb_channel_is_busy", "radio_operation_begin", "esb_radio_operation_begin",
     "esb_radio_collection_begin", "esb_radio_operation_end",
     "channel_command_for_tracker", "esb_publish_remote_command_locked",
-    "esb_send_remote_command_arg", "esb_send_remote_command",
+    "esb_send_remote_command_arg_tx", "esb_send_remote_command_arg", "esb_send_remote_command",
     "channel_apply", "channel_change_begin", "channel_change_poll",
     "esb_set_all_trackers_channel", "esb_clear_all_trackers_channel",
     "esb_auto_channel_request", "esb_set_receiver_channel", "esb_clear_receiver_channel",
     "esb_get_receiver_channel",
     "remote_wom_receive", "esb_send_remote_wom_command",
-    "esb_get_remote_wom_result", "esb_cancel_remote_wom_command",
-    "esb_send_remote_command_sens", "esb_send_remote_command_sens_auto",
-    "esb_send_remote_command_sens_auto_all", "esb_send_remote_command_test_on",
-    "esb_send_remote_command_test_off", "esb_request_metadata",
+    "esb_get_remote_wom_result", "esb_cancel_remote_wom_command", "esb_finish_remote_command_locked",
+    "esb_send_remote_command_sens_tx", "esb_send_remote_command_sens",
+    "esb_send_remote_command_sens_auto_tx", "esb_send_remote_command_sens_auto",
+    "esb_send_remote_command_sens_auto_all_tx", "esb_send_remote_command_sens_auto_all",
+    "esb_scan_active_mask", "esb_publish_flag_mask", "esb_send_remote_command_all_tx",
+    "esb_send_remote_command_all", "esb_publish_test_flag_mask",
+    "esb_send_remote_command_test_on_tx", "esb_send_remote_command_test_on",
+    "esb_send_remote_command_test_off_tx", "esb_send_remote_command_test_off",
+    "esb_send_remote_command_test_on_all_tx", "esb_send_remote_command_test_on_all",
+    "esb_send_remote_command_test_off_all_tx", "esb_send_remote_command_test_off_all",
+    "esb_request_metadata",
 ]
 start = source.index("/* Migration owns an ACK overlay")
 end = source.index("bool esb_channel_is_busy", start)
@@ -89,10 +101,10 @@ prelude = prelude.replace("/* DIAGNOSTIC DECLARATIONS */",
 # confirmation priority, command formats, OTA override and CRC generation.
 defines = []
 for line in header.splitlines():
-    match = re.match(r"#define (ESB_(?:(?:PING|PONG|RAW|OTA|CHANNEL_CONFIRM|WOM_TIMEOUT)_\w+|WOM_ENTER|METADATA_MASK_VALID))\s+", line)
+    match = re.match(r"#define (ESB_(?:(?:PING|PONG|RAW|OTA|CHANNEL_CONFIRM|WOM_TIMEOUT)_\w+|WOM_ENTER|METADATA_MASK_VALID|REMOTE_CMD_TOKEN_MAX))\s+", line)
     if match and not re.search(r"#define\s+" + match[1] + r"\b", prelude):
         defines.append(line)
-defines.extend(re.findall(r'^#define (?:PING_TIMEOUT_MS|PING_CLEAN_REACQUIRE_STREAK)\b[^\n]*',
+defines.extend(re.findall(r'^#define (?:PING_TIMEOUT_MS|PING_CLEAN_REACQUIRE_STREAK|ESB_REMOTE_CMD_RETAIN_BIT)\b[^\n]*',
                           source, re.MULTILINE))
 prelude = "\n".join(defines) + "\n" + prelude
 production += "\n" + extract.function(source, "esb_ack_handler_cb")
@@ -110,9 +122,29 @@ static void echo(uint8_t tracker_id, uint8_t flag) {
 }
 """
 control = (ROOT / "src/rcv_cmd.c").read_text()
-production += "\n".join(extract.function(control, name) for name in (
+def control_function(name):
+    body = extract.function(control, name)
+    hooks = {
+        "remote_hid_finish": "atomic_set(&remote_hid_pending, REMOTE_HID_FINISHING);",
+        "remote_hid_job_handler": "remote_hid_arm_expected(mask, token);",
+    }
+    if name in hooks:
+        site = hooks[name]
+        if body.count(site) != 1:
+            raise ValueError(f"{name}: expected one deterministic interleaving site")
+        body = body.replace(site, site + "\n\thost_radio_preempt();", 1) if name == "remote_hid_finish" \
+            else body.replace(site, "host_radio_preempt();\n\t" + site, 1)
+    return body
+
+
+production += "\n".join(control_function(name) for name in (
     "rcv_cmd_collect_start", "rcv_cmd_collect_stop",
-    "rcv_cmd_collect_batch_start", "rcv_cmd_collect_batch_stop"))
+    "rcv_cmd_collect_batch_start", "rcv_cmd_collect_batch_stop",
+    "remote_hid_abort", "remote_hid_finish", "remote_hid_arm_expected",
+    "remote_hid_timeout_handler", "remote_hid_job_handler", "on_remote_confirm", "remote_hid_begin",
+    "rcv_cmd_remote_flag_hid", "rcv_cmd_remote_sens_set_hid",
+    "rcv_cmd_remote_sens_auto_hid", "rcv_cmd_remote_test_on_hid",
+    "rcv_cmd_remote_test_off_hid"))
 with tempfile.TemporaryDirectory(prefix="receiver-channel-migration-") as directory:
     temporary = Path(directory)
     generated = temporary / "test.c"
@@ -122,7 +154,7 @@ with tempfile.TemporaryDirectory(prefix="receiver-channel-migration-") as direct
         flags = ["-DCONFIG_TDMA_DIAGNOSTICS=1"] if diagnostics else []
         subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
-            "-Wno-unused-function", "-Wno-unused-variable", "-g", "-O1",
+            "-Wno-unused-function", "-Wno-unused-variable", "-Wno-sign-compare", "-g", "-O1",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
             *flags, str(generated), "-o", str(binary),
         ], check=True)

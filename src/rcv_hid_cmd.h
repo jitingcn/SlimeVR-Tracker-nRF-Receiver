@@ -79,6 +79,12 @@
 #define RCV_HID_ST_QUEUED   6
 #define RCV_HID_ST_STARTED  7
 
+/* Async tracker control: STARTED owns the request until its final ACK.
+ * Identical queued commands can share a confirmation with the console.
+ * ENOENT means no eligible targets or incomplete confirmation at the deadline.
+ * It withdraws pending one-shot HID commands, not identical receiver-owned work
+ * or sticky TEST_MODE_ON/OFF all-target policy. It cannot recall an emitted PONG. */
+
 #define RCV_HID_CMD_LEN 16
 
 /* WOM request: target [4], LE16 operation [5:7] (0=query, 1..35791=minutes,
