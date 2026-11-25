@@ -39,7 +39,7 @@ def function(name):
 
 
 constants = '\n'.join(re.findall(
-    r'^#define ESB_(?:PING|PONG|CHANNEL|COMPOSITE|OTA|RAW)_\w+\s+[^\n]+', header, re.M))
+    r'^#define ESB_(?:(?:PING|PONG|CHANNEL|COMPOSITE|OTA|RAW)_\w+|REMOTE_CMD_TOKEN_MAX)\s+[^\n]+', header, re.M))
 shape_constants = '\n'.join(re.findall(
     r'^#define (?:RX_PHASE_BUCKETS|RX_RSSI_BUCKETS)\b[^\n]*',
     source, re.M))

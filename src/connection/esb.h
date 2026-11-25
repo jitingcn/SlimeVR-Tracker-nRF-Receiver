@@ -203,6 +203,8 @@ void esb_set_stats_detailed(uint32_t duration_seconds); // Enable for duration (
 bool esb_get_stats_detailed_enabled(void);              // Get current status
 
 // Remote command API
+#define ESB_REMOTE_CMD_TOKEN_MAX 0x7fffU
+
 /* WOM control: 0=query, 1..35791=set, ESB_WOM_TIMEOUT_CLEAR=clear override,
  * ESB_WOM_ENTER=request immediate WOM admission (not proof of sleep).
  * target=0xff scans active slots (~1s). One fresh nonzero token per request;
@@ -231,9 +233,11 @@ uint32_t esb_send_remote_command_test_on_tx(uint8_t tracker_id, uint16_t tps, ui
 uint32_t esb_send_remote_command_test_off(uint8_t tracker_id);
 uint32_t esb_send_remote_command_test_off_tx(uint8_t tracker_id, uint16_t token);
 /* Active-scan then queue. Return bitmask of targeted tracker ids. Blocks ~1s.
- * Sticky all-target test policies use token 0 and are not cancelled on timeout. */
+ * Sticky all-target test policies survive HID completion and timeout. */
 uint32_t esb_send_remote_command_test_on_all(uint16_t tps);
+uint32_t esb_send_remote_command_test_on_all_tx(uint16_t tps, uint16_t token);
 uint32_t esb_send_remote_command_test_off_all(void);
+uint32_t esb_send_remote_command_test_off_all_tx(uint16_t token);
 void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z);
 void esb_send_remote_command_sens_tx(uint8_t tracker_id, float x, float y, float z, uint16_t token);
 bool esb_send_remote_command_sens_auto(uint8_t tracker_id, uint8_t axis, uint16_t revolutions);
@@ -241,9 +245,9 @@ bool esb_send_remote_command_sens_auto_tx(uint8_t tracker_id, uint8_t axis, uint
 /* Active-scan then queue. Returns bitmask of targeted tracker ids. Blocks ~1s. */
 uint32_t esb_send_remote_command_sens_auto_all(uint8_t axis, uint16_t revolutions);
 uint32_t esb_send_remote_command_sens_auto_all_tx(uint8_t axis, uint16_t revolutions, uint16_t token);
-/* Clear pending commands in mask that still match both command_flag and the
- * receiver-local non-zero transaction token; leaves newer commands intact. */
-void esb_cancel_remote_command(uint32_t mask, uint8_t command_flag, uint16_t token);
+/* Retire a nonzero HID token from every slot and sticky policy. Caller holds
+ * irq_lock; cancel withdraws only commands owned solely by this token. */
+void esb_finish_remote_command_locked(uint16_t token, bool cancel);
 /* Queue a metadata repair request without replacing an existing control flag.
  * mask selects metadata sections; chunk selects a dense tcal block (0..254) or all (255). */
 bool esb_request_metadata(uint8_t tracker_id, uint8_t mask, uint8_t chunk);
@@ -255,8 +259,9 @@ int esb_clear_all_trackers_channel(void);
 typedef void (*esb_channel_change_done_cb_t)(bool success);
 void esb_set_channel_change_done_cb(esb_channel_change_done_cb_t cb);
 
-/* Optional: called when a tracker confirms a remote PONG flag (event_handler). */
-typedef void (*esb_remote_confirm_cb_t)(uint8_t tracker_id, uint8_t flag);
+/* Optional: called when a tracker confirms a remote PONG flag (event_handler).
+ * token is the receiver-local HID subscriber, or zero if unowned. */
+typedef void (*esb_remote_confirm_cb_t)(uint8_t tracker_id, uint8_t flag, uint16_t token);
 void esb_set_remote_confirm_cb(esb_remote_confirm_cb_t cb);
 
 // Local receiver channel management

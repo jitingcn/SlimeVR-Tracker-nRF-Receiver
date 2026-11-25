@@ -73,7 +73,7 @@ fixture = fixture.replace("/* DIAGNOSTIC DECLARATIONS */",
                           esb[diagnostic_start:diagnostic_end])
 header = (SOURCE / "esb.h").read_text()
 constants = "\n".join(re.findall(
-    r"^#define ESB_(?:PING|PONG|COMPOSITE|OTA|RAW)_\w+\b[^\n]*", header, re.M))
+    r"^#define ESB_(?:(?:PING|PONG|COMPOSITE|OTA|RAW)_\w+|REMOTE_CMD_TOKEN_MAX)\b[^\n]*", header, re.M))
 constants += "\n" + "\n".join(re.findall(
     r"^#define (?:PING_TIMEOUT_MS|PING_CLEAN_REACQUIRE_STREAK)\b[^\n]*", esb, re.M))
 fixture = fixture.replace("/* PROTOCOL CONSTANTS */", constants)

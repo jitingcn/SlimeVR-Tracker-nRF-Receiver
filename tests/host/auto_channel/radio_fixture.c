@@ -115,7 +115,7 @@ static uint32_t decision_ready_mask, decision_fence_mask;
 static atomic_t test_all_state_valid, test_all_enabled, test_all_confirmed_mask, test_all_ready_after_ms[MAX_TRACKERS];
 static uint8_t last_pose[16];
 static unsigned data_evidence;
-static void (*remote_confirm_cb)(uint8_t, uint8_t);
+static void (*remote_confirm_cb)(uint8_t, uint8_t, uint16_t);
 enum tdma_shadow_evidence { TDMA_SHADOW_EVIDENCE_PING, TDMA_SHADOW_EVIDENCE_DATA };
 static void tdma_shadow_observe(uint8_t id, enum tdma_shadow_evidence evidence)
 { (void)id; if (evidence == TDMA_SHADOW_EVIDENCE_DATA) ++data_evidence; }

@@ -339,7 +339,13 @@ static void fill_ack(uint8_t ack[RCV_HID_CMD_LEN], uint8_t seq, uint8_t opcode, 
 /* ---- HID remote completion (STARTED → OK/ENOENT after tracker confirm) ---- */
 #define REMOTE_HID_CONFIRM_TIMEOUT_MS 5000
 
-static atomic_t remote_hid_pending = ATOMIC_INIT(0);
+enum remote_hid_state {
+	REMOTE_HID_IDLE = 0,
+	REMOTE_HID_ACTIVE,
+	REMOTE_HID_FINISHING,
+};
+
+static atomic_t remote_hid_pending = ATOMIC_INIT(REMOTE_HID_IDLE);
 static uint8_t remote_hid_seq;
 static uint8_t remote_hid_opcode;
 static uint8_t remote_hid_flag;
@@ -389,36 +395,55 @@ static void remote_hid_send_completion(uint8_t status)
 
 static void remote_hid_abort(void)
 {
-	atomic_set(&remote_hid_pending, 0);
-	remote_hid_job = REMOTE_HID_JOB_NONE;
+	atomic_set(&remote_hid_pending, REMOTE_HID_FINISHING);
 	(void)k_work_cancel_delayable(&remote_hid_timeout_work);
+	remote_hid_job = REMOTE_HID_JOB_NONE;
+	atomic_set(&remote_hid_pending, REMOTE_HID_IDLE);
 }
 
-static void remote_hid_finish(uint8_t status)
+static void remote_hid_finish(uint8_t status, uint16_t token)
 {
-	uint8_t flag = remote_hid_flag;
-	uint32_t expected = (uint32_t)atomic_get(&remote_hid_expected);
-	uint16_t token = remote_hid_cmd_token;
-	if (!atomic_cas(&remote_hid_pending, 1, 0)) {
+	unsigned int key = irq_lock();
+	if (atomic_get(&remote_hid_pending) != REMOTE_HID_ACTIVE || token != remote_hid_cmd_token) {
+		irq_unlock(key);
 		return;
 	}
+	/* Claim completion and withdraw the pending PONGs before RADIO can run. */
+	atomic_set(&remote_hid_pending, REMOTE_HID_FINISHING);
+	esb_finish_remote_command_locked(token, status != RCV_HID_ST_OK);
+	irq_unlock(key);
+
+	/* Keep the transaction owned until its work and USB reply are retired. */
 	(void)k_work_cancel_delayable(&remote_hid_timeout_work);
 	remote_hid_job = REMOTE_HID_JOB_NONE;
-	if (status != RCV_HID_ST_OK && token != 0 && expected != 0) {
-		esb_cancel_remote_command(expected, flag, token);
+	uint32_t expected = (uint32_t)atomic_get(&remote_hid_expected);
+	if (status == RCV_HID_ST_ENOENT && expected != 0) {
+		LOG_WRN("HID remote confirm timeout opcode=0x%02X confirmed=0x%08X expected=0x%08X",
+			remote_hid_opcode, (uint32_t)atomic_get(&remote_hid_confirmed), expected);
 	}
 	remote_hid_send_completion(status);
+	atomic_set(&remote_hid_pending, REMOTE_HID_IDLE);
 }
 
-static void remote_hid_arm_expected(uint32_t mask)
+static void remote_hid_arm_expected(uint32_t mask, uint16_t token)
 {
-	atomic_set(&remote_hid_confirmed, 0);
-	atomic_set(&remote_hid_expected, (atomic_val_t)mask);
-	if (mask == 0) {
-		remote_hid_finish(RCV_HID_ST_ENOENT);
+	unsigned int key = irq_lock();
+	if (atomic_get(&remote_hid_pending) != REMOTE_HID_ACTIVE || token != remote_hid_cmd_token) {
+		irq_unlock(key);
 		return;
 	}
-	(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(REMOTE_HID_CONFIRM_TIMEOUT_MS));
+	atomic_set(&remote_hid_expected, (atomic_val_t)mask);
+	/* A scan may have published before returning its mask. Keep any matching
+	 * PINGs received meanwhile, and arm the timer before letting them finish. */
+	uint32_t confirmed = (uint32_t)atomic_get(&remote_hid_confirmed);
+	bool complete = (confirmed & mask) == mask;
+	if (!complete) {
+		(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(REMOTE_HID_CONFIRM_TIMEOUT_MS));
+	}
+	irq_unlock(key);
+	if (complete) {
+		remote_hid_finish(mask ? RCV_HID_ST_OK : RCV_HID_ST_ENOENT, token);
+	}
 }
 
 static void remote_wom_result(uint8_t id, uint16_t minutes, uint16_t error)
@@ -494,30 +519,26 @@ static void remote_wom_poll(void)
 		async_ack_fn(ack);
 	}
 	remote_hid_job = REMOTE_HID_JOB_NONE;
-	atomic_set(&remote_hid_pending, 0);
+	atomic_set(&remote_hid_pending, REMOTE_HID_IDLE);
 }
 
 static void remote_hid_timeout_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	if (!atomic_get(&remote_hid_pending)) {
+	if (atomic_get(&remote_hid_pending) != REMOTE_HID_ACTIVE) {
 		return;
 	}
 	if (remote_hid_job == REMOTE_HID_JOB_WOM_COMMAND) {
 		remote_wom_poll();
 		return;
 	}
-	uint32_t expected = (uint32_t)atomic_get(&remote_hid_expected);
-	uint32_t confirmed = (uint32_t)atomic_get(&remote_hid_confirmed);
-	LOG_WRN("HID remote confirm timeout opcode=0x%02X confirmed=0x%08X expected=0x%08X",
-		remote_hid_opcode, confirmed, expected);
-	remote_hid_finish(RCV_HID_ST_ENOENT);
+	remote_hid_finish(RCV_HID_ST_ENOENT, remote_hid_cmd_token);
 }
 
 static void remote_hid_job_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	if (!atomic_get(&remote_hid_pending)) {
+	if (atomic_get(&remote_hid_pending) != REMOTE_HID_ACTIVE) {
 		return;
 	}
 
@@ -531,11 +552,10 @@ static void remote_hid_job_handler(struct k_work *work)
 		mask = esb_send_remote_command_sens_auto_all_tx(remote_hid_job_axis, remote_hid_job_rev, token);
 		break;
 	case REMOTE_HID_JOB_TEST_ON_ALL:
-		/* Sticky receiver policy: stamp token 0 so ENOENT never withdraws it. */
-		mask = esb_send_remote_command_test_on_all(remote_hid_job_tps);
+		mask = esb_send_remote_command_test_on_all_tx(remote_hid_job_tps, token);
 		break;
 	case REMOTE_HID_JOB_TEST_OFF_ALL:
-		mask = esb_send_remote_command_test_off_all();
+		mask = esb_send_remote_command_test_off_all_tx(token);
 		break;
 	case REMOTE_HID_JOB_WOM_COMMAND:
 		mask = esb_send_remote_wom_command(RCV_HID_TARGET_ALL, remote_wom_minutes,
@@ -545,43 +565,40 @@ static void remote_hid_job_handler(struct k_work *work)
 		(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(50));
 		return;
 	default:
-		remote_hid_finish(RCV_HID_ST_EINVAL);
+		remote_hid_finish(RCV_HID_ST_EINVAL, token);
 		return;
 	}
-	remote_hid_arm_expected(mask);
+	remote_hid_arm_expected(mask, token);
 }
 
-static void on_remote_confirm(uint8_t tracker_id, uint8_t flag)
+static void on_remote_confirm(uint8_t tracker_id, uint8_t flag, uint16_t token)
 {
-	if (!atomic_get(&remote_hid_pending)) {
+	if (!token || flag == ESB_PONG_FLAG_WOM_CONTROL || tracker_id >= MAX_TRACKERS) {
 		return;
 	}
-	if (flag == ESB_PONG_FLAG_WOM_CONTROL) {
-		return; /* A legacy flag echo is never a committed WOM result. */
-	}
-	if (flag != remote_hid_flag || tracker_id >= MAX_TRACKERS) {
+	unsigned int key = irq_lock();
+	if (atomic_get(&remote_hid_pending) != REMOTE_HID_ACTIVE ||
+	    token != remote_hid_cmd_token || flag != remote_hid_flag) {
+		irq_unlock(key);
 		return;
 	}
-
 	uint32_t expected = (uint32_t)atomic_get(&remote_hid_expected);
-	uint32_t bit = 1u << tracker_id;
-	if (expected == 0 || (expected & bit) == 0) {
-		return;
-	}
-
-	atomic_val_t old = atomic_or(&remote_hid_confirmed, (atomic_val_t)bit);
-	uint32_t confirmed = (uint32_t)old | bit;
-	if ((confirmed & expected) == expected) {
-		remote_hid_finish(RCV_HID_ST_OK);
+	uint32_t bit = BIT(tracker_id);
+	uint32_t confirmed = (uint32_t)atomic_or(&remote_hid_confirmed, (atomic_val_t)bit) | bit;
+	irq_unlock(key);
+	if (expected != 0 && (confirmed & expected) == expected) {
+		remote_hid_finish(RCV_HID_ST_OK, token);
 	}
 }
 
 static uint8_t remote_hid_begin(uint8_t seq, uint8_t opcode, uint8_t flag)
 {
-	if (!atomic_cas(&remote_hid_pending, 0, 1)) {
+	unsigned int key = irq_lock();
+	if (atomic_get(&remote_hid_pending) != REMOTE_HID_IDLE) {
+		irq_unlock(key);
 		return RCV_HID_ST_EBUSY;
 	}
-	if (++remote_hid_next_token == 0) {
+	if (++remote_hid_next_token > ESB_REMOTE_CMD_TOKEN_MAX) {
 		remote_hid_next_token = 1;
 	}
 	remote_hid_cmd_token = remote_hid_next_token;
@@ -590,6 +607,8 @@ static uint8_t remote_hid_begin(uint8_t seq, uint8_t opcode, uint8_t flag)
 	remote_hid_flag = flag;
 	atomic_set(&remote_hid_expected, 0);
 	atomic_set(&remote_hid_confirmed, 0);
+	atomic_set(&remote_hid_pending, REMOTE_HID_ACTIVE);
+	irq_unlock(key);
 	return RCV_HID_ST_STARTED;
 }
 
@@ -658,9 +677,8 @@ static uint8_t rcv_cmd_remote_flag_hid(uint8_t seq, uint8_t opcode, uint8_t targ
 		return RCV_HID_ST_EINVAL;
 	}
 
-	/* Arm before queue so a fast confirm cannot race expected==0. */
-	remote_hid_arm_expected(1u << target_id);
 	esb_send_remote_command_arg_tx(target_id, pong_flag, 0, token);
+	remote_hid_arm_expected(BIT(target_id), token);
 	return RCV_HID_ST_STARTED;
 }
 
@@ -678,23 +696,20 @@ static uint8_t rcv_cmd_remote_sens_set_hid(uint8_t seq, uint8_t opcode, uint8_t 
 		for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
 			mask |= (1u << i);
 		}
-		remote_hid_arm_expected(mask);
-		if (mask == 0) {
-			return RCV_HID_ST_STARTED;
-		}
 		for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
 			if (mask & (1u << i)) {
 				esb_send_remote_command_sens_tx(i, x, y, z, token);
 			}
 		}
+		remote_hid_arm_expected(mask, token);
 		return RCV_HID_ST_STARTED;
 	}
 	if (target_id >= MAX_TRACKERS) {
 		remote_hid_abort();
 		return RCV_HID_ST_EINVAL;
 	}
-	remote_hid_arm_expected(1u << target_id);
 	esb_send_remote_command_sens_tx(target_id, x, y, z, token);
+	remote_hid_arm_expected(BIT(target_id), token);
 	return RCV_HID_ST_STARTED;
 }
 
@@ -722,11 +737,11 @@ static uint8_t rcv_cmd_remote_sens_auto_hid(uint8_t seq, uint8_t opcode, uint8_t
 		remote_hid_abort();
 		return RCV_HID_ST_EINVAL;
 	}
-	remote_hid_arm_expected(1u << target_id);
 	if (!esb_send_remote_command_sens_auto_tx(target_id, axis, revolutions, token)) {
 		remote_hid_abort();
 		return RCV_HID_ST_EINVAL;
 	}
+	remote_hid_arm_expected(BIT(target_id), token);
 	return RCV_HID_ST_STARTED;
 }
 
@@ -751,9 +766,8 @@ static uint8_t rcv_cmd_remote_test_on_hid(uint8_t seq, uint8_t opcode, uint8_t t
 		remote_hid_abort();
 		return RCV_HID_ST_EINVAL;
 	}
-	/* Arm before queue so a fast confirm cannot race expected==0. */
-	remote_hid_arm_expected(1u << target_id);
 	esb_send_remote_command_test_on_tx((uint8_t)target_id, tps, token);
+	remote_hid_arm_expected(BIT(target_id), token);
 	return RCV_HID_ST_STARTED;
 }
 
@@ -773,8 +787,8 @@ static uint8_t rcv_cmd_remote_test_off_hid(uint8_t seq, uint8_t opcode, uint8_t 
 		remote_hid_abort();
 		return RCV_HID_ST_EINVAL;
 	}
-	remote_hid_arm_expected(1u << target_id);
 	esb_send_remote_command_test_off_tx((uint8_t)target_id, token);
+	remote_hid_arm_expected(BIT(target_id), token);
 	return RCV_HID_ST_STARTED;
 }
 

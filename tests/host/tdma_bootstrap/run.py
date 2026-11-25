@@ -52,7 +52,7 @@ constants = '\n'.join(re.findall(
     r'TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|'
     r'RECONFIG_MIN_MS|LOSS_RECONFIG_MIN_MS|CAP_LEVEL_MAX))\b[^\n]*', source, re.MULTILINE))
 constants += '\n' + '\n'.join(re.findall(
-    r'^#define ESB_(?:PING|PONG)_\w+\b[^\n]*', header, re.MULTILINE))
+    r'^#define ESB_(?:(?:PING|PONG)_\w+|REMOTE_CMD_TOKEN_MAX)\b[^\n]*', header, re.MULTILINE))
 variables = '''tdma_cap_ladder tdma_config_epoch
     tdma_dynamic_active_count tdma_dynamic_slot_ticks tdma_active_mask
     tdma_last_reconfig_time tdma_last_reconfig_valid tdma_cap_level tdma_published_cap_level

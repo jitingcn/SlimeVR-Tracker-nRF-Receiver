@@ -10,6 +10,10 @@
 #define ARG_UNUSED(x) (void)(x)
 #define K_MSEC(x) (x)
 #define REMOTE_HID_CONFIRM_TIMEOUT_MS 5000
+enum { REMOTE_HID_IDLE = 0, REMOTE_HID_ACTIVE, REMOTE_HID_FINISHING };
+static unsigned irq_depth;
+static unsigned irq_lock(void) { return irq_depth++; }
+static void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth = key; }
 static char console_output[4096];
 static size_t console_used;
 static void capture_console(const char *format, ...)
@@ -26,7 +30,6 @@ typedef uint32_t atomic_t;
 typedef uint32_t atomic_val_t;
 static uint32_t atomic_get(atomic_t *p) { return *p; }
 static void atomic_set(atomic_t *p, uint32_t v) { *p = v; }
-static bool atomic_cas(atomic_t *p, uint32_t old, uint32_t v) { if (*p != old) return false; *p = v; return true; }
 static uint32_t atomic_or(atomic_t *p, uint32_t v) { uint32_t old = *p; *p |= v; return old; }
 static void sys_put_le16(uint16_t v, uint8_t *p) { p[0] = v; p[1] = v >> 8; }
 static void sys_put_le32(uint32_t v, uint8_t *p) { for (int i = 0; i < 4; i++) p[i] = v >> (8 * i); }
@@ -70,7 +73,7 @@ bool esb_get_remote_wom_result(uint8_t id, uint16_t token, uint16_t *minutes, ui
 }
 void esb_cancel_remote_wom_command(uint32_t mask, uint16_t token)
 { cancelled_mask = mask; cancelled_token = token; }
-static void remote_hid_finish(uint8_t status) { assert(false); }
+static void remote_hid_finish(uint8_t status, uint16_t token) { assert(false); }
 /* PRODUCTION BODIES */
 static void reply(uint8_t id, uint16_t minutes, uint16_t error)
 {
@@ -87,7 +90,7 @@ int main(void)
     assert(hid_wom(request, 3) == RCV_HID_ST_STARTED);
     assert(remote_wom_token != 0 && scheduled == 50);
     assert(rcv_cmd_remote_wom_command(2, 10) == RCV_HID_ST_EBUSY);
-    on_remote_confirm(2, ESB_PONG_FLAG_WOM_CONTROL);
+    on_remote_confirm(2, ESB_PONG_FLAG_WOM_CONTROL, remote_hid_cmd_token);
     remote_wom_poll(); assert(ack_count == 0 && remote_hid_pending);
     reply(2, 17, 0); available_token[2]--; /* stale transaction */
     remote_wom_poll(); assert(ack_count == 0);
@@ -114,7 +117,7 @@ int main(void)
     request[5] = request[6] = 255;
     assert(hid_wom(request, 3) == RCV_HID_ST_STARTED);
     assert(sent_minutes == ESB_WOM_TIMEOUT_CLEAR);
-    on_remote_confirm(2, ESB_PONG_FLAG_WOM_CONTROL);
+    on_remote_confirm(2, ESB_PONG_FLAG_WOM_CONTROL, remote_hid_cmd_token);
     remote_wom_poll(); assert(ack_count == 5 && remote_hid_pending);
     reply(2, 0, 0); remote_wom_poll();
     assert(ack_count == 7 && !remote_hid_pending);
@@ -138,7 +141,7 @@ int main(void)
     request[5] = 0xfe; request[6] = 0xff;
     assert(hid_wom(request, 3) == RCV_HID_ST_STARTED && sent_minutes == ESB_WOM_ENTER);
     before = ack_count;
-    on_remote_confirm(2, ESB_PONG_FLAG_WOM_CONTROL);
+    on_remote_confirm(2, ESB_PONG_FLAG_WOM_CONTROL, remote_hid_cmd_token);
     remote_wom_poll(); assert(ack_count == before && remote_hid_pending);
     reply(2, ESB_WOM_ENTER, 0); available_token[2]--;
     remote_wom_poll(); assert(ack_count == before && remote_hid_pending);

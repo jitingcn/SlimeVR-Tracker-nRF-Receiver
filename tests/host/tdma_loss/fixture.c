@@ -122,7 +122,7 @@ static void hid_reset_rssi_smooth(uint8_t id) { assert(irq_depth == 0); }
 static void tdma_sync_stats_reset(void) {}
 /* DIAGNOSTIC DECLARATIONS */
 static atomic_t test_all_confirmed_mask, test_all_ready_after_ms[MAX_TRACKERS];
-static void (*remote_confirm_cb)(uint8_t, uint8_t);
+static void (*remote_confirm_cb)(uint8_t, uint8_t, uint16_t);
 static uint32_t sys_get_be32(const uint8_t *p)
 {
 	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];

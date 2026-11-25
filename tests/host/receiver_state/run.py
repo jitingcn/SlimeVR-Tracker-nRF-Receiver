@@ -66,14 +66,14 @@ def declaration(name):
 
 
 def function(name):
-    return extract_block(source, rf'^(?:static\s+)?(?:void|bool|int|uint32_t)\s+{name}\([^;{{]*\)\s*\{{')
+    return extract_block(source, rf'^(?:static\s+)?(?:void|bool|int|uint16_t|uint32_t)\s+{name}\([^;{{]*\)\s*\{{')
 
 
 constants = '\n'.join(re.findall(
-    r'^#define (?:PING_TIMEOUT_MS|REMOTE_COMMAND_ACTIVE_SCAN_MS|TDMA_SHADOW_\w+|TDMA_MEMBERSHIP_COHORT_MS|RX_PHASE_BUCKETS|RX_RSSI_BUCKETS)\b[^\n]*', live, re.M))
+    r'^#define (?:PING_TIMEOUT_MS|REMOTE_COMMAND_ACTIVE_SCAN_MS|ESB_REMOTE_CMD_RETAIN_BIT|TDMA_SHADOW_\w+|TDMA_MEMBERSHIP_COHORT_MS|RX_PHASE_BUCKETS|RX_RSSI_BUCKETS)\b[^\n]*', live, re.M))
 protocol = (ROOT / 'src/connection/esb.h').read_text()
 constants += '\n' + '\n'.join(re.findall(
-    r'^#define ESB_(?:PONG_FLAG_\w+|PING_FLAG_WOM_(?:RESULT|ERROR)|WOM_\w+|METADATA_MASK_VALID)\b[^\n]*',
+    r'^#define ESB_(?:PONG_FLAG_\w+|PING_FLAG_WOM_(?:RESULT|ERROR)|WOM_\w+|METADATA_MASK_VALID|REMOTE_CMD_TOKEN_MAX)\b[^\n]*',
     protocol, re.M))
 declarations = constants + '\n' + '\n'.join(
     extract_block(live, rf'^{kind} {name}\s*\{{', semicolon=True)
@@ -92,6 +92,8 @@ if 'pairing' in cases:
 
 names = ['esb_auto_loss_invalidate',
          'tdma_shadow_observe', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update']
+if re.search(r'^static uint16_t esb_remote_cmd_publish_token\(', source, re.M):
+    names.append('esb_remote_cmd_publish_token')
 for tx_name in ('esb_send_remote_command_sens_tx', 'esb_send_remote_command_sens_auto_tx',
                 'esb_send_remote_command_sens_auto_all_tx'):
     if re.search(rf'^(?:void|bool|uint32_t)\s+{tx_name}\(', source, re.M):

@@ -135,7 +135,7 @@ def production_bodies(source, header=''):
         structures.append(block(source, start.start()) + ';\n')
 
     ping_constants = '\n'.join(re.findall(
-        r'^#define ESB_(?:PING|PONG)_\w+\b[^\n]*', header, re.MULTILINE))
+        r'^#define ESB_(?:(?:PING|PONG)_\w+|REMOTE_CMD_TOKEN_MAX)\b[^\n]*', header, re.MULTILINE))
     ping_constants += '\n' + re.search(
         r'^#define PING_CLEAN_REACQUIRE_STREAK\b[^\n]*', source, re.MULTILINE).group()
     snapshot = ''
