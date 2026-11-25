@@ -163,6 +163,7 @@ struct tracker_slot {
 	uint16_t tracker_test_on_tps;
 	int16_t pending_sens_data[3];
 	uint8_t pending_sens_auto_axis;
+	bool ota_suppressed;
 	uint16_t pending_sens_auto_revolutions;
 	/* Active and pending metadata requests have independent tokens. */
 	uint8_t metadata_active_mask;
@@ -1947,6 +1948,13 @@ static void esb_ack_handler_cb(
 			return;
 		}
 		uint8_t counter = pdu_data[2];
+		uint8_t ping_ack_flag = pdu_data[7] & ESB_PING_COMMAND_MASK;
+		if (ping_ack_flag == ESB_PONG_FLAG_OTA_SUPPRESS ||
+		    ping_ack_flag == ESB_PONG_FLAG_OTA_ABORT) {
+			tracker_slots[tracker_id].ota_suppressed = true;
+		} else if (ping_ack_flag == ESB_PONG_FLAG_OTA_UNSUPPRESS) {
+			tracker_slots[tracker_id].ota_suppressed = false;
+		}
 		bool channel_confirm = (pdu_data[7] & ESB_PING_FLAG_CHANNEL_CONFIRM) != 0;
 		uint32_t rx_ticks = k_uptime_ticks();
 		uint8_t cmd = ESB_PONG_FLAG_CHANNEL_CONFIRM;
@@ -1982,6 +1990,10 @@ static void esb_ack_handler_cb(
 			ota_aborting = esb_ota_relay_abort_pending(tracker_id);
 			if (ota_aborting) {
 				cmd = ESB_PONG_FLAG_OTA_ABORT;
+			} else if (cmd == ESB_PONG_FLAG_NORMAL &&
+				   tracker_slots[tracker_id].ota_suppressed &&
+				   !esb_ota_relay_is_active()) {
+				cmd = ESB_PONG_FLAG_OTA_UNSUPPRESS;
 			}
 			/* Drain a previous tracker outcome before issuing a new WOM
 			 * transaction. In particular, receiver reboot must not reuse a
