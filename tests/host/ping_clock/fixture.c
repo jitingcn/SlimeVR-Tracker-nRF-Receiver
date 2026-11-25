@@ -177,9 +177,10 @@ static bool data_collect_is_active(void) { return false; }
 static bool data_collect_batch_is_active(void) { return false; }
 static bool data_collect_is_target(uint8_t id) { return raw_target && id == 2; }
 static bool data_collect_batch_is_target(uint8_t id) { (void)id; return false; }
-static bool esb_ota_relay_is_active(void) { return false; }
-static bool esb_ota_relay_is_target(uint8_t id) { (void)id; return false; }
-static bool esb_ota_relay_abort_pending(uint8_t id) { (void)id; return false; }
+static bool ota_relay_active, ota_relay_target, ota_relay_abort_pending;
+static bool esb_ota_relay_is_active(void) { return ota_relay_active; }
+static bool esb_ota_relay_is_target(uint8_t id) { (void)id; return ota_relay_target; }
+static bool esb_ota_relay_abort_pending(uint8_t id) { (void)id; return ota_relay_abort_pending; }
 static uint8_t esb_rf_channel_decode(uint8_t channel) { return channel; }
 static void esb_ota_relay_fill_ack(uint8_t id, uint32_t pipe, struct esb_payload *ack,
                                    bool *has_ack, const uint8_t *p, uint8_t n)
@@ -959,6 +960,93 @@ static void test_pairing_gate(void)
     printf("PROTOCOL pairing-gate queued=%u\n", esb_pairing_msgq.count);
 }
 
+static void test_ota_unsuppress(void)
+{
+    const uint8_t id = 2;
+    bool has_ack = false;
+    struct esb_payload p, ack;
+    now_ticks = 132768;
+
+    /* Active OTA session: bystanders must stay suppressed, never unsuppressed. */
+    ota_relay_active = true;
+    ota_relay_target = false;
+    p = packet(ESB_PING_TYPE, id, 3, 1, 0, ESB_PONG_FLAG_OTA_SUPPRESS);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_OTA_SUPPRESS);
+    p = packet(ESB_PING_TYPE, id, 3, 2, 0, ESB_PONG_FLAG_OTA_ABORT);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_OTA_SUPPRESS);
+
+    /* OTA ended while abort tombstone is active: tombstone still wins. */
+    ota_relay_active = false;
+    ota_relay_abort_pending = true;
+    p = packet(ESB_PING_TYPE, id, 3, 3, 0, ESB_PONG_FLAG_OTA_SUPPRESS);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_OTA_ABORT);
+    p = packet(ESB_PING_TYPE, id, 3, 4, 0, ESB_PONG_FLAG_OTA_ABORT);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_OTA_ABORT);
+
+    /* Tombstone expired while OTA_ABORT still queued: confirm clears slot, next PING unsuppresses. */
+    ota_relay_abort_pending = false;
+    tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_OTA_ABORT;
+    p = packet(ESB_PING_TYPE, id, 3, 5, 0, ESB_PONG_FLAG_OTA_ABORT);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_OTA_ABORT);
+    dispatch(&p);
+    assert(tracker_slots[id].tracker_remote_command == ESB_PONG_FLAG_NORMAL);
+
+    p = packet(ESB_PING_TYPE, id, 3, 6, 0, ESB_PONG_FLAG_OTA_ABORT);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_OTA_UNSUPPRESS);
+
+    /* Stale OTA_SUPPRESS echo after OTA ends also receives OTA_UNSUPPRESS. */
+    p = packet(ESB_PING_TYPE, id, 3, 7, 0, ESB_PONG_FLAG_OTA_SUPPRESS);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_OTA_UNSUPPRESS);
+
+    /* The latch outlives the echo: once a PONG outside the command path
+     * has let the tracker's echo fall back to NORMAL while it stays
+     * suppressed, normal PINGs still get OTA_UNSUPPRESS until it is echoed. */
+    p = packet(ESB_PING_TYPE, id, 3, 8, 0, ESB_PING_FLAG_CHANNEL_CONFIRM | ESB_PONG_FLAG_OTA_ABORT);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CHANNEL_CONFIRM);
+    p = packet(ESB_PING_TYPE, id, 3, 9, 0, ESB_PONG_FLAG_NORMAL);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_OTA_UNSUPPRESS);
+    p = packet(ESB_PING_TYPE, id, 3, 10, 0, ESB_PONG_FLAG_NORMAL);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_OTA_UNSUPPRESS);
+
+    /* Once tracker echoes UNSUPPRESS, PONG returns to NORMAL and stays NORMAL. */
+    p = packet(ESB_PING_TYPE, id, 3, 11, 0, ESB_PONG_FLAG_OTA_UNSUPPRESS);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_NORMAL);
+    p = packet(ESB_PING_TYPE, id, 3, 12, 0, ESB_PONG_FLAG_NORMAL);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_NORMAL);
+
+    /* Channel-confirm PING carrying SUPPRESS also arms state; unrelated
+     * remote commands keep priority, and channel-confirm UNSUPPRESS clears it. */
+    p = packet(ESB_PING_TYPE, id, 3, 13, 0, ESB_PING_FLAG_CHANNEL_CONFIRM | ESB_PONG_FLAG_OTA_SUPPRESS);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CHANNEL_CONFIRM);
+    tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
+    p = packet(ESB_PING_TYPE, id, 3, 14, 0, ESB_PONG_FLAG_NORMAL);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
+    tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
+    p = packet(ESB_PING_TYPE, id, 3, 15, 0, ESB_PONG_FLAG_NORMAL);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_OTA_UNSUPPRESS);
+    p = packet(ESB_PING_TYPE, id, 3, 16, 0, ESB_PING_FLAG_CHANNEL_CONFIRM | ESB_PONG_FLAG_OTA_UNSUPPRESS);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CHANNEL_CONFIRM);
+    p = packet(ESB_PING_TYPE, id, 3, 17, 0, ESB_PONG_FLAG_NORMAL);
+    ack = ack_for(&p, &has_ack);
+    assert(has_ack && ack.data[7] == ESB_PONG_FLAG_NORMAL);
+}
+
 static void assert_tick_reads(void)
 {
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
@@ -1012,6 +1100,7 @@ int main(int argc, char **argv)
     else if (strcmp(argv[1], "ota-info") == 0) test_ota(ESB_OTA_FW_INFO_TYPE);
     else if (strcmp(argv[1], "valid-after-invalid") == 0) test_valid_after_invalid();
     else if (strcmp(argv[1], "late-metadata") == 0) test_late_metadata();
+    else if (strcmp(argv[1], "ota-unsuppress") == 0) test_ota_unsuppress();
     else if (strcmp(argv[1], "duplicate") == 0) test_early_sequence_exit(true);
     else if (strcmp(argv[1], "out-of-order") == 0) test_early_sequence_exit(false);
     else test_invalid(argv[1]);
