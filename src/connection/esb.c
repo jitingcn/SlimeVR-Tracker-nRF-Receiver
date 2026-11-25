@@ -185,14 +185,18 @@ struct tracker_slot {
 
 static struct tracker_slot tracker_slots[MAX_TRACKERS];
 
-/* Caller holds irq_lock. A matching receiver-owned publication can satisfy a
- * HID request without becoming withdrawable on the HID transaction's failure. */
+/* Caller holds irq_lock. Identical commands share the HID subscriber and
+ * survive its timeout if either publisher is receiver-owned. */
 static uint16_t esb_remote_cmd_publish_token(uint8_t tracker_id, uint8_t flag, bool payload_matches, uint16_t token)
 {
-	uint16_t old_token = tracker_slots[tracker_id].remote_cmd_token;
-	if (token != 0 && tracker_slots[tracker_id].tracker_remote_command == flag && payload_matches &&
-	    (old_token == 0 || (old_token & ESB_REMOTE_CMD_RETAIN_BIT) != 0)) {
-		return token | ESB_REMOTE_CMD_RETAIN_BIT;
+	if (tracker_slots[tracker_id].tracker_remote_command == flag && payload_matches) {
+		uint16_t old_token = tracker_slots[tracker_id].remote_cmd_token;
+		if (token == 0 && old_token != 0) {
+			return old_token | ESB_REMOTE_CMD_RETAIN_BIT;
+		}
+		if (token != 0 && (old_token == 0 || (old_token & ESB_REMOTE_CMD_RETAIN_BIT) != 0)) {
+			return token | ESB_REMOTE_CMD_RETAIN_BIT;
+		}
 	}
 	return token;
 }

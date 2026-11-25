@@ -718,6 +718,29 @@ static void test_receiver_owned_ota_coalescing(void) {
     puts("PASS receiver-owned OTA unsuppress survives coalesced HID timeout for targeted and broadcast writers");
 }
 
+static void test_hid_then_console_coalescing(void) {
+    reset(1);
+    remote_confirm_cb = on_remote_confirm;
+    assert(rcv_cmd_remote_flag_hid(20, ESB_PONG_FLAG_MEOW, 0, ESB_PONG_FLAG_MEOW) == RCV_HID_ST_STARTED);
+    esb_send_remote_command(0, ESB_PONG_FLAG_MEOW);
+    struct esb_payload ack = test_pong(ESB_PONG_FLAG_NORMAL);
+    assert(ack.data[7] == ESB_PONG_FLAG_MEOW);
+    echo_ack(0, &ack);
+    assert(hid_completions == 1 && hid_completed_seq == 20 && hid_status == RCV_HID_ST_OK);
+
+    reset(1);
+    assert(rcv_cmd_remote_sens_set_hid(21, ESB_PONG_FLAG_SENS_SET, 0, 1, 2, 3) == RCV_HID_ST_STARTED);
+    esb_send_remote_command_sens(0, 1, 2, 3);
+    ack = test_pong(ESB_PONG_FLAG_NORMAL);
+    assert(ack.data[7] == ESB_PONG_FLAG_SENS_SET);
+    now = hid_timer_due;
+    remote_hid_timeout_handler(NULL);
+    assert(hid_completions == 1 && hid_completed_seq == 21 && hid_status == RCV_HID_ST_ENOENT);
+    struct esb_payload after = test_pong(ESB_PONG_FLAG_NORMAL);
+    assert(memcmp(ack.data, after.data, ESB_PONG_LEN) == 0);
+    puts("PASS identical console publication preserves HID completion and survives HID timeout");
+}
+
 static unsigned early_publications;
 static void confirm_during_flag_publication(void) {
     assert(remote_hid_pending == REMOTE_HID_ACTIVE && remote_hid_expected == 0);
@@ -1439,6 +1462,7 @@ int main(void) {
     assert(!batch && auto_loss_reset_epoch != epoch);
     test_hid_timeout_cancellation();
     test_receiver_owned_ota_coalescing();
+    test_hid_then_console_coalescing();
     test_broadcast_publication_confirmations();
     test_sticky_early_confirmations();
     test_sticky_armed_confirmations();
