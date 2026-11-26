@@ -82,7 +82,14 @@ static unsigned error_count;
 #define LOG_ERR(...) (error_count++, log_message(__VA_ARGS__))
 #define LOG_INF(...) log_message(__VA_ARGS__)
 
-struct esb_payload { uint8_t length, pipe; bool noack; int8_t rssi; uint8_t data[64]; };
+struct esb_payload {
+	uint8_t length, pipe;
+	bool noack;
+	int8_t rssi;
+	uint8_t data[64];
+	uint32_t rx_ticks, rx_context;
+	bool rx_pose;
+};
 struct esb_evt { int evt_id; unsigned tx_attempts; };
 /* PRODUCTION STATE */
 static uint32_t decision_ready_mask, decision_fence_mask;
@@ -346,24 +353,31 @@ static struct esb_payload ack_for(const struct esb_payload *p, bool *has_ack)
     assert(!suppress);
     if (*has_ack) {
         ++pong_tick_reads;
-        assert(ack.length == ESB_PONG_LEN && ack.data[0] == ESB_PONG_TYPE);
-        assert(ack.data[1] == p->data[1] && ack.data[2] == p->data[2]);
-        assert(sys_get_be32(&ack.data[3]) == now_ticks);
-        assert(crc8_ccitt(0x07, ack.data, ESB_PONG_LEN - 1) == ack.data[ESB_PONG_LEN - 1]);
-        printf("PROTOCOL ack pipe=%u data=", ack.pipe);
-        for (unsigned i = 0; i < ack.length; ++i) printf("%02x", ack.data[i]);
-        putchar('\n');
-    }
-    tick_context = TICK_EVENT;
-    return ack;
+		assert(ack.length >= ESB_PONG_LEN && ack.data[0] == ESB_PONG_TYPE);
+		assert(ack.data[1] == p->data[1] && ack.data[2] == p->data[2]);
+		assert(sys_get_be32(&ack.data[3]) == now_ticks);
+		assert(crc8_ccitt(0x07, ack.data, ESB_PONG_LEN - 1) == ack.data[ESB_PONG_LEN - 1]);
+		printf("PROTOCOL ack pipe=%u data=", ack.pipe);
+		for (unsigned i = 0; i < ack.length; ++i) {
+			printf("%02x", ack.data[i]);
+		}
+		putchar('\n');
+	}
+	tick_context = TICK_EVENT;
+	return ack;
+}
+static void dispatch_received(const struct esb_payload *p, uint32_t rx_ticks)
+{
+    incoming = *p;
+	incoming.rx_ticks = rx_ticks;
+	incoming_ready = true;
+	const struct esb_evt event = {.evt_id = ESB_EVENT_RX_RECEIVED};
+	event_handler(&event);
+	assert(!incoming_ready);
 }
 static void dispatch(const struct esb_payload *p)
 {
-    incoming = *p;
-    incoming_ready = true;
-    const struct esb_evt event = {.evt_id = ESB_EVENT_RX_RECEIVED};
-    event_handler(&event);
-    assert(!incoming_ready);
+    dispatch_received(p, now_ticks);
 }
 static void confirm(uint8_t id, uint8_t flag, uint16_t token)
 {
@@ -430,7 +444,7 @@ static void test_invalid(const char *which)
         assert(!has_ack);
     }
     now_ticks = 132795;
-    dispatch(&p);
+    dispatch_received(&p, 132768);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     equal_state(&before);
 #endif
@@ -444,6 +458,159 @@ static void test_invalid(const char *which)
     }
     if (strcmp(which, "bad-crc") == 0) assert(tracker_slots[id].crc_error_count == 1);
 }
+static void test_maintenance(void)
+{
+	const uint8_t id = 2;
+	relay_profile = RELAY_PROFILE_120HZ;
+	tdma_active_mask = 7;
+	relay_coord_note_caps(&relay_coord, id, RELAY_CAP_HELPER | (RELAY_PROTOCOL_VERSION << RELAY_CAP_VERSION_SHIFT));
+	now_ticks = RELAY_REPAIR_START + RELAY_TX_OFFSET;
+	struct esb_payload p = packet(ESB_PING_TYPE, id, 3, 1, now_ticks, ESB_PONG_FLAG_NORMAL);
+	bool has_ack = false;
+	struct esb_payload ack = ack_for(&p, &has_ack);
+	struct relay_pong_trailer trailer;
+	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_NORMAL && ack.pipe == 3);
+	assert(ack.length == ESB_PONG_LEN + RELAY_TRAILER_PENDING_LEN);
+	assert(relay_trailer_decode_len(&ack.data[ESB_PONG_LEN], ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.pending && trailer.pending_total == relay_geometry_code(3, relay_receiver_geometry.repairs));
+	assert(trailer.pending_member_mask == 7 && trailer.pending_slot_ticks == RELAY_SLOT_TICKS);
+	tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
+	ack = ack_for(&p, &has_ack);
+	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
+
+	tdma_staged.valid = true;
+	tdma_staged.p = (struct tdma_publication){.new_mask = 7, .active_count = 3, .slot_ticks = 48, .epoch = 4};
+	tdma_staged.activation_ticks = now_ticks + 1024U;
+	ack = ack_for(&p, &has_ack);
+	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_NORMAL);
+	assert(relay_trailer_decode_len(&ack.data[ESB_PONG_LEN], ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.pending && trailer.pending_epoch == 4 && trailer.pending_total == 3);
+	assert(trailer.activation_units * RELAY_ACTIVATION_UNIT_TICKS == 1024U);
+	assert(tracker_slots[id].tracker_remote_command == ESB_PONG_FLAG_CALIBRATE);
+	tdma_staged.p.profile = RELAY_PROFILE_120HZ;
+	tdma_staged.p.slot_ticks = 16;
+	tdma_staged.p.geometry.repairs = 1;
+	tdma_staged.p.settings.max_repairs = 5;
+	ack = ack_for(&p, &has_ack);
+	assert(relay_trailer_decode_len(&ack.data[ESB_PONG_LEN], ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.pending && trailer.pending_total == relay_geometry_code(3, 1));
+	tdma_staged.p.profile = 0;
+	tdma_staged.p.slot_ticks = 48;
+	relay_profile = 0; /* A native-only stage preserves command delivery. */
+	ack = ack_for(&p, &has_ack);
+	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
+	relay_profile = RELAY_PROFILE_120HZ;
+	now_ticks = tdma_staged.activation_ticks;
+	ack = ack_for(&p, &has_ack);
+	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
+
+	/* A replacement can report v5 capabilities again before exit. */
+	tdma_staged.revoked_mask = BIT(id);
+	tracker_slots[id].tdma_config_packed = 0;
+	tracker_slots[id].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
+	--now_ticks;
+	ack = ack_for(&p, &has_ack);
+	assert(has_ack && ack.length == ESB_PONG_LEN && ack.data[7] == ESB_PONG_FLAG_NORMAL);
+	assert(ack.data[8] == 0xff && ack.data[9] == 0);
+	++now_ticks;
+	ack = ack_for(&p, &has_ack);
+	assert(has_ack && ack.length == ESB_PONG_LEN && ack.data[7] == ESB_PONG_FLAG_NORMAL);
+	assert(ack.data[8] == 0xff);
+}
+
+static void test_pairing_passive_pong(void)
+{
+	const uint8_t survivor = 2, retired = 3, higher = 4;
+	const uint16_t survivors = BIT(survivor);
+	const uint16_t old_members = survivors | BIT(retired);
+	tdma_active_mask = old_members;
+	tdma_staged.revoked_mask = BIT(retired);
+	relay_coord_note_caps(&relay_coord, survivor, RELAY_INFO_CAPS);
+	relay_coord_note_caps(&relay_coord, retired, RELAY_INFO_CAPS);
+	tracker_slots[survivor].tdma_config_packed = tdma_pack_config(0, 2, 64, 3);
+	tracker_slots[retired].tdma_config_packed = tdma_pack_config(1, 2, 64, 3);
+	now_ticks = 32768 * 5 / 2U;
+	struct esb_payload ping = packet(ESB_PING_TYPE, survivor, 3, 41, now_ticks, ESB_PONG_FLAG_NORMAL);
+	struct relay_pong_trailer trailer;
+	bool has_ack;
+
+	/* A relay exit stages native geometry while keeping the revoked slot vacant. */
+	relay_profile = RELAY_PROFILE_120HZ;
+	tdma_staged.valid = true;
+	tdma_staged.activation_ticks = 32768 * 3U;
+	tdma_staged.p = (struct tdma_publication){.new_mask = old_members, .active_count = 2,
+		.slot_ticks = 64, .epoch = 3};
+	struct esb_payload ack = ack_for(&ping, &has_ack);
+	assert(has_ack && relay_trailer_decode_len(ack.data + ESB_PONG_LEN, ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.member_mask == survivors && trailer.pending_member_mask == survivors);
+	assert(trailer.pending && trailer.pending_total == 2 && trailer.pending_slot_ticks == 64);
+
+	/* After the clean pop, the survivor must get the full private readmission
+	 * roster while the replacement's own PONG is still unassigned. */
+	struct esb_payload replacement = packet(ESB_PING_TYPE, retired, 4, 42, now_ticks, ESB_PONG_FLAG_NORMAL);
+	uint32_t exit_config = tracker_slots[survivor].tdma_config_packed;
+	tracker_slots[survivor].tdma_config_packed = tdma_pack_config(0, 1, RELAY_SLOT_TICKS, 3);
+	tdma_active_mask = survivors;
+	tdma_staged.readmit_mask = BIT(retired);
+	tdma_staged.p.profile = RELAY_PROFILE_120HZ;
+	tdma_staged.p.epoch = 4;
+	tdma_staged.p.slot_ticks = RELAY_SLOT_TICKS;
+	tdma_staged.p.geometry.repairs = 1;
+	now_ticks = tdma_staged.activation_ticks - 1U;
+	ack = ack_for(&ping, &has_ack);
+	assert(has_ack && relay_trailer_decode_len(ack.data + ESB_PONG_LEN, ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.member_mask == survivors && trailer.pending && trailer.pending_member_mask == old_members);
+	assert(trailer.pending_epoch == 4 && trailer.pending_total == relay_geometry_code(2, 1));
+	assert(trailer.pending_slot_ticks == RELAY_SLOT_TICKS && trailer.activation_units == 1);
+	ack = ack_for(&replacement, &has_ack);
+	assert(has_ack && ack.length == ESB_PONG_LEN && ack.data[8] == 0xff);
+	++now_ticks;
+	ack = ack_for(&replacement, &has_ack);
+	assert(has_ack && relay_pong_is_extended(ack.length) && ack.data[8] == 1 && ack.data[11] == 4);
+
+	/* The old applied roster still filters revoked IDs without a stage. */
+	tracker_slots[survivor].tdma_config_packed = exit_config;
+	tdma_active_mask = old_members;
+	tdma_staged.readmit_mask = 0;
+	tdma_staged.valid = false;
+	now_ticks = 32768 * 5 / 2U;
+	ack = ack_for(&ping, &has_ack);
+	assert(has_ack && relay_trailer_decode_len(ack.data + ESB_PONG_LEN, ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.member_mask == survivors && !trailer.pending);
+
+	tracker_slots[survivor].tracker_remote_command = ESB_PONG_FLAG_CALIBRATE;
+	ack = ack_for(&ping, &has_ack);
+	assert(has_ack && ack.data[7] == ESB_PONG_FLAG_CALIBRATE);
+	assert(relay_trailer_decode_len(ack.data + ESB_PONG_LEN, ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.member_mask == survivors && !trailer.pending);
+	tracker_slots[survivor].tracker_remote_command = ESB_PONG_FLAG_NORMAL;
+
+	/* Replay the survivor's PONG 2.5 s into the native follow-up. Hide the
+	 * fresh assignment through activation, including a later-ranked joiner. */
+	relay_profile = 0;
+	tdma_staged.valid = true;
+	tdma_staged.native_followup = true;
+	tdma_staged.readmit_mask = BIT(retired);
+	tdma_staged.p = (struct tdma_publication){.new_mask = old_members | BIT(higher),
+		.active_count = 3, .slot_ticks = 48, .epoch = 4};
+	tdma_staged.activation_ticks = 103220U;
+	ack = ack_for(&ping, &has_ack);
+	assert(has_ack && relay_trailer_decode_len(ack.data + ESB_PONG_LEN, ack.length - ESB_PONG_LEN, &trailer));
+	assert(ack.data[8] == 0 && ack.data[9] == 2 && ack.data[10] == 64 && ack.data[11] == 3);
+	assert(trailer.member_mask == survivors && trailer.pending && trailer.pending_member_mask == survivors);
+	assert(trailer.pending_epoch == 4 && trailer.pending_total == 3 && trailer.pending_slot_ticks == 48);
+
+	now_ticks = tdma_staged.activation_ticks - 1U;
+	ack = ack_for(&replacement, &has_ack);
+	assert(has_ack && ack.length == ESB_PONG_LEN && ack.data[8] == 0xff);
+	++now_ticks;
+	ack = ack_for(&replacement, &has_ack);
+	assert(has_ack && relay_pong_is_extended(ack.length) && ack.data[8] == 1 && ack.data[11] == 4);
+	ack = ack_for(&ping, &has_ack);
+	assert(has_ack && relay_trailer_decode_len(ack.data + ESB_PONG_LEN, ack.length - ESB_PONG_LEN, &trailer));
+	assert(trailer.member_mask == (old_members | BIT(higher)) && !trailer.pending);
+}
+
 static void test_valid(void)
 {
     const uint8_t id = 2;
@@ -457,6 +624,7 @@ static void test_valid(void)
     bool has_ack = false;
     struct esb_payload ack = ack_for(&p, &has_ack);
     assert(has_ack && ack.pipe == 3 && ack.data[0] == ESB_PONG_TYPE);
+    assert(ack.length == ESB_PONG_LEN);
     assert(sys_get_be32(&ack.data[3]) == 132768);
     const uint8_t expected_pong[12] = {0xf1, 2, 1, 0, 2, 6, 0xa0, 0, 7, 48, 3, 2};
     assert(memcmp(ack.data, expected_pong, sizeof(expected_pong)) == 0);
@@ -465,7 +633,7 @@ static void test_valid(void)
     equal_state(&expected);
 #endif
     now_ticks = 132795;
-    dispatch(&p);
+    dispatch_received(&p, 132768);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     expected.bias[id] = 9;
     expected.ppb[id] = 122070;
@@ -494,7 +662,7 @@ static void test_valid_dirty(void)
     equal_state(&expected);
 #endif
     now_ticks = 132795;
-    dispatch(&p);
+    dispatch_received(&p, 132768);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     expected.dirty[id] = 4;
     expected.rejects[id] = 11;
@@ -519,7 +687,7 @@ static void test_reacquire(void)
     equal_state(&expected);
 #endif
     now_ticks = 132795;
-    dispatch(&p);
+    dispatch_received(&p, 132768);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     expected.bias[id] = 163;
     expected.ppb_valid[id] = 0;
@@ -571,6 +739,7 @@ static void test_interleaved_pipe(void)
     equal_state(&expected);
 #endif
     incoming = valid;
+    incoming.rx_ticks = 132768;
     incoming_ready = true;
     now_ticks = 133000;
     struct esb_payload ack = ack_for(&wrong_pipe, &has_ack);
@@ -579,6 +748,9 @@ static void test_interleaved_pipe(void)
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     assert(tracker_diags[id].g_last_isr_rx_ticks == 133000 && tracker_diags[id].g_last_isr_rx_valid);
     equal_state(&expected);
+    /* Exercise the packet timestamp when the per-ID latch is unavailable. */
+    tracker_diags[id].g_ping_isr_rx_ticks_valid = false;
+    expected.radio_valid[id] = false;
 #endif
     now_ticks = 133010;
     const struct esb_evt event = {.evt_id = ESB_EVENT_RX_RECEIVED};
@@ -654,7 +826,7 @@ static void test_valid_after_invalid(void)
     equal_state(&expected);
 #endif
     now_ticks = 132795;
-    dispatch(&p);
+    dispatch_received(&p, 132768);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     expected.bias[id] = 9;
     expected.ppb[id] = 122070;
@@ -689,7 +861,7 @@ static void test_early_sequence_exit(bool duplicate)
     equal_state(&expected);
 #endif
     now_ticks = 132795;
-    dispatch(&p);
+    dispatch_received(&p, 132768);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
     expected.bias[id] = 9;
     expected.ppb[id] = 122070;
@@ -742,8 +914,9 @@ static void test_detailed_warning(void)
 static void fifo_push(struct esb_payload p, uint32_t ticks)
 {
     assert(fifo_count < 32);
-    fifo[fifo_count] = p;
-    fifo_ticks[fifo_count++] = ticks;
+	p.rx_ticks = ticks;
+	fifo[fifo_count] = p;
+	fifo_ticks[fifo_count++] = ticks;
 }
 
 static void test_drain(void)
@@ -821,7 +994,7 @@ static void test_drain(void)
     event_handler(&rx);
     assert(fifo_next == 23 && fifo_count == 23);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
-    assert(tick_reads == 23 && event_tick_reads == 23);
+	assert(tick_reads == 0 && event_tick_reads == 0);
 #else
     assert(tick_reads == 0 && event_tick_reads == 0);
 #endif
@@ -1047,6 +1220,58 @@ static void test_ota_unsuppress(void)
     assert(has_ack && ack.data[7] == ESB_PONG_FLAG_NORMAL);
 }
 
+static void test_stale_relay_pose(void)
+{
+    const uint8_t id = 2;
+    struct tracker_report reports[4];
+    uint32_t generations[4];
+
+    /* Classify a profile-1 direct pose before staged exit activates. */
+    relay_profile = 1;
+    relay_layout_generation = 1;
+    tdma_active_mask = BIT(id);
+    struct esb_payload stale_pose = {.length = 17, .pipe = 1U + id % 7U, .rssi = -40,
+                                     .data = {1, id, 0xaa, [16] = 10}};
+    relay_rx_metadata(&stale_pose, &stale_pose.rx_context, &stale_pose.rx_pose);
+    assert(stale_pose.rx_context == 1 && stale_pose.rx_pose);
+
+    /* Non-pose PING queued in profile 1 is not classified as a relay pose. */
+    struct esb_payload queued_ping = packet(ESB_PING_TYPE, id, 1U + id % 7U, 1, 0, ESB_PONG_FLAG_NORMAL);
+    relay_rx_metadata(&queued_ping, &queued_ping.rx_context, &queued_ping.rx_pose);
+    assert(queued_ping.rx_context == 1 && !queued_ping.rx_pose);
+
+    /* Staged exit switches to native TDMA and bumps generation. */
+    relay_profile = 0;
+    relay_layout_generation = 2;
+
+    dispatch_received(&stale_pose, 1000);
+    assert(sequence_calls == 0);
+    assert(hid_fifo_peek_batch(reports, generations, 4) == 0);
+
+    dispatch_received(&queued_ping, 1100);
+    assert(tracker_slots[id].last_ping_counter == 1);
+
+    /* Native pose received under the new layout initializes sequence normally. */
+    struct esb_payload native_pose = {.length = 17, .pipe = 1U + id % 7U, .rssi = -40,
+                                      .data = {1, id, 0xbb, [16] = 20}};
+    relay_rx_metadata(&native_pose, &native_pose.rx_context, &native_pose.rx_pose);
+    assert(native_pose.rx_context == 2 && !native_pose.rx_pose);
+    dispatch_received(&native_pose, 2000);
+    assert(sequence_calls == 1 && sequence_last[id] == 20);
+
+    /* Native pose queued across a native-to-native generation bump is preserved. */
+    struct esb_payload native_reconfig = {.length = 17, .pipe = 1U + id % 7U, .rssi = -40,
+                                          .data = {1, id, 0xcc, [16] = 21}};
+    relay_rx_metadata(&native_reconfig, &native_reconfig.rx_context, &native_reconfig.rx_pose);
+    assert(native_reconfig.rx_context == 2 && !native_reconfig.rx_pose);
+    relay_layout_generation = 3;
+    dispatch_received(&native_reconfig, 3000);
+    assert(sequence_calls == 2 && sequence_last[id] == 21);
+    assert(hid_fifo_peek_batch(reports, generations, 4) == 2);
+    assert(reports[0].data[2] == 0xbb && reports[1].data[2] == 0xcc);
+    hid_fifo_consume(2);
+}
+
 static void assert_tick_reads(void)
 {
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
@@ -1081,30 +1306,56 @@ int main(int argc, char **argv)
         printf("PASS %s\n", argv[1]);
         return 0;
     }
-    if (strcmp(argv[1], "status-admission") == 0) {
-        test_status_admission();
-        printf("PASS %s\n", argv[1]);
-        return 0;
-    }
-    if (strcmp(argv[1], "pairing-gate") == 0) {
-        test_pairing_gate();
-        printf("PASS %s\n", argv[1]);
-        return 0;
-    }
-    if (strcmp(argv[1], "valid") == 0) test_valid();
-    else if (strcmp(argv[1], "valid-dirty") == 0) test_valid_dirty();
-    else if (strcmp(argv[1], "reacquire") == 0) test_reacquire();
-    else if (strcmp(argv[1], "event-fallback") == 0) test_event_fallback();
-    else if (strcmp(argv[1], "interleaved-pipe") == 0) test_interleaved_pipe();
-    else if (strcmp(argv[1], "ota-status") == 0) test_ota(ESB_OTA_STATUS_TYPE);
-    else if (strcmp(argv[1], "ota-info") == 0) test_ota(ESB_OTA_FW_INFO_TYPE);
-    else if (strcmp(argv[1], "valid-after-invalid") == 0) test_valid_after_invalid();
-    else if (strcmp(argv[1], "late-metadata") == 0) test_late_metadata();
-    else if (strcmp(argv[1], "ota-unsuppress") == 0) test_ota_unsuppress();
-    else if (strcmp(argv[1], "duplicate") == 0) test_early_sequence_exit(true);
-    else if (strcmp(argv[1], "out-of-order") == 0) test_early_sequence_exit(false);
-    else test_invalid(argv[1]);
-    assert_tick_reads();
-    printf("PASS %s\n", argv[1]);
-    return 0;
+	if (strcmp(argv[1], "status-admission") == 0) {
+		test_status_admission();
+		printf("PASS %s\n", argv[1]);
+		return 0;
+	}
+	if (strcmp(argv[1], "maintenance") == 0) {
+		test_maintenance();
+		printf("PASS %s\n", argv[1]);
+		return 0;
+	}
+	if (strcmp(argv[1], "pairing-passive-pong") == 0) {
+		test_pairing_passive_pong();
+		printf("PASS %s\n", argv[1]);
+		return 0;
+	}
+	if (strcmp(argv[1], "pairing-gate") == 0) {
+		test_pairing_gate();
+		printf("PASS %s\n", argv[1]);
+		return 0;
+	}
+	if (strcmp(argv[1], "valid") == 0) {
+		test_valid();
+	} else if (strcmp(argv[1], "valid-dirty") == 0) {
+		test_valid_dirty();
+	} else if (strcmp(argv[1], "reacquire") == 0) {
+		test_reacquire();
+	} else if (strcmp(argv[1], "event-fallback") == 0) {
+		test_event_fallback();
+	} else if (strcmp(argv[1], "interleaved-pipe") == 0) {
+		test_interleaved_pipe();
+	} else if (strcmp(argv[1], "ota-status") == 0) {
+		test_ota(ESB_OTA_STATUS_TYPE);
+	} else if (strcmp(argv[1], "ota-info") == 0) {
+		test_ota(ESB_OTA_FW_INFO_TYPE);
+	} else if (strcmp(argv[1], "valid-after-invalid") == 0) {
+		test_valid_after_invalid();
+	} else if (strcmp(argv[1], "late-metadata") == 0) {
+		test_late_metadata();
+	} else if (strcmp(argv[1], "ota-unsuppress") == 0) {
+		test_ota_unsuppress();
+	} else if (strcmp(argv[1], "stale-relay-pose") == 0) {
+		test_stale_relay_pose();
+	} else if (strcmp(argv[1], "duplicate") == 0) {
+		test_early_sequence_exit(true);
+	} else if (strcmp(argv[1], "out-of-order") == 0) {
+		test_early_sequence_exit(false);
+	} else {
+		test_invalid(argv[1]);
+	}
+	assert_tick_reads();
+	printf("PASS %s\n", argv[1]);
+	return 0;
 }

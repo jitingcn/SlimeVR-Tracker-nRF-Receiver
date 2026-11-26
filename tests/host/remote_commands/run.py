@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Exercise remote calibration parser boundaries without USB or radio hardware."""
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import importlib.util
 import contextlib
 import io
@@ -155,7 +160,7 @@ if __name__ == "__main__":
             "-o", str(binary),
         ], check=True)
         subprocess.run([str(binary)], check=True)
-        source = (ROOT / "src/rcv_cmd.c").read_text()
+        source = select_relay((ROOT / "src/rcv_cmd.c").read_text())
         production = "\n".join(extract.function(source, name) for name in (
             "fill_ack", "remote_hid_abort", "remote_hid_begin", "remote_wom_result",
             "remote_wom_poll", "remote_wom_begin", "rcv_cmd_remote_wom_command",
@@ -168,7 +173,9 @@ if __name__ == "__main__":
                        "} else { assert(false); } return status; }\n")
         prelude, cases = (HERE / "test_wom_completion.c").read_text().split("/* PRODUCTION BODIES */")
         generated = temporary / "wom.c"
-        generated.write_text(prelude + production + cases)
+        timeout_def = next(line for line in (ROOT / "src/connection/esb.h").read_text().splitlines()
+                           if line.startswith("#define ESB_WOM_COMMAND_TIMEOUT_MS "))
+        generated.write_text(timeout_def + "\n" + prelude + production + cases)
         binary = temporary / "wom"
         subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",

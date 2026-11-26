@@ -67,6 +67,9 @@ OTA_STATUS_SIZE_ERROR     = 0x13
 OTA_STATUS_SEQ_ERROR      = 0x14
 OTA_STATUS_TIMEOUT        = 0x15
 
+OTA_BEGIN_DETAIL_DIRECT_REQUIRED = 1
+OTA_BEGIN_DETAIL_BUSY            = 2
+
 STATUS_NAMES = {
     0x00: "IDLE",
     0x01: "READY",
@@ -101,6 +104,12 @@ OTA_DATA_MAX_PAYLOAD = 60  # Max firmware bytes per data packet
 OTA_BOARD_TARGET_MAX = 48
 RING_BUFFER_SIZE     = 128  # Must match firmware OTA_TX_RING_SIZE
 RECEIVER_OTA_ID      = 0xFE  # tracker_id for receiver self-OTA
+
+# Two staged layouts (up to 8 s each), an OTA query PONG and its maintenance
+# echo on a slow runtime layout (7 s), then reconfiguration and FW_INFO (3 s).
+OTA_QUERY_TIMEOUT_S = 26.0
+OTA_QUERY_RETRY_S = 1.5
+OTA_QUERY_CHUNKS_TIMEOUT_S = 0.5
 
 
 # ── UF2 Parser ──────────────────────────────────────────────────────
@@ -553,6 +562,7 @@ class OTAClient:
             "next_seq": struct.unpack_from(">H", report, 3)[0],
             "bytes_written": struct.unpack_from("<I", report, 5)[0],
             "ring_count": report[9],
+            "begin_detail": report[11] if len(report) > 11 else 0,
         }
 
     @staticmethod
@@ -635,12 +645,14 @@ class OTAClient:
                               expected_statuses: set[int],
                               timeout_s: float = 30.0,
                               resend_cb: "callable | None" = None,
-                              resend_interval_s: float = 3.0) -> dict[int, dict]:
+                              resend_interval_s: float = 3.0,
+                              on_status=None) -> dict[int, dict]:
         """Wait for specific status from multiple trackers.
         Returns dict of tracker_id → status for those that responded.
 
         If resend_cb is provided, it is called with each pending tracker_id
         every resend_interval_s seconds to retry the command.
+        on_status, if supplied, observes reports for pending targets before filtering.
         """
         results: dict[int, dict] = {}
         pending = set(tracker_ids)
@@ -648,8 +660,25 @@ class OTAClient:
         next_resend = time.monotonic() + resend_interval_s if resend_cb else deadline + 1
         resend_count = 0
         while pending and time.monotonic() < deadline:
-            # Periodic resend for unresponsive trackers
-            if resend_cb and time.monotonic() >= next_resend:
+            reports = self._read_ota_reports(timeout_ms=200)
+            for r in reports:
+                if len(r) < 2 or r[0] != HID_OTA_STATUS:
+                    continue
+                tid = r[1]
+                if tid not in pending and tid not in results:
+                    continue
+                status = self.parse_status(r)
+                code = status.get("status")
+                if code is None or (tid not in pending and code not in TERMINAL_STATUSES):
+                    continue
+                if on_status is not None:
+                    on_status(status)
+                if code in expected_statuses:
+                    results[tid] = status
+                    pending.discard(tid)
+
+            # Process reports already in the HID queue before resending BEGIN.
+            if resend_cb and pending and next_resend <= time.monotonic() < deadline:
                 resend_count += 1
                 for tid in sorted(pending):
                     resend_cb(tid)
@@ -657,14 +686,6 @@ class OTAClient:
                 print(f"    (retry #{resend_count} for tracker{'s' if len(pending) > 1 else ''}"
                       f" {', '.join(str(t) for t in sorted(pending))})")
                 next_resend = time.monotonic() + resend_interval_s
-
-            reports = self._read_ota_reports(timeout_ms=200)
-            for r in reports:
-                if r[0] == HID_OTA_STATUS and r[1] in pending:
-                    status = self.parse_status(r)
-                    if status.get("status") in expected_statuses:
-                        results[r[1]] = status
-                        pending.discard(r[1])
         return results
 
 
@@ -676,20 +697,23 @@ def do_query_info(client: OTAClient, tracker_id: int, quiet: bool = False):
         print(f"\nQuerying firmware info for tracker {tracker_id}...")
     client.query_info(tracker_id)
 
-    # Collect FW_INFO chunks (6 expected). The tracker answers with one
-    # unacknowledged-by-host ESB frame; if it is lost (e.g. during a TDMA
-    # layout change) nothing retries it, so re-query while nothing arrived.
+    # The first reply can wait for an in-flight layout and the staged exit
+    # to native TDMA. Idempotent retries cover missed radio replies. Once the
+    # chunks start arriving they are sent together, including on old firmware.
     chunks = {}
     start = time.monotonic()
-    deadline = start + 6.0
-    next_resend = start + 1.5
+    deadline = start + OTA_QUERY_TIMEOUT_S
+    next_resend = start + OTA_QUERY_RETRY_S
     while time.monotonic() < deadline and len(chunks) < 6:
         if not chunks and time.monotonic() >= next_resend:
             client.query_info(tracker_id)
-            next_resend = time.monotonic() + 1.5
+            next_resend = time.monotonic() + OTA_QUERY_RETRY_S
         reports = client._read_ota_reports(timeout_ms=200)
         for r in reports:
-            if r[0] == HID_OTA_FW_INFO and r[1] == tracker_id and r[2] not in chunks:
+            if (len(r) >= 3 and r[0] == HID_OTA_FW_INFO and r[1] == tracker_id
+                    and r[2] < 6 and r[2] not in chunks):
+                if not chunks:
+                    deadline = time.monotonic() + OTA_QUERY_CHUNKS_TIMEOUT_S
                 chunks[r[2]] = r
                 if not quiet:
                     print(f"  [chunk {r[2]}] data={r.hex()}")
@@ -724,6 +748,19 @@ def do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage
     All trackers in tracker_ids must use the same firmware image.
     Data is streamed once; the receiver fans it out via per-tracker cursors.
     """
+    cleanup_ids = set()
+    try:
+        return _do_update(client, tracker_ids, firmware, board_target, cleanup_ids)
+    finally:
+        for tid in sorted(cleanup_ids):
+            try:
+                client.send_abort(tid)
+            except Exception as exc:
+                print(f"  Warning: Failed to send ABORT to tracker {tid}: {exc}")
+
+
+def _do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage,
+               board_target: str, cleanup_ids: set[int]):
     image_size = len(firmware.data)
     total_packets = (image_size + OTA_DATA_MAX_PAYLOAD - 1) // OTA_DATA_MAX_PAYLOAD
     n_targets = len(tracker_ids)
@@ -750,32 +787,51 @@ def do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage
         client.send_begin(tid, image_size, firmware.crc32,
                           total_packets, board_target, firmware.base_address)
 
+    busy_ids = set()
+
+    def _observe_begin(st):
+        tid = st["tracker_id"]
+        if st["status"] in (OTA_STATUS_READY, OTA_STATUS_RECEIVING):
+            cleanup_ids.add(tid)
+        elif st["status"] in TERMINAL_STATUSES:
+            cleanup_ids.discard(tid)
+        elif st["begin_detail"] == OTA_BEGIN_DETAIL_BUSY and tid not in busy_ids:
+            print(f"  Tracker {tid}: BEGIN busy (retrying)")
+            busy_ids.add(tid)
+
     ready_statuses = client.wait_for_multi_status(
         tracker_ids,
-        {OTA_STATUS_READY, OTA_STATUS_RECEIVING,
-         OTA_STATUS_BOARD_MISMATCH, OTA_STATUS_SIZE_ERROR, OTA_STATUS_ERROR},
+        {OTA_STATUS_READY, OTA_STATUS_RECEIVING} | TERMINAL_STATUSES,
         timeout_s=15.0,
         resend_cb=_resend_begin,
         resend_interval_s=3.0,
+        on_status=_observe_begin,
     )
 
     # Check results
     active_ids = []
+    unanswered = []
     for tid in tracker_ids:
         st = ready_statuses.get(tid)
         if st is None:
-            print(f"  Tracker {tid}: No response (skipping)")
-        elif st["status"] in TERMINAL_STATUSES or st["status"] not in (
-            OTA_STATUS_READY, OTA_STATUS_RECEIVING
-        ):
-            print(f"  Tracker {tid}: Rejected ({st['status_name']})")
+            unanswered.append(tid)
+        elif st["status"] in TERMINAL_STATUSES:
+            reason = ("a recent healthy direct link is required"
+                      if st["begin_detail"] == OTA_BEGIN_DETAIL_DIRECT_REQUIRED
+                      else st["status_name"])
+            print(f"  Tracker {tid}: Rejected ({reason})")
         else:
             print(f"  Tracker {tid}: Ready")
             active_ids.append(tid)
 
+    if unanswered:
+        # DATA has no session/target isolation: a late BEGIN could also
+        # receive this batch. Never abort a target we didn't see join.
+        ids = ', '.join(str(tid) for tid in unanswered)
+        raise TimeoutError(f"No confirmed BEGIN result for tracker(s) {ids}; not sending firmware data.")
+
     if not active_ids:
         print("Error: No trackers ready for update.")
-        client.send_abort(0xFF)  # Unsuppress all trackers
         return False
 
     # ── Step 2: Stream DATA packets ─────────────────────────────
@@ -811,7 +867,10 @@ def do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage
                     if r[0] == HID_OTA_STATUS and r[1] in active_ids:
                         st = OTAClient.parse_status(r)
                         tid = r[1]
+                        if st["begin_detail"] == OTA_BEGIN_DETAIL_BUSY:
+                            continue
                         if st["status"] in TERMINAL_STATUSES:
+                            cleanup_ids.discard(tid)
                             print(f"\n  Tracker {tid}: Error: {st['status_name']}")
                             active_ids.remove(tid)
                             if not active_ids:
@@ -861,7 +920,10 @@ def do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage
                 if r[0] == HID_OTA_STATUS and r[1] in active_ids:
                     st = OTAClient.parse_status(r)
                     tid = r[1]
+                    if st["begin_detail"] == OTA_BEGIN_DETAIL_BUSY:
+                        continue
                     if st["status"] in TERMINAL_STATUSES:
+                        cleanup_ids.discard(tid)
                         print(f"\n  Tracker {tid}: Error: {st['status_name']}")
                         active_ids.remove(tid)
                         if not active_ids:
@@ -903,13 +965,18 @@ def do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage
                 if r[0] == HID_OTA_STATUS and r[1] in active_ids:
                     st = OTAClient.parse_status(r)
                     tid = r[1]
+                    if st["begin_detail"] == OTA_BEGIN_DETAIL_BUSY:
+                        continue
                     if st["status"] in TERMINAL_STATUSES:
+                        cleanup_ids.discard(tid)
                         active_ids.remove(tid)
                         continue
                     tracker_next_seq[tid] = st["next_seq"]
 
+            if not active_ids:
+                return False
             min_consumed = min(tracker_next_seq.get(t, 0) for t in active_ids)
-            if min_consumed >= total_packets or not active_ids:
+            if min_consumed >= total_packets:
                 break
 
             in_flight = next_seq_to_send - min_consumed
@@ -966,7 +1033,7 @@ def do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage
 
     verify_results = client.wait_for_multi_status(
         active_ids,
-        {OTA_STATUS_VERIFY_OK, OTA_STATUS_VERIFY_FAIL, OTA_STATUS_ERROR},
+        {OTA_STATUS_VERIFY_OK} | TERMINAL_STATUSES,
         timeout_s=30.0,
         resend_cb=lambda tid: client.send_verify(tid),
         resend_interval_s=3.0,
@@ -978,6 +1045,7 @@ def do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage
         if st is None:
             print(f"  Tracker {tid}: No verification response")
         elif st["status"] != OTA_STATUS_VERIFY_OK:
+            cleanup_ids.discard(tid)
             print(f"  Tracker {tid}: Verification FAILED ({st['status_name']})")
         else:
             print(f"  Tracker {tid}: CRC32 verified OK")
@@ -985,7 +1053,6 @@ def do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage
 
     if not verified_ids:
         print("  Error: No trackers passed verification.")
-        client.send_abort(0xFF)  # Unsuppress all trackers
         return False
 
     # ── Step 4: Activate verified trackers ──────────────────────
@@ -996,7 +1063,7 @@ def do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage
 
     activate_results = client.wait_for_multi_status(
         verified_ids,
-        {OTA_STATUS_COMPLETE, OTA_STATUS_ERROR, OTA_STATUS_FLASH_ERROR},
+        TERMINAL_STATUSES,
         timeout_s=15.0,
         resend_cb=lambda tid: client.send_activate(tid),
         resend_interval_s=3.0,
@@ -1009,13 +1076,12 @@ def do_update(client: OTAClient, tracker_ids: list[int], firmware: FirmwareImage
             print(f"  Tracker {tid}: No response (may have rebooted - OK)")
             success_count += 1
         elif st["status"] == OTA_STATUS_COMPLETE:
+            cleanup_ids.discard(tid)
             print(f"  Tracker {tid}: Firmware activated, rebooting!")
             success_count += 1
         else:
+            cleanup_ids.discard(tid)
             print(f"  Tracker {tid}: Activation failed ({st['status_name']})")
-
-    # Always clean up session on receiver side
-    client.send_abort(0xFF)
 
     return success_count > 0
 
@@ -1522,10 +1588,11 @@ Examples:
             print(f"{'='*60}")
             sys.exit(1)
 
+    except TimeoutError as exc:
+        print(f"\nError: {exc}")
+        sys.exit(1)
     except KeyboardInterrupt:
-        print("\n\nInterrupted! Sending abort...")
-        client.send_abort(0xFF)
-        print("Abort sent.")
+        print("\n\nInterrupted.")
         sys.exit(1)
     finally:
         client.close()

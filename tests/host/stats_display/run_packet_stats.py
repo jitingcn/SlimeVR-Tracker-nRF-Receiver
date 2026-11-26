@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """Reproduce a packet rollover between the monitor's sample and its update."""
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse, os, pathlib, shlex, subprocess, sys, tempfile
 here=pathlib.Path(__file__).resolve().parent
 sys.path.insert(0,str(here.parent/'harness'))
 from c_extract import extract_block
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source',type=pathlib.Path,default=here.parents[2]/'src/connection/esb.c')
-source=parser.parse_args().source.read_text()
+source=select_relay(parser.parse_args().source.read_text())
 def function(name):
  return extract_block(source,rf'^static void {name}\([^;{{]*\)\s*\{{')
-if 'static void packet_stats_count(' in source:
- count=function('packet_stats_count')
-else:
- sequence=extract_block(source,r'^static int check_packet_sequence\([^;{]*\)\s*\{')
- start=sequence.index('\tuint64_t current_time')
- end=sequence.index('\n\t// First packet',start)
- count='static void packet_stats_count(struct packet_stats *stats) {\n'+sequence[start:end]+'\n}'
-
+count=function('packet_stats_count')
 if 'static void packet_stats_monitor(' in source:
  implementation=function('packet_stats_refresh')+'\n'+count+'\n'+function('packet_stats_monitor')
 else:

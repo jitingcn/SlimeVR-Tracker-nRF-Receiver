@@ -1,0 +1,193 @@
+"""Exercise the production deferred queues, including overload ordering."""
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
+from pathlib import Path
+import os, subprocess, tempfile, sys, shlex
+here = Path(__file__).resolve().parent
+sys.path.insert(0, str(here.parent / 'harness'))
+from c_extract import extract_block
+source = select_relay((here.parents[2] / 'src/connection/esb.c').read_text())
+code = source[source.index('static bool esb_forward_tracker_packet('):
+              source.index('struct composite_result {')]
+# Thread loops are exercised through their queue operations below.
+for name in ('relay_learning_thread', 'relay_hid_thread'):
+    code = code.replace(extract_block(code, rf'^static void {name}\(void\)\s*\{{'), '')
+prefix = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include "relay_coord.h"
+#include "hid.h"
+#define ARG_UNUSED(x) (void)(x)
+#define BIT(n) (1U << (n))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define K_NO_WAIT 0
+#define K_THREAD_DEFINE(...)
+struct queue { unsigned size, capacity, head, count; unsigned char *data; };
+#define K_MSGQ_DEFINE(n,s,c,a) static unsigned char n##_data[(s)*(c)]; static struct queue n = {s,c,0,0,n##_data}
+static int k_msgq_put(struct queue *q, const void *p, int wait) {
+ (void)wait; if(q->count == q->capacity) return -1;
+ memcpy(q->data+((q->head+q->count)%q->capacity)*q->size,p,q->size);q->count++;return 0;
+}
+static int k_msgq_get(struct queue *q, void *p, int wait) {
+ (void)wait;if(!q->count)return -1;memcpy(p,q->data+q->head*q->size,q->size);
+ q->head=(q->head+1)%q->capacity;q->count--;return 0;
+}
+static unsigned irq_depth;
+static unsigned irq_lock(void){return irq_depth++;}
+static void irq_unlock(unsigned key){assert(irq_depth == key + 1);irq_depth = key;}
+#define MAX_TRACKERS RC_MAX
+static struct relay_coord relay_coord;
+static uint32_t relay_session=42;
+static uint8_t relay_epoch=3;
+static uint8_t relay_pairing_revision[MAX_TRACKERS];
+/* PACKET STATS */
+static struct { struct packet_stats stats; } tracker_slots[2];
+static unsigned hid_attempts, hid_count, hid_drops;
+static bool check_status;
+static uint8_t status_counts[2];
+void hid_note_dropped(const uint8_t *data){(void)data;hid_drops++;}
+static bool stalled;
+static bool hid_try_write_packet_n(const uint8_t *data, uint8_t rssi)
+{
+ assert(irq_depth);
+ hid_attempts++;
+ if (stalled) return false;
+ if (check_status) {
+  assert(data[0] == 3 && data[1] == 1);
+  status_counts[0] = data[4];
+  status_counts[1] = data[5];
+ } else {
+  assert(data[0] == hid_count++);
+ }
+ assert(rssi == 50);
+ return true;
+}
+'''
+prefix = prefix.replace('/* PACKET STATS */', extract_block(source, r'^struct packet_stats \{', True))
+cases = r'''
+int main(void) {
+ relay_coord_init(&relay_coord);
+ for(unsigned i=0;i<129;i++){uint8_t p[16]={i,0,1};relay_hid_packet(p,50);p[0]=0;}
+ assert(hid_count==0 && relay_hid_overflow==1 && relay_hid_dropped_output==1 && hid_drops==1 && relay_hid_queue.count==128);
+ struct relay_hid_record output;bool pending=false;stalled=true;
+ assert(!relay_hid_step(&output,&pending)&&pending&&output.data[0]==0);
+ assert(!relay_hid_step(&output,&pending)&&pending&&relay_hid_queue.count==127);
+ uint8_t newer[16]={128};relay_hid_packet(newer,50);
+ stalled=false;
+ for(unsigned i=0;i<129;i++)assert(relay_hid_step(&output,&pending));
+ assert(hid_count==129 && relay_hid_enqueued==129 && relay_hid_refused==2 && hid_drops==1 && !pending);
+ assert(!relay_hid_step(&output,&pending));
+
+ uint8_t zero_quat[16] = {1};
+ relay_hid_packet(zero_quat, 50);
+ assert(relay_hid_step(&output, &pending) && !pending);
+ assert(relay_hid_enqueued == 129);
+
+ check_status = true;
+ uint8_t status[16] = {3, 1};
+ struct packet_stats *stats = &tracker_slots[1].stats;
+ stats->total_received = 256;
+ stats->total_gaps = 5;
+ relay_hid_packet(status, 50);
+ stalled = true;
+ assert(!relay_hid_step(&output, &pending) && pending);
+ assert(!stats->status_reported_received && !stats->status_reported_gaps && hid_drops == 1);
+ stats->total_received++;
+ stats->total_gaps++;
+ stalled = false;
+ assert(relay_hid_step(&output, &pending) && !pending);
+ assert(status_counts[0] == 255 && status_counts[1] == 6);
+ assert(!relay_hid_step(&output, &pending));
+ relay_hid_packet(status, 50);
+ assert(relay_hid_step(&output, &pending));
+ assert(status_counts[0] == 2 && status_counts[1] == 0);
+ assert(stats->status_reported_received == 257 && stats->status_reported_gaps == 6);
+
+ /* A backpressured record and a still-queued record belong to the retired
+  * pairing. Neither may touch the replacement's RSSI or status cursor. */
+ stalled = true;
+ relay_hid_packet(status, 50);
+ relay_hid_packet(status, 50);
+ assert(!relay_hid_step(&output, &pending) && pending);
+ relay_pairing_revision[1]++;
+ memset(stats, 0, sizeof(*stats));
+ stats->total_received = 12;
+ stats->total_gaps = 3;
+ relay_hid_packet(status, 50);
+ relay_pairing_revision[0]++; /* unrelated slot reset leaves the new record intact */
+ const unsigned attempts = hid_attempts;
+ const unsigned enqueued = relay_hid_enqueued;
+ assert(relay_hid_step(&output, &pending) && !pending);
+ assert(relay_hid_step(&output, &pending) && !pending);
+ assert(hid_attempts == attempts && relay_hid_enqueued == enqueued && relay_hid_dropped_output == 3);
+ assert(!stats->status_reported_received && !stats->status_reported_gaps && hid_drops == 1);
+ stalled = false;
+ assert(relay_hid_step(&output, &pending) && !pending);
+ assert(status_counts[0] == 12 && status_counts[1] == 3);
+ assert(stats->status_reported_received == 12 && stats->status_reported_gaps == 3);
+
+ relay_defer_capture(&relay_coord,1,3,50,100);
+ for(unsigned i=1;i<17;i++)relay_defer_capture(&relay_coord,1,2,50,100+i);
+ assert(relay_coord.peer[1][3].evidence_ms==100);
+ assert(relay_learning_overflow==1 && relay_coord.peer[1][2].evidence_ms==116);
+ struct relay_control c={.session=42,.epoch=3,.members=2,.repair_count=5};
+ c.grants[0].owner=1;
+ struct relay_peer_report p={.session=42,.epoch=3,.helper=1,.count=1};
+ p.entries[0]=(struct relay_peer_observation){.child=2,.expected=10,.heard=7,.rssi=50};
+ relay_defer_report(&relay_coord,&c,0,&p,200);
+ c.session=99;p.entries[0].heard=0;
+ struct relay_learning_record r;
+ assert(!k_msgq_get(&relay_learning_queue,&r,0));relay_learning_apply(&r);
+ assert(relay_coord.peer[1][2].heard==7 && relay_coord.peer[1][2].expected==10);
+ relay_epoch++;relay_learning_apply(&r);assert(relay_coord.peer[1][2].heard==7);
+ relay_epoch--;
+ /* Unrelated ID reset must not drop valid queued captures or reports. */
+ relay_defer_capture(&relay_coord,1,4,50,300);
+ relay_pairing_revision[9]++;
+ assert(!k_msgq_get(&relay_learning_queue,&r,0));relay_learning_apply(&r);
+ assert(relay_coord.peer[1][4].evidence_ms==300);
+
+ /* Resetting the capture's child fences that capture even on the same session/epoch. */
+ relay_defer_capture(&relay_coord,1,5,50,305);
+ relay_pairing_revision[5]++;
+ assert(!k_msgq_get(&relay_learning_queue,&r,0));relay_learning_apply(&r);
+ assert(relay_coord.peer[1][5].evidence_ms==0);
+
+ /* Records submitted after the revocation on the applied layout are accepted. */
+ relay_defer_capture(&relay_coord,1,5,50,306);
+ assert(!k_msgq_get(&relay_learning_queue,&r,0));relay_learning_apply(&r);
+ assert(relay_coord.peer[1][5].evidence_ms==306);
+
+ /* Mixed report: unrelated reset keeps all; resetting one child drops only that entry. */
+ struct relay_control cm={.session=42,.epoch=3,.members=BIT(1)|BIT(6)|BIT(7),.repair_count=5};
+ cm.grants[0].owner=1;
+ struct relay_peer_report pm={.session=42,.epoch=3,.helper=1,.count=2};
+ pm.entries[0]=(struct relay_peer_observation){.child=6,.expected=10,.heard=8,.rssi=50};
+ pm.entries[1]=(struct relay_peer_observation){.child=7,.expected=10,.heard=6,.rssi=52};
+ relay_defer_report(&relay_coord,&cm,0,&pm,400);
+ relay_pairing_revision[9]++;
+ relay_pairing_revision[7]++;
+ assert(!k_msgq_get(&relay_learning_queue,&r,0));relay_learning_apply(&r);
+ assert(relay_coord.peer[1][6].heard==8 && relay_coord.peer[1][6].expected==10);
+ assert(relay_coord.peer[1][7].heard==0 && relay_coord.peer[1][7].expected==0);
+
+ /* Resetting the helper drops the entire queued report. */
+ pm.entries[0]=(struct relay_peer_observation){.child=6,.expected=10,.heard=9,.rssi=50};
+ pm.count=1;
+ relay_defer_report(&relay_coord,&cm,0,&pm,410);
+ relay_pairing_revision[1]++;
+ assert(!k_msgq_get(&relay_learning_queue,&r,0));relay_learning_apply(&r);
+ assert(relay_coord.peer[1][6].heard==8 && relay_coord.peer[1][6].expected==10);
+ return 0;
+}
+'''
+with tempfile.TemporaryDirectory() as tmp:
+    c=Path(tmp)/'deferred.c';exe=Path(tmp)/'deferred';c.write_text(prefix+code+cases)
+    subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I'+str(here.parents[2]/'src/connection'),'-I'+str(here.parents[2]/'src'),str(c),str(here.parents[2]/'src/connection/relay_coord.c'),'-o',str(exe)],check=True)
+    subprocess.run([str(exe)],check=True)
+print('Deferred HID and learning copies, overflow order and epoch fencing passed')

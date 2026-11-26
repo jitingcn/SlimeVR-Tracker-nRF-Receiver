@@ -1,3 +1,7 @@
+#if defined(CONFIG_RELAY)
+#include "frame_ledger.h"
+#include "connection/relay_protocol.h"
+#endif
 /*
 	SlimeVR Code is placed under the MIT license
 	Copyright (c) 2025 SlimeVR Contributors
@@ -259,6 +263,16 @@ static void print_help(void)
 		"  stats                      Toggle detailed packet statistics\n"
 		"  stats <seconds>            Show detailed stats for N seconds\n"
 		"  resetstats                 Reset packet statistics\n"
+#if defined(CONFIG_RELAY)
+		"\n"
+		"Peer relay:\n"
+		"  relay                      Relay coordinator status\n"
+		"  relay diag                 Timing errors and live member leases\n"
+		"  relay auto|on|force|off    Select relay mode; on = auto (boot default)\n"
+		"  relay layout [field value]  Show or persist runtime limits\n"
+		"  relay blockmask <mask> <s> Test: block up to 3 children for at most 60 s\n"
+		"  relay block <id> <pct>     Test: drop pct%% of <id>'s direct uplink (0 = off)\n"
+#endif
 		"\n"
 	);
 
@@ -921,6 +935,9 @@ static void console_thread(void)
 	const char command_clear[] = "clear";
 	const char command_stats[] = "stats";
 	const char command_health[] = "health";
+#if defined(CONFIG_RELAY)
+	static const char command_relay[] = "relay";
+#endif
 	const char command_resetstats[] = "resetstats";
 	const char command_channel[] = "channel";
 	const char command_clearchannel[] = "clearchannel";
@@ -1021,6 +1038,53 @@ static void console_thread(void)
 			rcv_cmd_exit_pair();
 		} else if (strcmp(argv[0], command_clear) == 0) {
 			rcv_cmd_clear();
+#if defined(CONFIG_RELAY)
+		} else if (strcmp(argv[0], command_relay) == 0) {
+			uint8_t id = 0, pct = 0;
+			if (argc == 2 && strcmp(arg, "layout") == 0) {
+				esb_relay_layout_print();
+			} else if (argc == 2 && strcmp(arg, "diag") == 0) {
+				esb_relay_print_diagnostics();
+			} else if (argc == 4 && strcmp(arg, "layout") == 0) {
+				long value;
+				if (!parse_long_bounded(argv[3], 0, 32768, &value) || esb_relay_layout_set(arg2, value)) {
+					printk(
+						"Relay layout rejected or persistence failed. Use relay layout "
+						"<max_trackers|max_repairs|repair_floor|control_repeat_mode|slot_ticks|tps_min|tps_max> <value>\n"
+					);
+				}
+			} else if (argc == 2 && strcmp(arg, "pool") == 0) {
+				esb_relay_print_pool();
+			} else if (argc == 1) {
+				esb_relay_print_status();
+			} else if (argc == 2 && (strcmp(arg, "auto") == 0 || strcmp(arg, "on") == 0)) {
+				esb_relay_set_mode(RELAY_MODE_AUTO);
+				printk("Relay auto\n");
+			} else if (argc == 2 && strcmp(arg, "force") == 0) {
+				esb_relay_set_mode(RELAY_MODE_FORCE);
+				printk("Relay force\n");
+			} else if (argc == 2 && strcmp(arg, "off") == 0) {
+				esb_relay_set_mode(RELAY_MODE_OFF);
+				printk("Relay disabled\n");
+			} else if (argc == 4 && strcmp(arg, "blockmask") == 0) {
+				char *end;
+				unsigned long mask = strtoul(arg2, &end, 0);
+				if (*arg2 && !*end && mask <= UINT16_MAX && parse_u8_arg(arg3, &pct)
+					&& esb_relay_block_mask((uint16_t)mask, pct)) {
+					printk("Direct uplink block mask=0x%04x for %u seconds\n", (unsigned)mask, pct);
+				} else {
+					printk("Usage: relay blockmask <mask: at most 3 children> <seconds: 1..60>\n");
+				}
+			} else if (
+				argc == 4 && strcmp(arg, "block") == 0 && parse_u8_arg(arg2, &id) && id < MAX_TRACKERS
+				&& parse_u8_arg(arg3, &pct) && pct <= 100
+			) {
+				esb_relay_block(id, pct);
+				printk("Direct uplink of tracker %u: %u%% dropped\n", id, pct);
+			} else {
+				printk("Usage: relay [auto|force|off|block <id> <pct>]\n");
+			}
+#endif
 		} else if (strcmp(argv[0], command_health) == 0) {
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 			esb_print_health_snapshot();

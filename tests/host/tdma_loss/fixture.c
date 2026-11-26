@@ -51,6 +51,13 @@ static int64_t k_uptime_get(void)
 	return now;
 }
 static uint32_t k_uptime_get_32(void) { return (uint32_t)now; }
+/* 32768 Hz kernel ticks, as on the receiver. */
+static int64_t k_uptime_ticks(void) { return now * 32768 / 1000; }
+static uint32_t k_ticks_to_ms_ceil32(uint32_t ticks)
+{
+	return (uint32_t)(((uint64_t)ticks * 1000 + 32767) / 32768);
+}
+static uint32_t k_ms_to_ticks_ceil32(uint32_t ms) { return (uint32_t)(((uint64_t)ms * 32768 + 999) / 1000); }
 
 
 static int atomic_get(const int *value)
@@ -690,10 +697,135 @@ static void decision_genuine_loss(void)
 	}
 }
 
+#if defined(TEST_RELAY_SOURCE)
+/* One policy owns the loss ladder and relay lifecycle. Use the production
+ * quality accounting, auto policy and loss controller in the same timeline. */
+static void auto_policy_ladder(void)
+{
+	relay_coord_init(&relay_coord);
+	relay_coord.enabled = true;
+	relay_coord_note_caps(&relay_coord, 3,
+		(RELAY_PROTOCOL_VERSION << RELAY_CAP_VERSION_SHIFT) | RELAY_CAP_HELPER);
+	tdma_cap_level = tdma_published_cap_level = 2;
+	for (unsigned second = 0; second < 15; second++) {
+		now += 1000;
+		for (unsigned n = 0; n < 60; n++)
+			relay_coord_note_frame(&relay_coord, 3, RC_DIRECT, RC_SEQ_NORMAL,
+				n == 0 ? 40 : 0, 70, now);
+		relay_coord_tick(&relay_coord, BIT(3), now);
+		relay_coord_auto_update(&relay_coord, BIT(3), now, false, true);
+		tracker_slots[3].decision_received += 120;
+		tracker_slots[3].decision_gaps += 80;
+		decision_ready_mask = tdma_active_mask;
+		tdma_loss_controller_tick(now);
+		/* This fixture judges once a second. The weak timer starts at the
+		 * second poor judgement and rounds up to the next policy pass. */
+		assert(relay_coord.auto_engaged == (second >= RC_WEAK_WINDOWS - 1 + (RC_AUTO_ENTER_MS + 999) / 1000));
+		assert(tdma_cap_level == 2); /* relay acts before the ladder's fifth loss tick */
+	}
+	assert(relay_coord.auto_engaged && tdma_cap_level == 2);
+	tdma_published_cap_level = tdma_cap_level;
+	relay_profile = 1;
+	repeat(120, 200, 0); /* repair-success delivery cannot raise the cap */
+	assert(tdma_cap_level == 2);
+	relay_coord.auto_engaged = false;
+	repeat(120, 200, 0); /* staged exit still freezes it */
+	assert(tdma_cap_level == 2);
+	relay_profile = 0;
+	repeat(9, 200, 0); assert(tdma_cap_level == 2);
+	tick(200, 0); assert(tdma_cap_level == 1);
+}
+
+static void auto_outage_pending(void)
+{
+	relay_coord_init(&relay_coord);
+	relay_coord.enabled = true;
+	relay_coord_note_caps(&relay_coord, 3, RELAY_INFO_CAPS);
+	/* Learn 10 Hz from four pooled windows, then go entirely silent. */
+	for (unsigned tick = 0; tick < 30; tick++) {
+		now += 500;
+		if (tick < 4) {
+			tdma_shadow_observe(3, TDMA_SHADOW_EVIDENCE_DATA);
+			for (unsigned n = 0; n < 5; n++)
+				relay_coord_note_frame(&relay_coord, 3, RC_DIRECT, RC_SEQ_NORMAL, 0, 70, now);
+		}
+		tdma_shadow_update(now);
+		relay_coord_tick(&relay_coord, tdma_active_mask, now);
+		struct esb_auto_loss_snapshot evidence;
+		esb_get_auto_loss_snapshot(&evidence);
+		/* Start the policy with a native leave already pending. */
+		if (!tdma_shadow_pending_leave_mask) continue;
+		assert(!evidence.eligible && evidence.relay_eligible);
+		relay_coord_auto_update(&relay_coord, tdma_active_mask, now, false, evidence.relay_eligible);
+		if (relay_coord.auto_engaged) {
+			assert(tdma_shadow_pending_leave_mask == BIT(3));
+			assert(tdma_active_mask == BIT(3));
+			assert(now - relay_coord.t[3].last_direct_ms + RELAY_LAYOUT_ACTIVATION_MS
+				< TDMA_SHADOW_LEAVE_GRACE_MS);
+			return;
+		}
+	}
+	assert(false);
+}
+
+static void auto_excluded_live(void)
+{
+	relay_coord_init(&relay_coord);
+	relay_coord.enabled = true;
+	relay_coord_note_caps(&relay_coord, 3, RELAY_INFO_CAPS);
+	stored_trackers = 5;
+	relay_settings.max_trackers = 1;
+	tdma_shadow_desired_mask = BIT(3) | BIT(4);
+	struct esb_auto_loss_snapshot evidence;
+	esb_get_auto_loss_snapshot(&evidence);
+	assert(!evidence.relay_eligible); /* Native auto considers the full live roster. */
+	relay_user_mode = RELAY_MODE_FORCE;
+	for (unsigned tick = 0; tick < 90; tick++) {
+		now += 500;
+		unsigned direct = tick < 24 ? 30 : 50;
+		for (unsigned n = 0; n < direct; n++)
+			relay_coord_note_frame(&relay_coord, 3, RC_DIRECT, RC_SEQ_NORMAL,
+				n == 0 ? 50 - direct : 0, 70, now);
+		relay_coord_tick(&relay_coord, BIT(3), now);
+		esb_get_auto_loss_snapshot(&evidence);
+		assert(evidence.relay_eligible);
+		relay_coord_auto_update(&relay_coord, BIT(3), now, tick >= 24, evidence.relay_eligible);
+		if (tick == 23) assert(relay_coord.auto_engaged);
+	}
+	assert(!relay_coord.auto_engaged);
+	tdma_shadow_pending_join_mask = BIT(4);
+	esb_get_auto_loss_snapshot(&evidence);
+	assert(!evidence.relay_eligible); /* true pending joins still fence policy */
+}
+
+static void auto_nonrelay_join(void)
+{
+	auto_policy_ladder();
+	relay_coord.auto_engaged = true;
+	relay_control_ready = false;
+	assert(!relay_auto_ladder_paused());
+	relay_profile = 1;
+	relay_coord_auto_update(&relay_coord, BIT(3) | BIT(4), now, true, false);
+	assert(!relay_coord.auto_engaged && relay_auto_ladder_paused());
+	relay_profile = 0;
+	assert(!relay_auto_ladder_paused());
+	tdma_cap_level = tdma_published_cap_level = 3;
+	repeat(11, 200, 0);
+	assert(tdma_cap_level == 2);
+}
+
+#endif
+
 static const struct {
 	const char *name;
 	void (*run)(void);
 } scenarios[] = {
+#if defined(TEST_RELAY_SOURCE)
+	{"auto-policy-ladder", auto_policy_ladder},
+	{"auto-outage-pending", auto_outage_pending},
+	{"auto-excluded-live", auto_excluded_live},
+	{"auto-nonrelay-join", auto_nonrelay_join},
+#endif
 	{"fast-recovery", fast_recovery},
 	{"slow-probe", slow_probe},
 	{"sparse-recovery", sparse_recovery},

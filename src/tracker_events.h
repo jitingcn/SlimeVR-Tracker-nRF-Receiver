@@ -7,6 +7,13 @@
 
 bool tracker_events_receive(const uint8_t *packet, size_t len, uint32_t now_ms);
 void tracker_events_process(uint32_t now_ms);
+#if defined(CONFIG_RELAY)
+/* Valid ordered intent only, not proof of physical power-down. The caller
+ * supplies the same bounded ordinary membership/owner/publication tail in ms
+ * on every call; the WoM advance is added by the event module. Call outside
+ * receiver IRQ lock. */
+uint32_t tracker_events_power_down_mask(uint32_t now_ms, uint32_t membership_tail_ms);
+#endif
 /* Invalidate identities while the pairing store's IRQ lock is held; scalar
  * generations only. Cleanup runs after IRQ unlock, before store mutex unlock. */
 void tracker_events_pairing_invalidate(uint32_t tracker_mask);

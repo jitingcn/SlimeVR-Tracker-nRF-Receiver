@@ -4,6 +4,11 @@ Usage: python3 run.py [--source-root RECEIVER] [--case CASE]
 SOURCE_ROOT may point at a saved pre-change source tree.
 No source-text assertions: all cases exercise queue, scheduler, USB and UART behavior.
 """
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse
 import os
 import importlib.util
@@ -138,18 +143,22 @@ static void advance(int delta) {
 static bool device_is_ready(const struct device *dev) { return true; }
 '''
 
-hid_source = (src / 'hid.c').read_text()
+hid_source = select_relay((src / 'hid.c').read_text())
 hid_decls = hid_source[hid_source.index('static struct k_work'):hid_source.index('static const uint8_t hid_report_desc')]
+split_writer = 'hid_write_packet_n_internal(' in hid_source
 hid_functions = '\n'.join(function(hid_source, name) for name in [
     'packet_device_addr', 'hid_stats_record_reports', 'hid_fill_padding', 'send_report',
     'int_in_ready_cb', 'input_report_done_cb', 'iface_ready_cb',
     'report_event_handler', 'hid_usb_state_changed', 'composite_pre_init',
     'hid_type_byte1_is_tracker_id', 'hid_type_has_rssi_slot',
-    'hid_enqueue_packet', 'hid_write_tracker_event', 'hid_write_packet_n'])
+    *(['hid_push_packet', 'hid_note_dropped'] if split_writer else []),
+    'hid_enqueue_packet', 'hid_write_tracker_event',
+    *(['hid_write_packet_n_internal'] if split_writer else []), 'hid_write_packet_n'])
 hid = common + r'''
 #define RCV_HID_TYPE_CMD_ACK 251
 #define RCV_HID_TYPE_CMD 254
 #include "tracker_events.h"
+#include "hid.h"
 #include "connection/tracker_event_protocol.h"
 #define RCV_HID_TYPE_DEVICE_ADDR 255
 #define RCV_HID_CMD_LEN 16
@@ -299,7 +308,8 @@ except ValueError:
     crc_source = (zephyr_base / 'subsys/crc/crc8_sw.c').read_text()
     crc_table_start = crc_source.index('static const uint8_t crc8_ccitt_small_table')
     crc_table_end = crc_source.index('};', crc_table_start) + 2
-    cdc_crc = '#define __weak\n' + crc_source[crc_table_start:crc_table_end] + '\n' + function(crc_source, 'crc8_ccitt')
+    crc_function = function(crc_source, 'crc8_ccitt').replace('__weak ', '', 1)
+    cdc_crc = crc_source[crc_table_start:crc_table_end] + '\n' + crc_function
 cdc = common + r'''
 #define UART_LINE_CTRL_DTR 1
 #define ESB_PONG_FLAG_DATA_COLLECT_OFF 1

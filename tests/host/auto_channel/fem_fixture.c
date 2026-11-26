@@ -129,7 +129,6 @@ static void k_busy_wait(unsigned us) {
 static void k_msleep(unsigned ms) { k_busy_wait(ms*1000); }
 static void k_yield(void) {}
 static int printk(const char *fmt,...) { (void)fmt; return 0; }
-static int clocks_start(void) { return 0; }
 static int esb_radio_operation_begin(void) { assert(!owner); owner=true; return 0; }
 static void esb_radio_operation_end(void) { assert(owner); owner=false; }
 static int esb_radio_operation_stop(void) { assert(owner); hw.STATE=0; return 0; }

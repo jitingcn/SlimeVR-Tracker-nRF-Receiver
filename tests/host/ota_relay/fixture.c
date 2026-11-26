@@ -108,7 +108,24 @@ static uint32_t k_ms_to_ticks_floor32(uint32_t ms) { return ms; }
 
 struct k_work { void (*handler)(struct k_work *); };
 #define K_WORK_DEFINE(name, function) struct k_work name = { .handler = function }
+struct k_work_delayable { struct k_work work; bool scheduled; uint32_t due; };
+#define K_WORK_DELAYABLE_DEFINE(name, function) \
+    struct k_work_delayable name = { .work = { .handler = function } }
+#define K_MSEC(ms) (ms)
+#define K_TICKS(ticks) (ticks)
+static int k_work_reschedule(struct k_work_delayable *work, uint32_t delay)
+{
+    external_call();
+    work->scheduled = true;
+    work->due = now_ticks + delay;
+    return 1;
+}
+static int k_work_schedule(struct k_work_delayable *work, uint32_t delay)
+{
+    return work->scheduled ? 0 : k_work_reschedule(work, delay);
+}
 static struct k_work *submitted_work;
+static void (*sleep_hook)(void);
 static unsigned work_submits, sleeps, log_calls, print_calls;
 static unsigned confirmed_type, confirmed_tracker, confirmed_sends;
 static int k_work_submit(struct k_work *work)
@@ -118,7 +135,13 @@ static int k_work_submit(struct k_work *work)
     work_submits++;
     return 0;
 }
-static void k_msleep(int ms) { external_call(); assert(ms == 2); sleeps++; }
+static void k_msleep(int ms)
+{
+    external_call();
+    assert(!irq_mask && ms == 2);
+    sleeps++;
+    if (sleep_hook) sleep_hook();
+}
 static void test_log(const char *format, ...)
 {
     external_call();
@@ -182,6 +205,9 @@ static uint8_t reports[512][16];
 static size_t report_count;
 
 bool esb_ota_relay_is_active(void);
+static uint16_t relayed_ids;
+static bool stage_during_admission;
+bool esb_relay_blocks_ota(uint8_t id) { return id < 16 && (relayed_ids & (1u << id)); }
 static bool receiver_ota_is_active(void) { return receiver_ota_active; }
 static bool data_collect_is_active(void) { return collect_active; }
 static bool data_collect_batch_is_active(void) { return collect_batch_active; }
@@ -191,6 +217,7 @@ static bool atomic_cas(atomic_t *value, int old, int next)
     assert(value == &radio_operation_busy && old == 0 && next == 1);
     if (*value != old) return false;
     *value = next;
+    if (stage_during_admission) relayed_ids = 1;
     radio_claims++;
     return true;
 }
@@ -357,6 +384,7 @@ static const uint8_t abort_at_100[13] = {0xf1, 0, 0, 0, 0, 0, 100, 0x31, 0, 0, 0
 static void reset_world(void)
 {
     assert(!irq_mask && !spin_depth && !pending_irq && !radio_owned);
+    relayed_ids = 0;stage_during_admission = false;
     memset(&ota_relay, 0, sizeof(ota_relay));
     memset(ota_abort_valid, 0, sizeof(ota_abort_valid));
     memset(ota_abort_expiry_ticks, 0, sizeof(ota_abort_expiry_ticks));
@@ -374,6 +402,11 @@ static void reset_world(void)
     work_submits = sleeps = log_calls = print_calls = 0;
     confirmed_type = confirmed_tracker = confirmed_sends = 0;
     submitted_work = NULL;
+    sleep_hook = NULL;
+#if !EXPECT_UNSAFE
+    begin_expire_work.scheduled = false;
+    fw_info_sending_id = MAX_TRACKERS;
+#endif
     watched_copy = NULL;
     watched_source = NULL;
     copy_irq = NULL;
@@ -437,6 +470,22 @@ static void setup_ready(uint8_t id)
 
 static struct result preempt_ack;
 static void take_ack(void) { preempt_ack = ack(0, 0); }
+
+#if !EXPECT_UNSAFE
+static void expect_begin_status(size_t index, uint8_t id, uint8_t state, uint8_t detail)
+{
+    assert(index < report_count && reports[index][0] == HID_OTA_STATUS);
+    assert(reports[index][1] == id && reports[index][2] == state && reports[index][11] == detail);
+}
+
+static void run_begin_expiry(void)
+{
+    assert(begin_expire_work.scheduled && (int32_t)(now_ticks - begin_expire_work.due) >= 0);
+    begin_expire_work.scheduled = false;
+    begin_expire_work.work.handler(&begin_expire_work.work);
+}
+
+static void take_ack_one(void) { preempt_ack = ack(1, 0); }
 static void cancel_zero(void) { simple(0xf7, 0); }
 static void confirm_verify(void) { status(0, 0x03, 0, 0); }
 
@@ -444,8 +493,6 @@ static void test_publication_copy(void)
 {
     for (size_t byte = 1; byte <= 64; byte++) {
         reset_world();
-        begin(0, begin_a);
-        expect_ack(ack(0, 0), begin_ack_a, 64);
         watched_copy = ota_relay.tracker[0].pending_cmd_data;
         watched_byte = byte;
         copy_irq = take_ack;
@@ -458,12 +505,13 @@ static void test_publication_copy(void)
         reset_world();
         setup_ready(0);
         simple(0xf5, 0);
-        watched_copy = ota_relay.tracker[0].pending_cmd_data;
+        watched_copy = ota_relay.tracker[1].pending_cmd_data;
         watched_byte = byte;
-        copy_irq = take_ack;
-        begin(0, begin_b);
+        copy_irq = take_ack_one;
+        begin(1, begin_a);
         assert(copy_fired && deferred_irqs == 1 && delivered_irqs == 1);
-        expect_ack(preempt_ack, begin_ack_b, 64);
+        expect_ack(preempt_ack, begin_ack_a_one, 64);
+        expect_ack(ack(0, 0), verify_ack, 4);
     }
     for (size_t byte = 1; byte <= 4; byte++) {
         reset_world();
@@ -601,19 +649,23 @@ static void test_timeout_and_deferral(void)
     begin(0, begin_a);
     data(0, 0xa1, 0xb2, 0xc3);
     expect_ack(ack(0, 0), begin_ack_a, 64);
-    now_ticks = 10100;
+    now_ticks = 15099;
     expect_ack(ack(0, 0), begin_ack_a, 64);
-    now_ticks = 10101;
+    now_ticks = 15100;
     assert(!ack(0, 0).has);
-    expect_ack(ack(0, 0), data_a, 7);
+    run_begin_expiry();
+    assert(!esb_ota_relay_is_active() && !ack(0, 0).has);
+    expect_begin_status(0, 0, OTA_STATUS_ERROR, 0);
 
     reset_world();
     now_ticks = 0xfffffff0u;
     begin(0, begin_a);
-    now_ticks = 9984;
+    now_ticks = 14983;
     expect_ack(ack(0, 0), begin_ack_a, 64);
-    now_ticks = 9985;
+    now_ticks = 14984;
     assert(!ack(0, 0).has);
+    run_begin_expiry();
+    assert(!esb_ota_relay_is_active());
 
     for (unsigned command = 0; command < 2; command++) {
         reset_world();
@@ -703,15 +755,21 @@ static void begin_two(void) { begin(2, begin_a); }
 
 static void test_reservation(void)
 {
+    reset_world();stage_during_admission = true;
+    begin(0, begin_a);
+    assert(!esb_ota_relay_is_active() && !radio_owned && radio_claims == 1 && radio_releases == 1);
+    expect_begin_status(0, 0, OTA_STATUS_ERROR, OTA_BEGIN_DETAIL_DIRECT_REQUIRED);
+
     reset_world();
     radio_operation_busy = 1;
     begin(0, begin_a);
     assert(!esb_ota_relay_is_active() && radio_begins == 1 && radio_ends == 0);
     assert(radio_owned && loss_invalidations == 0 && abort_clears == 0 && !ack(0, 0).has);
+    expect_begin_status(0, 0, OTA_STATUS_IDLE, OTA_BEGIN_DETAIL_BUSY);
     radio_operation_busy = 0;
 
     reset_world();
-    simple(0xf7, 0);
+    esb_ota_relay_console_cmd(0, "abort");
     begin(0, begin_a);
     assert(!esb_ota_relay_is_active() && esb_ota_relay_abort_pending(0));
     expect_ack(ack(0, 0), abort_at_100, sizeof(abort_at_100));
@@ -724,7 +782,7 @@ static void test_reservation(void)
     expect_ack(ack(0, 0), begin_ack_a, 64);
 
     reset_world();
-    simple(0xf7, 15);
+    esb_ota_relay_console_cmd(15, "abort");
     begin(0, begin_a);
     assert(!esb_ota_relay_is_active() && esb_ota_relay_abort_pending(15));
     assert(radio_begins == 1 && radio_ends == 0 && !radio_owned && abort_clears == 0);
@@ -745,6 +803,8 @@ static void test_reservation(void)
         assert(!esb_ota_relay_is_active() && !ack(0, 0).has);
         assert(radio_begins == 1 && radio_ends == 0 && !radio_owned);
         assert(loss_invalidations == 0 && abort_clears == 0);
+        expect_begin_status(0, 0, gate ? OTA_STATUS_IDLE : OTA_STATUS_ERROR,
+                            gate ? OTA_BEGIN_DETAIL_BUSY : 0);
         esb_radio_fault = receiver_ota_active = collect_active = collect_batch_active = false;
         begin(0, begin_a);
         assert(esb_ota_relay_is_target(0));
@@ -752,47 +812,60 @@ static void test_reservation(void)
         expect_ack(ack(0, 0), begin_ack_a, 64);
     }
 
+    /* OTA needs a direct link: a relayed tracker is refused before any
+     * radio ownership or admission, and accepted again once direct. */
+    reset_world();
+    relayed_ids = 1u << 2;
+    begin(2, begin_a);
+    assert(!esb_ota_relay_is_active() && !esb_ota_relay_is_target(2) && !ack(2, 0).has);
+    assert(radio_begins == 0 && radio_claims == 0);
+    begin(2, begin_a);
+    assert(report_count == 2);
+    expect_begin_status(0, 2, OTA_STATUS_ERROR, OTA_BEGIN_DETAIL_DIRECT_REQUIRED);
+    expect_begin_status(1, 2, OTA_STATUS_ERROR, OTA_BEGIN_DETAIL_DIRECT_REQUIRED);
+    relayed_ids = 0;stage_during_admission = false;
+    begin(2, begin_a);
+    assert(esb_ota_relay_is_target(2));
+
     reset_world();
     radio_begin_hook = fill_capacity;
     begin(4, begin_b);
     assert(esb_ota_relay_is_active());
     for (uint8_t id = 0; id < 4; id++) assert(esb_ota_relay_is_target(id));
     assert(!esb_ota_relay_is_target(4));
-    assert(ota_relay.image_size == 64 && ota_relay.total_packets == 1);
+    expect_begin_status(0, 4, OTA_STATUS_IDLE, OTA_BEGIN_DETAIL_BUSY);
     assert(radio_begins == 2 && radio_ends == 1 && !radio_owned);
     begin(0, begin_b);
     assert(ota_relay.num_targets == 4 && esb_ota_relay_is_target(0));
     assert(radio_begins == 2 && radio_ends == 1);
-    expect_ack(ack(0, 0), begin_ack_b, 64);
+    expect_begin_status(1, 0, OTA_STATUS_IDLE, OTA_BEGIN_DETAIL_BUSY);
+    expect_ack(ack(0, 0), begin_ack_a, 64);
 
     reset_world();
     radio_begin_hook = begin_one;
     begin(0, begin_b);
     assert(!esb_ota_relay_is_target(0) && esb_ota_relay_is_target(1));
-    assert(ota_relay.image_size == 64 && ota_relay.total_packets == 1);
+    expect_begin_status(0, 0, OTA_STATUS_IDLE, OTA_BEGIN_DETAIL_BUSY);
     assert(radio_begins == 2 && radio_ends == 1 && !radio_owned);
     assert(!ack(0, 0).has);
     expect_ack(ack(1, 0), begin_ack_a_one, 64);
     begin(0, begin_b);
+    assert(!esb_ota_relay_is_target(0) && esb_ota_relay_is_target(1));
+    expect_begin_status(1, 0, OTA_STATUS_IDLE, OTA_BEGIN_DETAIL_BUSY);
+    begin(0, begin_a);
     assert(esb_ota_relay_is_target(0) && esb_ota_relay_is_target(1));
-    expect_ack(ack(0, 0), begin_ack_b, 64);
+    expect_ack(ack(0, 0), begin_ack_a, 64);
 
     reset_world();
     setup_ready(0);
     next_spin_unlock_irq = cancel_zero;
     begin(1, begin_a);
     assert(!next_spin_unlock_irq && deferred_irqs == 1 && delivered_irqs == 1);
-    assert(!esb_ota_relay_is_active() && !esb_ota_relay_is_target(1));
-    assert(esb_ota_relay_abort_pending(0) && abort_clears == 1);
-    assert(radio_begins == 2 && radio_ends == 1 && !radio_owned);
-    assert(radio_claims == 2 && radio_releases == 2);
-    assert(loss_invalidations == 1 && !ack(1, 0).has);
+    assert(esb_ota_relay_is_active() && esb_ota_relay_is_target(1));
+    assert(esb_ota_relay_abort_pending(0) && abort_clears == 2);
+    assert(radio_begins == 1 && radio_ends == 1 && !radio_owned);
+    assert(radio_claims == 1 && radio_releases == 1 && loss_invalidations == 1);
     expect_ack(ack(0, 0), abort_at_100, sizeof(abort_at_100));
-    now_ticks = 10100;
-    begin(1, begin_a);
-    assert(esb_ota_relay_is_target(1) && !esb_ota_relay_abort_pending(0));
-    assert(radio_begins == 3 && radio_ends == 2 && !radio_owned);
-    assert(radio_claims == 3 && radio_releases == 3);
     expect_ack(ack(1, 0), begin_ack_a_one, 64);
 
     for (unsigned at = 1; at <= 2; at++) {
@@ -805,16 +878,66 @@ static void test_reservation(void)
         assert(!spin_entry_irq && esb_ota_relay_abort_pending(0));
         assert(!esb_ota_relay_is_target(0) && !radio_owned);
         expect_ack(ack(0, 0), abort_at_100, sizeof(abort_at_100));
-        if (at == 1) {
-            assert(!esb_ota_relay_is_active() && !esb_ota_relay_is_target(1));
-            assert(radio_begins == 2 && radio_ends == 1 && abort_clears == 1);
-            assert(!ack(1, 0).has);
-        } else {
-            assert(esb_ota_relay_is_target(1));
-            assert(radio_begins == 1 && radio_ends == 1 && abort_clears == 2);
-            expect_ack(ack(1, 0), begin_ack_a_one, 64);
-        }
+        assert(esb_ota_relay_is_target(1));
+        assert(radio_begins == 1 && radio_ends == 1 && abort_clears == 2);
+        expect_ack(ack(1, 0), begin_ack_a_one, 64);
     }
+}
+
+static void test_begin_duplicate_and_late(void)
+{
+    reset_world();
+    begin(0, begin_a);
+    expect_ack(ack(0, 0), begin_ack_a, 64);
+    relayed_ids = 1;
+    now_ticks = 150;
+    begin(0, begin_a);
+    assert(report_count == 0 && abort_clears == 1);
+    assert(ota_relay.tracker[0].pending_cmd_set_ticks == 100);
+    assert(ota_relay.tracker[0].pending_cmd_send_count == 1);
+    expect_ack(ack(0, 0), begin_ack_a, 64);
+
+    status(0, OTA_STATUS_READY, 0, 0);
+    data(0, 0xa1, 0xb2, 0xc3);
+    status(0, OTA_STATUS_RECEIVING, 1, 3);
+    assert(!ack(0, 1).has);
+    simple(HID_OTA_VERIFY, 0);
+    begin(0, begin_a);
+    assert(report_count == 2 && ota_relay.tracker[0].next_seq == 1);
+    expect_ack(ack(0, 1), verify_ack, 4);
+    begin(1, begin_a);
+    expect_begin_status(2, 1, OTA_STATUS_IDLE, OTA_BEGIN_DETAIL_BUSY);
+    assert(!esb_ota_relay_is_target(1));
+
+    reset_world();
+    begin(0, begin_a);
+    expect_ack(ack(0, 0), begin_ack_a, 64); /* ACK could have reached the tracker. */
+    now_ticks = 3100;
+    begin(1, begin_a);
+    now_ticks = 15100;
+    run_begin_expiry();
+    expect_begin_status(0, 0, OTA_STATUS_ERROR, 0);
+    assert(!esb_ota_relay_is_target(0) && esb_ota_relay_is_target(1));
+    /* A late BEGIN retry for an expired target must not re-admit it into the same batch. */
+    begin(0, begin_a);
+    assert(!esb_ota_relay_is_target(0) && esb_ota_relay_is_target(1) && !ack(0, 0).has);
+    expect_begin_status(1, 0, OTA_STATUS_ERROR, 0);
+    status(0, OTA_STATUS_READY, 0, 0);
+    assert(report_count == 2 && !ack(0, 0).has);
+    size_t command_before = command_count;
+    simple(HID_OTA_ABORT, 0);
+    assert(command_count == command_before && !esb_ota_relay_abort_pending(0));
+    now_ticks = 18100;
+    run_begin_expiry();
+    assert(!esb_ota_relay_is_active());
+    expect_begin_status(2, 1, OTA_STATUS_ERROR, 0);
+    for (size_t i = 0; i < command_count; i++) {
+        assert(commands[i].flag != ESB_PONG_FLAG_OTA_ABORT);
+    }
+    /* Once the batch ends, a new session can admit tracker 0 again. */
+    begin(0, begin_a);
+    assert(esb_ota_relay_is_target(0));
+    expect_ack(ack(0, 0), begin_ack_a, 64);
 }
 
 static void test_cancellation(void)
@@ -831,7 +954,7 @@ static void test_cancellation(void)
 
     reset_world();
     now_ticks = 0xfffffff0u;
-    simple(0xf7, 2);
+    esb_ota_relay_console_cmd(2, "abort");
     now_ticks = 9983;
     assert(esb_ota_relay_abort_pending(2));
     now_ticks = 9984;
@@ -948,6 +1071,80 @@ static void test_forwarding_and_external_calls(void)
     irq_unlock(key);
 }
 
+static void run_fw_info_work(void)
+{
+    assert(submitted_work);
+    struct k_work *work = submitted_work;
+    submitted_work = NULL;
+    work->handler(work);
+}
+
+static void receive_fw_info(uint8_t id, uint8_t tag)
+{
+    uint8_t packet[66] = {0x22, id};
+    for (unsigned i = 2; i < sizeof(packet); i++) packet[i] = tag + i;
+    esb_ota_relay_process_tracker_packet(packet, sizeof(packet));
+}
+
+static void expect_fw_info(unsigned first, uint8_t id, uint8_t tag, unsigned chunks)
+{
+    assert(report_count >= first + chunks);
+    for (unsigned i = 0; i < chunks; i++) {
+        uint8_t expected[16] = {0xf1, id, (uint8_t)i};
+        for (unsigned j = 0; j < 13 && 2 + 13 * i + j < 66; j++) {
+            expected[3 + j] = tag + 2 + 13 * i + j;
+        }
+        assert(memcmp(reports[first + i], expected, sizeof(expected)) == 0);
+    }
+}
+
+static unsigned fw_info_interleave_at;
+static uint8_t fw_info_forget_id;
+static void receive_fw_b(void) { receive_fw_info(1, 80); }
+static void receive_fw_c(void) { receive_fw_info(2, 160); }
+
+static void interleave_fw_info(void)
+{
+    if (sleeps != fw_info_interleave_at) return;
+    sleep_hook = NULL;
+    request_interrupt(receive_fw_b);
+    request_interrupt(receive_fw_c);
+    if (fw_info_forget_id < MAX_TRACKERS) esb_ota_forget_tracker(fw_info_forget_id);
+}
+
+static void test_fw_info_mailbox(void)
+{
+    for (unsigned at = 1; at <= 6; at++) {
+        reset_world();
+        receive_fw_info(0, 0);
+        fw_info_interleave_at = at;
+        fw_info_forget_id = MAX_TRACKERS;
+        sleep_hook = interleave_fw_info;
+        run_fw_info_work();
+        assert(report_count == 6 && work_submits == 2 && delivered_irqs == 2);
+        expect_fw_info(0, 0, 0, 6);
+        run_fw_info_work();
+        assert(report_count == 12 && !submitted_work);
+        expect_fw_info(6, 1, 80, 6);
+    }
+
+    for (uint8_t forgotten = 0; forgotten < 2; forgotten++) {
+        reset_world();
+        receive_fw_info(0, 0);
+        fw_info_interleave_at = 2;
+        fw_info_forget_id = forgotten;
+        sleep_hook = interleave_fw_info;
+        run_fw_info_work();
+        unsigned a_chunks = forgotten == 0 ? 2 : 6;
+        assert(report_count == a_chunks);
+        expect_fw_info(0, 0, 0, a_chunks);
+        run_fw_info_work();
+        assert(report_count == (forgotten == 0 ? 8 : 6) && !submitted_work);
+        if (forgotten == 0) expect_fw_info(2, 1, 80, 6);
+    }
+}
+#endif
+
 #if EXPECT_UNSAFE
 static void test_expected_unsafe(void)
 {
@@ -982,8 +1179,10 @@ int main(void)
     test_timeout_and_deferral();
     test_ring();
     test_reservation();
+    test_begin_duplicate_and_late();
     test_cancellation();
     test_forwarding_and_external_calls();
+    test_fw_info_mailbox();
     assert(!irq_mask && !spin_depth && !pending_irq && !radio_owned);
     puts("OTA relay production replay passed");
 #endif

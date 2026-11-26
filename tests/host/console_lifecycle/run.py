@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Compile unchanged production console input/lifecycle bodies against host leaves."""
 
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import os
 from pathlib import Path
 import shlex
@@ -9,7 +14,7 @@ import tempfile
 
 HERE = Path(__file__).resolve().parent
 SRC = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2])) / "src"
-source = (SRC / "console.c").read_text()
+source = select_relay((SRC / "console.c").read_text())
 declarations = source[source.index("#define CONSOLE_LINE_QUEUE_DEPTH"):source.index("#define DFU_EXISTS")]
 functions = source[source.index("static bool console_echo_has_data_locked(void)"):source.index("static void console_thread(void)\n{")]
 

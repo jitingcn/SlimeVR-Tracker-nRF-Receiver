@@ -67,6 +67,10 @@
 #define HID_OTA_ACTIVATE        0xF6
 #define HID_OTA_ABORT           0xF7
 
+/* STATUS byte 11: optional receiver-side BEGIN detail (zero for tracker status). */
+#define OTA_BEGIN_DETAIL_DIRECT_REQUIRED  1
+#define OTA_BEGIN_DETAIL_BUSY             2
+
 /*
  * Seq-indexed ring buffer for OTA data packets (HID → ESB ACK).
  * Must be power of 2. Indexed by seq number: ring[seq & MASK].

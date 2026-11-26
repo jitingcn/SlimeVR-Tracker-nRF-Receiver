@@ -7,6 +7,11 @@ ignored. Without @ directives packet lines advance the clock 100ms; after the
 first @ directive the input owns the clock until the next directive.
 An exclamation-mark line starts a new subscription and requests fresh snapshots.
 """
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import argparse
 from collections import defaultdict, deque
 import importlib.util
@@ -22,6 +27,7 @@ import types
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness'))
 from c_extract import extract_block
+from relay_support import relay_declarations, relay_helpers
 
 def function(text, name):
     return extract_block(text, r'^[\w \t*]+\b' + re.escape(name) +
@@ -32,7 +38,12 @@ CASES = ('golden', 'decoder', 'timeout', 'storage', 'nonce', 'sequence',
          'rest-long-sequence', 'rest-delivery-retry', 'json-rest', 'composite',
          'power-timeout', 'power-cancel', 'power-reanchor', 'power-expiry',
          'power-activity', 'power-new-operation', 'power-boot', 'power-clear',
-         'power-reset', 'json-power', 'power-long-sequence', 'power-long-reanchor')
+         'power-reset', 'json-power', 'power-long-sequence', 'power-long-reanchor',
+         'relay-power-basic', 'relay-power-ordering', 'relay-power-activity',
+         'relay-power-identity', 'relay-power-expiry', 'relay-power-wrap',
+         'relay-power-ingress-time', 'relay-power-reanchor', 'relay-power-validation', 'relay-policy-wom',
+         'relay-policy-outage', 'relay-policy-partial', 'relay-policy-cancel',
+         'relay-policy-query', 'relay-policy-repair')
 
 KERNEL = r'''
 #ifndef HOST_KERNEL_H
@@ -45,6 +56,9 @@ KERNEL = r'''
 extern uint32_t host_now;
 static inline uint32_t k_uptime_get_32(void) { return host_now; }
 static inline int64_t k_uptime_get(void) { return host_now; }
+static inline int64_t k_uptime_ticks(void) { return (int64_t)host_now * 32768 / 1000; }
+static inline uint32_t k_ms_to_ticks_ceil32(uint32_t ms) { return (uint32_t)(((uint64_t)ms * 32768 + 999) / 1000); }
+static inline uint32_t k_ticks_to_ms_ceil32(uint32_t ticks) { return (uint32_t)(((uint64_t)ticks * 1000 + 32767) / 32768); }
 struct k_spinlock { int unused; };
 typedef unsigned int k_spinlock_key_t;
 static inline k_spinlock_key_t k_spin_lock(struct k_spinlock *s) { (void)s; return 0; }
@@ -170,7 +184,8 @@ def main():
         (path/'zephyr/kernel.h').write_text(KERNEL)
         (path/'zephyr/logging/log.h').write_text(LOGGING)
         (path/'zephyr/sys/util.h').write_text('#include <zephyr/kernel.h>\n')
-        esb = (root/'src/connection/esb.c').read_text()
+        esb_source = (root/'src/connection/esb.c').read_text()
+        esb = select_relay(esb_source)
         extract_spec = importlib.util.spec_from_file_location(
             'tdma_loss_extract', Path(__file__).resolve().parent.parent / 'tdma_loss/run.py')
         extract = importlib.util.module_from_spec(extract_spec)
@@ -178,30 +193,56 @@ def main():
         layout_constants = '\n'.join(re.findall(
             r'^#define TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|'
             r'RECONFIG_MIN_MS|LOSS_RECONFIG_MIN_MS|CAP_LEVEL_MAX)\b[^\n]*', esb, re.M))
+        header = (root/'src/connection/esb.h').read_text()
+        layout_constants += '\n' + re.search(r'^#define ESB_PONG_FLAG_WOM_CONTROL\b[^\n]*', header, re.M).group()
         layout_names = '''tdma_cap_ladder tdma_config_epoch tdma_dynamic_active_count
             tdma_dynamic_slot_ticks tdma_active_mask tdma_cap_level tdma_published_cap_level
             tdma_loss_trigger_streak_ticks tdma_loss_recover_streak_ticks
             tdma_loss_probe_streak_ticks tdma_loss_pool_received tdma_loss_pool_gaps
             tdma_loss_pool_ticks'''.split()
-        declarations = '\n'.join([
-            layout_constants,
-            extract_block(esb, r'^struct packet_stats\s*\{', True),
-            extract_block(esb, r'^struct tracker_slot\s*\{', True),
-            'static struct tracker_slot tracker_slots[MAX_TRACKERS];',
-            extract.membership_declarations(esb),
-        ] + [extract.declaration(esb, name) for name in layout_names])
-        declarations += '\n' + extract.diagnostic_loss_declarations(esb)
+        def layout_declarations(esb, relay):
+            declarations = '\n'.join([
+                layout_constants,
+                extract_block(esb, r'^struct packet_stats\s*\{', True),
+                extract_block(esb, r'^struct tracker_slot\s*\{', True),
+                'static struct tracker_slot tracker_slots[MAX_TRACKERS];',
+                extract.membership_declarations(esb, relay),
+            ] + [extract.declaration(esb, name) for name in layout_names])
+            declarations += '\n' + extract.diagnostic_loss_declarations(esb)
+            return declarations
+
+        native = select_relay(esb_source, enabled=False)
+        declarations = ('#if defined(CONFIG_RELAY)\n' + layout_declarations(esb, True) +
+                        '\n' + relay_declarations(esb, member_diagnostics=False) +
+                        '\n#else\n' + layout_declarations(native, False) + '\n#endif\n')
         (path/'esb_membership_declarations.inc').write_text(declarations)
         membership = '\n'.join(function(esb, name) for name in (
-            'tdma_loss_reset_windows', 'tdma_pack_config', 'tdma_shadow_observe',
-            'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked',
-            'tdma_slot_ticks_for', 'tdma_recalculate'))
+            'tdma_loss_reset_windows', 'tdma_pack_config', 'relay_layout_stageable', 'relay_roster_eligible',
+            'relay_query_can_resume', 'relay_query_update_locked', 'tdma_shadow_observe',
+            'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked',
+            'tdma_slot_ticks_for', 'tdma_staged_pong_mask', 'tdma_defer_wom_locked',
+            'tdma_staging_supported_locked', 'tdma_apply_locked',
+            'tdma_apply_finish', 'relay_auto_ladder_paused', 'esb_loss_operations_idle',
+            'relay_force_entry_allowed', 'tdma_recalculate'))
+        membership += ('\n#if defined(CONFIG_RELAY)\n' +
+                       function(esb, 'relay_auto_policy_update') +
+                       function(esb, 'relay_query_begin') + '\n#endif\n')
         lengths = function(esb, 'composite_body_length')
-        forward = extract.function(esb, 'esb_forward_tracker_packet', optional=True)
-        composite = function(esb, 'esb_receive_composite')
-        clear = function(esb, 'esb_clear')
+        composite = extract_block(esb, r'^struct composite_result\s*\{', True) + '\n' + '\n'.join(function(esb, n) for n in ('composite_validate', 'esb_execute_composite', 'esb_receive_composite'))
+        native_membership = '\n'.join(function(native, name) for name in (
+            'tdma_loss_reset_windows', 'tdma_pack_config', 'tdma_shadow_observe',
+            'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_slot_ticks_for',
+            'tdma_recalculate'))
+        membership = '#if defined(CONFIG_RELAY)\n' + membership + '\n#else\n' + native_membership + '\n#endif\n'
+        composite = ('#if defined(CONFIG_RELAY)\n' + composite + '\n#else\n' +
+                     function(native, 'esb_forward_tracker_packet') +
+                     function(native, 'esb_receive_composite') + '\n#endif\n')
+        clear = function(esb_source, 'esb_clear')
+        if 'tdma_revoke_pairings(' in clear:
+            clear = ('#if defined(CONFIG_RELAY)\n' +
+                     function(esb, 'tdma_revoke_pairings') + '\n#endif\n' + clear)
         (path/'esb_event_paths.inc').write_text(
-            membership + '\n' + lengths + '\n' + forward + '''
+            membership + '\n#if defined(CONFIG_RELAY)\n' + relay_helpers(esb) + '\n#endif\n' + lengths + '''
 static void tracked_tdma_shadow_observe(uint8_t tracker, enum tdma_shadow_evidence kind) {
     assert(tracker==2 && kind==TDMA_SHADOW_EVIDENCE_DATA);
     evidence_calls++;
@@ -210,15 +251,16 @@ static void tracked_tdma_shadow_observe(uint8_t tracker, enum tdma_shadow_eviden
 #define tdma_shadow_observe tracked_tdma_shadow_observe
 ''' + composite + '\n#undef tdma_shadow_observe\n' + clear)
         binary = path/'test'
+        off_binary = path/'test-relay-off'
         command = shlex.split(os.environ.get('CC','cc')) + [
             '-std=c11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
-            '-Wno-unused-parameter','-I'+str(path),'-I'+str(root/'src'),
+            '-Wno-unused-parameter','-Wno-unused-variable','-I'+str(path),'-I'+str(root/'src'),'-I'+str(root/'src/connection'),
             str(root/'src/tracker_events.c'), str(Path(__file__).with_name('fixture.c')),
-            '-o',str(binary),
         ]
         if args.diagnostics == 'on':
             command.append('-DCONFIG_TDMA_DIAGNOSTICS=1')
-        subprocess.run(command,check=True)
+        subprocess.run(command+['-DCONFIG_RELAY=1','-o',str(binary)],check=True)
+        subprocess.run(command+['-o',str(off_binary)],check=True)
         if args.wire_input is not None:
             completed = subprocess.run([str(binary),'replay'],input=args.wire_input.read_text(),
                                        text=True,capture_output=True,check=True)
@@ -239,6 +281,12 @@ static void tracked_tdma_shadow_observe(uint8_t tracker, enum tdma_shadow_eviden
             if completed.returncode:
                 sys.stderr.write(completed.stderr)
                 raise subprocess.CalledProcessError(completed.returncode, [str(binary),case])
+            if not case.startswith('relay-'):
+                off = subprocess.run([str(off_binary),case],text=True,capture_output=True)
+                if off.returncode:
+                    sys.stderr.write(off.stderr)
+                    raise subprocess.CalledProcessError(off.returncode, [str(off_binary),case])
+                assert off.stdout == completed.stdout, f'relay-off changed event output: {case}'
             if case=='golden':
                 parser_cases(client,bytes.fromhex(completed.stdout.strip()))
             if case=='json-rest':
