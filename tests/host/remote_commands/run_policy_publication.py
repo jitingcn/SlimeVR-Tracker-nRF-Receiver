@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Exercise test-all layout publication against a pending targeted command."""
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
+
 import importlib.util
 import os
 from pathlib import Path
@@ -13,7 +18,7 @@ ROOT = HERE.parents[2]
 spec = importlib.util.spec_from_file_location("extract", HERE.parent / "tdma_loss/run.py")
 extract = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(extract)
-source = (ROOT / "src/connection/esb.c").read_text()
+source = select_relay((ROOT / "src/connection/esb.c").read_text())
 header = (ROOT / "src/connection/esb.h").read_text()
 
 
@@ -47,6 +52,7 @@ constants = "\n".join(define(source, name) for name in (
 ))
 constants += "\n" + "\n".join(define(header, name) for name in (
     "ESB_PONG_FLAG_TEST_MODE_ON", "ESB_PONG_FLAG_TEST_MODE_OFF",
+    "ESB_PONG_FLAG_OTA_QUERY_INFO", "ESB_REMOTE_CMD_TOKEN_MAX",
 ))
 structures = (extract.block(source, source.index("struct packet_stats {")) + ";\n" +
               extract.block(source, source.index("struct tracker_slot {")) + ";\n")
@@ -57,6 +63,9 @@ prelude = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "relay_protocol.h"
+static uint8_t relay_profile;
+static struct relay_geometry relay_receiver_geometry;
 #define MAX_TRACKERS 4
 #define BIT(n) (1U << (n))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -94,9 +103,10 @@ static void host_log(const char *format, ...) {
         va_list args;
         va_start(args, format);
         assert(va_arg(args, int) == 500);
-        assert(va_arg(args, int) == 250);
+        int effective = relay_profile ? relay_receiver_geometry.tps : 250;
+        assert(va_arg(args, int) == effective);
         assert(va_arg(args, int) == 2);
-        assert(va_arg(args, int) == 250);
+        assert(va_arg(args, int) == effective);
         va_end(args);
         ++reclamp_logs;
     }
@@ -113,6 +123,7 @@ static uint8_t tdma_dynamic_slot_ticks;
 static uint32_t tdma_active_mask;
 '''
 helpers = "\n".join(extract.function(source, name) for name in (
+    "relay_test_capacity_tps",
     "esb_remote_cmd_publish_token", "test_all_capacity_tps", "test_all_requested_value", "test_all_wire_tps",
     "test_all_invalidate", "esb_send_remote_command_test_on_tx",
     "esb_send_remote_command_test_on",
@@ -138,6 +149,7 @@ static void reset(void) {
     test_all_requested_tps = test_all_effective_tps = 500;
     test_all_remote_cmd_token = 0;
     tdma_dynamic_slot_ticks = 64;
+
     tdma_active_mask = BIT(0) | BIT(1);
     irq_depth = attempts = deferred = deliveries = reclamp_logs = 0;
     target_armed = true;
@@ -177,6 +189,21 @@ int main(void) {
     test_all_update_effective(2, 1000, true);
     assert(!irq_depth && !attempts && !reclamp_logs);
     puts("PASS test-all layout publication excludes targeted command preemption");
+    tdma_dynamic_slot_ticks = 16;
+    assert(test_all_capacity_tps(11) == 180);
+    /* Same roster, applied private layout: native arithmetic must not set
+     * the wire rate. Returning to native reclamps the original request. */
+    reset();
+    target_armed = false;
+    relay_profile = RELAY_PROFILE_120HZ;
+    relay_receiver_geometry.tps = 120;
+    test_all_update_effective(2, 1100, true);
+    assert(test_all_effective_tps == 120 && tracker_slots[1].tracker_test_on_tps == 120);
+    assert(!test_all_confirmed_mask && test_all_ready_after_ms[1] == 2600);
+    relay_profile = 0;
+    test_all_update_effective(2, 2100, true);
+    assert(test_all_effective_tps == 250 && tracker_slots[1].tracker_test_on_tps == 250);
+    puts("PASS test-all direct-slot capacity is 180 TPS");
     return 0;
 }
 '''
@@ -188,6 +215,6 @@ with tempfile.TemporaryDirectory(prefix="receiver-policy-publication-") as direc
     subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-g", "-O1",
         "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
-        str(generated), "-o", str(binary),
+        "-I", str(ROOT / "src/connection"), str(generated), "-o", str(binary),
     ], check=True)
     subprocess.run([str(binary)], check=True)

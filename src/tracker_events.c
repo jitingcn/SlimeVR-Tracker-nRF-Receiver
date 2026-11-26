@@ -21,10 +21,18 @@ struct event_cache {
 };
 struct power_intent {
 	uint32_t received_at, order, watermark_order;
-	uint16_t sequence;
 	uint8_t phase;
 	bool ordered;
 };
+#if defined(CONFIG_RELAY)
+/* Relay suppression outlives calibration's silence-context window, but is
+ * still an intent, not an observation that the tracker entered system off. */
+struct relay_power_intent {
+	uint32_t received_at, order, activity_order;
+	uint8_t phase;
+	bool active, activity_ordered;
+};
+#endif
 struct tracker_cache {
 	uint32_t pairing_generation, nonce, retired_nonce, retired_at, high_at, order;
 	uint16_t high;
@@ -32,6 +40,9 @@ struct tracker_cache {
 	bool initialized;
 	struct event_cache operations[OP_COUNT], rest[2];
 	struct power_intent power;
+#if defined(CONFIG_RELAY)
+	struct relay_power_intent relay_power;
+#endif
 };
 struct rx_event {
 	struct tracker_event event;
@@ -57,6 +68,32 @@ static uint32_t next_generation(uint32_t value)
 {
 	return ++value ? value : 1;
 }
+
+#if defined(CONFIG_RELAY)
+uint32_t tracker_events_power_down_mask(uint32_t now_ms, uint32_t membership_tail_ms)
+{
+	/* Keep modular age comparisons unambiguous even for a bad caller budget. */
+	uint32_t max_tail = (uint32_t)INT32_MAX - TRACKER_EVENT_WOM_ADVANCE_MS;
+	uint32_t duration = (membership_tail_ms < max_tail ? membership_tail_ms : max_tail)
+		+ TRACKER_EVENT_WOM_ADVANCE_MS;
+	uint32_t mask = 0;
+	k_spinlock_key_t key = k_spin_lock(&event_lock);
+	for (unsigned t = 0; t < TRACKER_EVENT_MAX_TRACKERS; ++t) {
+		struct tracker_cache *tracker = &trackers[t];
+		struct relay_power_intent *power = &tracker->relay_power;
+		if (tracker->pairing_generation != pairing_generations[t] || !power->active) continue;
+		int32_t age = (int32_t)(now_ms - power->received_at);
+		/* A receipt can race a caller's immediately preceding clock sample. */
+		if (age >= 0 && (uint32_t)age >= duration) {
+			power->active = false;
+		} else {
+			mask |= BIT(t);
+		}
+	}
+	k_spin_unlock(&event_lock, key);
+	return mask;
+}
+#endif
 
 static bool lease_active(uint32_t now)
 {
@@ -202,11 +239,18 @@ static bool newer(uint16_t a, uint16_t b)
 static bool unseen(struct tracker_cache *tracker, uint16_t seq, uint32_t now)
 {
 	if (!tracker->initialized || (uint32_t)(now - tracker->high_at) >= TRACKER_EVENT_TTL_MS) {
+		/* Preserve expanded order distances, even when more than a wire
+		 * half-range of other events followed an intent or operation. */
+		uint32_t rebase = 65536U;
+		if (tracker->initialized) rebase -= (int16_t)(seq - tracker->high);
 		tracker->order += 65536U;
 		/* Rebase, rather than discard, the power watermark. A delayed notice
 		 * older than a cancellation remains older in the new coordinate. */
-		if (tracker->power.ordered)
-			tracker->power.watermark_order = tracker->order + (int16_t)(tracker->power.sequence - seq);
+		if (tracker->power.ordered) tracker->power.watermark_order += rebase;
+#if defined(CONFIG_RELAY)
+		if (tracker->relay_power.phase) tracker->relay_power.order += rebase;
+		if (tracker->relay_power.activity_ordered) tracker->relay_power.activity_order += rebase;
+#endif
 		tracker->initialized = true;
 		tracker->high = seq;
 		tracker->seen = 1;
@@ -264,6 +308,73 @@ static struct delivery observation(const struct event_cache *cache, uint8_t reas
 	return out;
 }
 
+#if defined(CONFIG_RELAY)
+static void relay_power_notice(struct tracker_cache *tracker, const struct tracker_event *event,
+			       uint32_t order, uint32_t now)
+{
+	struct relay_power_intent *power = &tracker->relay_power;
+	switch (event->phase) {
+	case POWER_WILL_WOM:
+	case POWER_WILL_SHUTDOWN:
+	case POWER_WILL_REBOOT:
+		/* A late notice cannot supersede a later operation that already
+		 * demonstrated that the tracker was running. */
+		if (power->activity_ordered && (int32_t)(order - power->activity_order) <= 0) return;
+		if (power->phase != event->phase) {
+			power->received_at = now;
+			power->order = order;
+			power->phase = event->phase;
+			power->active = true;
+		}
+		break;
+	case POWER_WOM_CANCELLED:
+		if (power->phase == POWER_WILL_WOM) {
+			power->phase = 0;
+			power->active = false;
+		}
+		break;
+	case POWER_BOOT:
+	case POWER_WAKE:
+	case POWER_WATCHDOG_RESET:
+		power->phase = 0;
+		power->active = false;
+		break;
+	}
+}
+
+static void relay_power_activity(struct tracker_cache *tracker, const struct tracker_event *event,
+				 uint32_t order, uint32_t now)
+{
+	struct relay_power_intent *power = &tracker->relay_power;
+	bool calibration = tracker_event_is_calibration(event->kind);
+	bool operation_start = calibration && (event->event == CAL_EVENT_ACCEPTED || event->event == CAL_EVENT_BEGIN);
+	bool operational = calibration || event->kind == TRACKER_EVENT_KIND_BUTTON
+		|| (event->kind == TRACKER_EVENT_KIND_TRACKER_REST
+		    && event->phase < TRACKER_REST_UNKNOWN && event->detail == TRACKER_REST_OBSERVED)
+		|| (event->kind == TRACKER_EVENT_KIND_FUSION_REST && event->phase < FUSION_REST_UNKNOWN);
+	if (!operational) return;
+	bool past_entry = power->phase
+		&& (int32_t)(now - power->received_at) > (int32_t)POWER_INTENT_ACTIVITY_MS;
+	if (past_entry) {
+		/* Even an old-sequence heartbeat was sent now; it fences all power
+		 * records through the highest sequence already received. */
+		order = tracker->order;
+		if (!power->activity_ordered || (int32_t)(order - power->activity_order) > 0) {
+			power->activity_order = order;
+			power->activity_ordered = true;
+		}
+	} else if (operation_start
+		   && (!power->activity_ordered || (int32_t)(order - power->activity_order) > 0)) {
+		power->activity_order = order;
+		power->activity_ordered = true;
+	}
+	if (power->phase && (past_entry || (operation_start && (int32_t)(order - power->order) > 0))) {
+		power->phase = 0;
+		power->active = false;
+	}
+}
+#endif
+
 static void power_notice(struct tracker_cache *tracker, const struct tracker_event *event,
 			 uint32_t order, uint32_t now)
 {
@@ -272,8 +383,10 @@ static void power_notice(struct tracker_cache *tracker, const struct tracker_eve
 	 * unseen() preserves this watermark across its quiet-interval reanchor. */
 	if (power->ordered && (int32_t)(order - power->watermark_order) <= 0) return;
 	power->ordered = true;
-	power->sequence = event->event_seq;
 	power->watermark_order = order;
+#if defined(CONFIG_RELAY)
+	relay_power_notice(tracker, event, order, now);
+#endif
 	if (power->phase && (uint32_t)(now - power->received_at) >= POWER_INTENT_RELEVANCE_MS)
 		power->phase = 0;
 	switch (event->phase) {
@@ -414,6 +527,9 @@ static void process_rx(const struct rx_event *rx)
 		memset(tracker->operations, 0, sizeof(tracker->operations));
 		memset(tracker->rest, 0, sizeof(tracker->rest));
 		memset(&tracker->power, 0, sizeof(tracker->power));
+#if defined(CONFIG_RELAY)
+		memset(&tracker->relay_power, 0, sizeof(tracker->relay_power));
+#endif
 	}
 	bool state = e->event == CAL_EVENT_STATE;
 	bool storage = tracker_event_is_calibration(e->kind) && e->event == CAL_EVENT_STEP && e->phase == CAL_PHASE_STORAGE;
@@ -422,6 +538,9 @@ static void process_rx(const struct rx_event *rx)
 	if (cache && cache->used && same_event(&cache->event, e)) {
 		if (tracker_event_is_calibration(e->kind))
 			power_operation_evidence(tracker, e, cache->order, rx->received_at);
+#if defined(CONFIG_RELAY)
+		relay_power_activity(tracker, e, cache->order, rx->received_at);
+#endif
 		cache->last_rx = rx->received_at;
 		if (cache->stale) {
 			cache->stale = false;
@@ -439,6 +558,9 @@ static void process_rx(const struct rx_event *rx)
 	if (state && cache->used && (int32_t)(order - cache->order) <= 0) goto done;
 	output[count++] = (struct delivery){.event = *e, .opcode = RCV_HID_OP_TRACKER_EVENT,
 		.generation = rx->subscription_generation, .received_at = rx->received_at};
+#if defined(CONFIG_RELAY)
+	if (e->kind != TRACKER_EVENT_KIND_POWER) relay_power_activity(tracker, e, order, rx->received_at);
+#endif
 	if (e->kind == TRACKER_EVENT_KIND_POWER) power_notice(tracker, e, order, rx->received_at);
 	if (state || (tracker_event_is_calibration(e->kind) && !storage)) {
 		bool replacing = cache == NULL;

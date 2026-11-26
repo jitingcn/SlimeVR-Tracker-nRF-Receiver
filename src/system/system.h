@@ -16,6 +16,7 @@
 
 #define RF_CHANNEL 259  // NVS key for receiver RF channel
 #define TRACKER_ROSTER 260 // Versioned, atomic tracker roster
+#define RELAY_LAYOUT_SETTINGS 261 // Versioned runtime relay settings
 
 int sys_write_checked(uint16_t id, const void *data, size_t len);
 void sys_read(uint16_t id, void* data, size_t len);
@@ -30,6 +31,7 @@ void sys_request_system_reboot(void);
 void sys_enter_dfu(bool ota);
 /* Mark next reboot to skip DFU only when no bootloader request is pending. */
 void sys_skip_dfu_marker(void);
+
 struct sys_fatal_record {
 	uint32_t magic, reason, pc, lr, thread, reset_reason, check;
 };

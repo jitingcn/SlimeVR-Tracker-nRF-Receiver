@@ -47,6 +47,7 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/logging/log.h>
+#include <errno.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(esb_ota_relay, LOG_LEVEL_INF);
@@ -86,6 +87,7 @@ struct ota_per_tracker {
 };
 
 #define OTA_ABORT_TOMBSTONE_MS 10000
+#define OTA_BEGIN_TIMEOUT_MS 15000
 
 static uint32_t ota_abort_expiry_ticks[MAX_TRACKERS];
 #define OTA_ABORT_TOMBSTONE_TICKS k_ms_to_ticks_floor32(OTA_ABORT_TOMBSTONE_MS)
@@ -99,9 +101,9 @@ static struct {
 	uint8_t num_targets;
 	uint8_t target_ids[OTA_MAX_PARALLEL]; /* List of participating tracker IDs */
 
-	/* Session parameters (set during first BEGIN) */
-	uint32_t image_size;
-	uint16_t total_packets;
+	/* Common BEGIN body (excluding type, target ID and frame CRC8). */
+	uint8_t begin_body[OTA_BEGIN_PACKET_SIZE - 3];
+	uint32_t begin_expired_mask;          /* Targets whose BEGIN expired in this batch */
 
 	/* Shared seq-indexed ring buffer (same data for all targets) */
 	struct ota_tx_entry ring[OTA_TX_RING_SIZE];
@@ -124,18 +126,30 @@ static struct {
 	bool pending;
 } fw_info_pending;
 
+/* Pairing can revoke the ID while a work-local snapshot is being sent. */
+static uint8_t fw_info_sending_id = MAX_TRACKERS;
+
 static void fw_info_send_work_handler(struct k_work *work);
 static K_WORK_DEFINE(fw_info_send_work, fw_info_send_work_handler);
 
+static void begin_expire_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(begin_expire_work, begin_expire_work_handler);
+
 static void fw_info_send_work_handler(struct k_work *work)
 {
+	(void)work;
+	uint8_t data[sizeof(fw_info_pending.data)];
+	unsigned int key = irq_lock();
 	if (!fw_info_pending.pending) {
+		irq_unlock(key);
 		return;
 	}
-
-	uint8_t *data = fw_info_pending.data;
-	uint8_t len = fw_info_pending.len;
+	size_t len = fw_info_pending.len;
 	uint8_t tracker_id = fw_info_pending.tracker_id;
+	memcpy(data, fw_info_pending.data, len);
+	fw_info_sending_id = tracker_id;
+	fw_info_pending.pending = false;
+	irq_unlock(key);
 
 	LOG_INF("OTA: Sending FW_INFO chunks for tracker %u", tracker_id);
 
@@ -145,16 +159,22 @@ static void fw_info_send_work_handler(struct k_work *work)
 		hid_report[1] = tracker_id;
 		hid_report[2] = chunk;
 		size_t offset = 2 + chunk * 13;
-		size_t copy_len = MIN(len - offset, 13);
-		if (offset < len && copy_len > 0) {
-			memcpy(&hid_report[3], &data[offset], copy_len);
+		if (offset < len) {
+			memcpy(&hid_report[3], &data[offset], MIN(len - offset, 13));
+		}
+		key = irq_lock();
+		if (fw_info_sending_id != tracker_id) {
+			irq_unlock(key);
+			return;
+		}
+		if (chunk == 5) {
+			fw_info_sending_id = MAX_TRACKERS;
 		}
 		hid_write_packet_n(hid_report, 0);
+		irq_unlock(key);
 		/* Small delay between chunks to let HID FIFO drain */
 		k_msleep(2);
 	}
-
-	fw_info_pending.pending = false;
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
@@ -264,6 +284,7 @@ static void reset_session_locked(void)
 	ota_relay.active = false;
 	ota_relay.num_targets = 0;
 	ota_relay.ring_head = 0;
+	ota_relay.begin_expired_mask = 0;
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
 		ota_relay.tracker[i].participating = false;
 		ota_relay.tracker[i].status = OTA_STATUS_IDLE;
@@ -293,6 +314,7 @@ static bool remove_target_locked(uint8_t tracker_id)
 	if (new_count == 0) {
 		ota_relay.ring_head = 0;
 		ota_relay.active = false;
+		ota_relay.begin_expired_mask = 0;
 	}
 	return new_count == 0;
 }
@@ -305,12 +327,16 @@ void esb_ota_forget_tracker(uint8_t tracker_id)
 	unsigned int irq_key = irq_lock();
 	k_spinlock_key_t key = k_spin_lock(&ota_relay_lock);
 	bool ended = remove_target_locked(tracker_id);
+	ota_relay.begin_expired_mask &= ~(1U << tracker_id);
 	memset(&ota_relay.tracker[tracker_id], 0, sizeof(ota_relay.tracker[tracker_id]));
 	ota_abort_valid[tracker_id] = false;
 	ota_abort_expiry_ticks[tracker_id] = 0;
 	k_spin_unlock(&ota_relay_lock, key);
 	if (fw_info_pending.pending && fw_info_pending.tracker_id == tracker_id) {
 		fw_info_pending.pending = false;
+	}
+	if (fw_info_sending_id == tracker_id) {
+		fw_info_sending_id = MAX_TRACKERS;
 	}
 	irq_unlock(irq_key);
 	if (ended) {
@@ -338,7 +364,7 @@ static void queue_abort_locked(uint8_t tracker_id, uint32_t now)
 	ota_abort_valid[tracker_id] = true;
 }
 
-static void cancel_target(uint8_t tracker_id)
+static void cancel_target(uint8_t tracker_id, bool require_participant)
 {
 	if (tracker_id >= MAX_TRACKERS) {
 		return;
@@ -346,6 +372,11 @@ static void cancel_target(uint8_t tracker_id)
 	unsigned int irq_key = irq_lock();
 	uint32_t now = k_uptime_ticks();
 	k_spinlock_key_t key = k_spin_lock(&ota_relay_lock);
+	if (require_participant && !ota_relay.tracker[tracker_id].participating) {
+		k_spin_unlock(&ota_relay_lock, key);
+		irq_unlock(irq_key);
+		return;
+	}
 	queue_abort_locked(tracker_id, now);
 	bool ended = remove_target_locked(tracker_id);
 	k_spin_unlock(&ota_relay_lock, key);
@@ -381,7 +412,65 @@ static void cancel_all_targets(void)
 		LOG_INF("OTA: Last target removed, session ended");
 		unsuppress_all_trackers();
 	}
-	unsuppress_all_trackers();
+}
+
+static void report_status(uint8_t tracker_id, uint8_t status, uint16_t next_seq,
+			  uint32_t bytes_written, uint32_t ring_count, uint8_t num_targets,
+			  uint8_t begin_detail)
+{
+	uint8_t report[16] = {HID_OTA_STATUS, tracker_id, status};
+	sys_put_be16(next_seq, &report[3]);
+	sys_put_le32(bytes_written, &report[5]);
+	report[9] = MIN(ring_count, UINT8_MAX);
+	report[10] = num_targets;
+	report[11] = begin_detail;
+	hid_write_packet_n(report, 0);
+}
+
+static void begin_expire_work_handler(struct k_work *work)
+{
+	(void)work;
+	uint8_t expired[OTA_MAX_PARALLEL];
+	uint8_t count = 0;
+	bool ended = false;
+	uint32_t timeout = k_ms_to_ticks_floor32(OTA_BEGIN_TIMEOUT_MS);
+	uint32_t remaining = timeout;
+	unsigned int irq_key = irq_lock();
+	uint32_t now = k_uptime_ticks();
+	k_spinlock_key_t key = k_spin_lock(&ota_relay_lock);
+	for (uint8_t i = 0; i < ota_relay.num_targets;) {
+		uint8_t id = ota_relay.target_ids[i];
+		struct ota_per_tracker *t = &ota_relay.tracker[id];
+		if (t->pending_cmd_type != ESB_OTA_BEGIN_TYPE) {
+			i++;
+			continue;
+		}
+		uint32_t elapsed = now - t->pending_cmd_set_ticks;
+		if (elapsed < timeout) {
+			remaining = MIN(remaining, timeout - elapsed);
+			i++;
+			continue;
+		}
+		t->pending_cmd_type = 0;
+		expired[count++] = id;
+		ota_relay.begin_expired_mask |= 1U << id;
+		ended = remove_target_locked(id);
+	}
+	uint8_t num_targets = ota_relay.num_targets;
+	k_spin_unlock(&ota_relay_lock, key);
+	for (uint8_t i = 0; i < count; i++) {
+		/* Publish before HID can admit the same ID again. The radio may have
+		 * delivered BEGIN even when the return status was lost: no ABORT. */
+		report_status(expired[i], OTA_STATUS_ERROR, 0, 0, 0, num_targets, 0);
+	}
+	irq_unlock(irq_key);
+
+	if (remaining < timeout) {
+		k_work_reschedule(&begin_expire_work, K_TICKS(remaining));
+	}
+	if (ended) {
+		unsuppress_all_trackers();
+	}
 }
 
 static void set_pending_command_locked(struct ota_per_tracker *t, const uint8_t *packet,
@@ -392,6 +481,116 @@ static void set_pending_command_locked(struct ota_per_tracker *t, const uint8_t 
 	t->pending_cmd_set_ticks = now;
 	t->pending_cmd_send_count = 0;
 	t->pending_cmd_type = packet[0];
+}
+
+static void begin_target(const uint8_t *data, size_t len)
+{
+	uint8_t tracker_id = data[1];
+	if (tracker_id >= MAX_TRACKERS || len < 13) {
+		report_status(tracker_id, OTA_STATUS_ERROR, 0, 0, 0, 0, 0);
+		return;
+	}
+
+	uint8_t pkt[OTA_BEGIN_PACKET_SIZE] = {ESB_OTA_BEGIN_TYPE, tracker_id};
+	memcpy(&pkt[2], &data[2], 11);
+	size_t board_len = MIN(len - 13, OTA_BOARD_TARGET_MAX - 1);
+	const uint8_t *board_end = memchr(&data[13], 0, board_len);
+	memcpy(&pkt[13], &data[13], board_end ? (size_t)(board_end - &data[13]) : board_len);
+	if (len >= 63) {
+		pkt[61] = data[61];
+		pkt[62] = data[62];
+	}
+	pkt[63] = crc8_ccitt(0, pkt, 63);
+
+	bool acquired_radio = false;
+	uint8_t status = OTA_STATUS_IDLE;
+	uint8_t detail = 0;
+	for (;;) {
+		unsigned int irq_key = irq_lock();
+#if defined(CONFIG_RELAY)
+		bool blocked = esb_relay_blocks_ota(tracker_id);
+#else
+		bool blocked = false;
+#endif
+		uint32_t now = k_uptime_ticks();
+		k_spinlock_key_t key = k_spin_lock(&ota_relay_lock);
+		struct ota_per_tracker *t = &ota_relay.tracker[tracker_id];
+		bool first = !ota_relay.active;
+		bool same_image = !first && !memcmp(ota_relay.begin_body, &pkt[2],
+						   sizeof(ota_relay.begin_body));
+		bool expired = !first && (ota_relay.begin_expired_mask & (1U << tracker_id));
+		if (t->participating || blocked || expired || (!first &&
+		    (!same_image || ota_relay.ring_head || ota_relay.num_targets >= OTA_MAX_PARALLEL))) {
+			/* A duplicate can arrive after the direct-link verdict changes or
+			 * DATA/VERIFY starts. Leave the admitted target completely alone. */
+			if (t->participating) {
+				if (!same_image) {
+					detail = OTA_BEGIN_DETAIL_BUSY;
+				}
+			} else if (blocked) {
+				status = OTA_STATUS_ERROR;
+				detail = OTA_BEGIN_DETAIL_DIRECT_REQUIRED;
+			} else if (expired && same_image) {
+				status = OTA_STATUS_ERROR;
+			} else {
+				detail = OTA_BEGIN_DETAIL_BUSY;
+			}
+			k_spin_unlock(&ota_relay_lock, key);
+			irq_unlock(irq_key);
+			break;
+		}
+
+		if (first && !acquired_radio) {
+			k_spin_unlock(&ota_relay_lock, key);
+			irq_unlock(irq_key);
+			int err = esb_radio_operation_begin();
+			if (err) {
+				if (err == -EBUSY) {
+					detail = OTA_BEGIN_DETAIL_BUSY;
+				} else {
+					status = OTA_STATUS_ERROR;
+				}
+				break;
+			}
+			acquired_radio = true;
+			continue;
+		}
+
+		if (first) {
+			reset_session_locked();
+			memcpy(ota_relay.begin_body, &pkt[2], sizeof(ota_relay.begin_body));
+		}
+		ota_relay.target_ids[ota_relay.num_targets++] = tracker_id;
+		t->participating = true;
+		t->status = OTA_STATUS_IDLE;
+		t->next_seq = 0;
+		t->last_hid_forward_time = 0;
+		set_pending_command_locked(t, pkt, sizeof(pkt), now);
+		ota_relay.active = true;
+		ota_abort_expiry_ticks[tracker_id] = 0;
+		ota_abort_valid[tracker_id] = false;
+		uint8_t num_targets = ota_relay.num_targets;
+		k_spin_unlock(&ota_relay_lock, key);
+
+		/* Keep tombstone and ordinary abort-command clearing IRQ-atomic. */
+		esb_clear_remote_ota_abort(tracker_id);
+		irq_unlock(irq_key);
+		if (first) {
+			esb_auto_loss_invalidate();
+			suppress_non_ota_trackers();
+		}
+		k_work_schedule(&begin_expire_work, K_MSEC(OTA_BEGIN_TIMEOUT_MS));
+		LOG_INF("OTA: BEGIN for tracker %u [target %u/%u], size=%u, crc=0x%08X, board=%s",
+			tracker_id, num_targets, OTA_MAX_PARALLEL, sys_get_le32(&pkt[2]),
+			sys_get_le32(&pkt[6]), (const char *)&pkt[13]);
+		break;
+	}
+	if (acquired_radio) {
+		esb_radio_operation_end();
+	}
+	if (detail || status != OTA_STATUS_IDLE) {
+		report_status(tracker_id, status, 0, 0, 0, 0, detail);
+	}
 }
 
 /* ── HID OUT Report Processing (Thread Context) ─────────────────── */
@@ -416,120 +615,9 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 		break;
 	}
 
-	case HID_OTA_BEGIN: {
-		uint8_t tracker_id = data[1];
-		if (tracker_id >= MAX_TRACKERS) {
-			LOG_ERR("OTA: Invalid tracker ID %u", tracker_id);
-			break;
-		}
-		k_spinlock_key_t admission_key = k_spin_lock(&ota_relay_lock);
-		bool full = !ota_relay.tracker[tracker_id].participating &&
-			    ota_relay.num_targets >= OTA_MAX_PARALLEL;
-		bool needs_radio = !ota_relay.active;
-		k_spin_unlock(&ota_relay_lock, admission_key);
-		if (full) {
-			LOG_ERR("OTA: Max parallel targets (%d) reached", OTA_MAX_PARALLEL);
-			break;
-		}
-		bool acquired_radio = false;
-		if (needs_radio) {
-			if (esb_radio_operation_begin()) {
-				LOG_WRN("OTA BEGIN deferred: radio operation busy");
-				break;
-			}
-			acquired_radio = true;
-			esb_auto_loss_invalidate();
-		}
-
-		uint32_t image_size = sys_get_le32(&data[2]);
-		uint32_t image_crc32 = sys_get_le32(&data[6]);
-		uint16_t total_packets = sys_get_be16(&data[10]);
-		uint8_t proto_ver = data[12];
-		const char *board_target = (const char *)&data[13];
-
-		uint8_t begin_pkt[OTA_BEGIN_PACKET_SIZE] = {0};
-		begin_pkt[0] = ESB_OTA_BEGIN_TYPE;
-		begin_pkt[1] = tracker_id;
-		sys_put_le32(image_size, &begin_pkt[2]);
-		sys_put_le32(image_crc32, &begin_pkt[6]);
-		sys_put_be16(total_packets, &begin_pkt[10]);
-		begin_pkt[12] = proto_ver;
-		strncpy((char *)&begin_pkt[13], board_target, OTA_BOARD_TARGET_MAX - 1);
-		if (len >= 63) {
-			begin_pkt[61] = data[61];
-			begin_pkt[62] = data[62];
-		}
-		begin_pkt[63] = crc8_ccitt(0, begin_pkt, 63);
-
-		for (;;) {
-			unsigned int irq_key = irq_lock();
-			uint32_t now = k_uptime_ticks();
-			k_spinlock_key_t key = k_spin_lock(&ota_relay_lock);
-			struct ota_per_tracker *t = &ota_relay.tracker[tracker_id];
-			if (!t->participating && ota_relay.num_targets >= OTA_MAX_PARALLEL) {
-				k_spin_unlock(&ota_relay_lock, key);
-				irq_unlock(irq_key);
-				if (acquired_radio) {
-					esb_radio_operation_end();
-				}
-				LOG_ERR("OTA: Max parallel targets (%d) reached", OTA_MAX_PARALLEL);
-				break;
-			}
-			if (!ota_relay.active && !acquired_radio) {
-				k_spin_unlock(&ota_relay_lock, key);
-				irq_unlock(irq_key);
-				if (esb_radio_operation_begin()) {
-					LOG_WRN("OTA BEGIN deferred: radio operation busy");
-					break;
-				}
-				acquired_radio = true;
-				esb_auto_loss_invalidate();
-				continue;
-			}
-
-			bool first = !ota_relay.active;
-			bool already = t->participating;
-			if (first) {
-				reset_session_locked();
-				ota_relay.image_size = image_size;
-				ota_relay.total_packets = total_packets;
-			}
-			uint8_t target_number = ota_relay.num_targets + 1;
-			if (!t->participating) {
-				ota_relay.target_ids[ota_relay.num_targets++] = tracker_id;
-			}
-			t->participating = true;
-			t->status = OTA_STATUS_IDLE;
-			t->next_seq = 0;
-			t->last_hid_forward_time = 0;
-			set_pending_command_locked(t, begin_pkt, sizeof(begin_pkt), now);
-			ota_relay.active = true;
-			ota_abort_expiry_ticks[tracker_id] = 0;
-			ota_abort_valid[tracker_id] = false;
-			uint8_t num_targets = ota_relay.num_targets;
-			k_spin_unlock(&ota_relay_lock, key);
-
-			/* Keep tombstone and ordinary abort-command clearing IRQ-atomic. */
-			esb_clear_remote_ota_abort(tracker_id);
-			irq_unlock(irq_key);
-
-			if (already) {
-				LOG_WRN("OTA: Tracker %u already in session, resetting state", tracker_id);
-			}
-			LOG_INF("OTA: BEGIN for tracker %u [target %u/%u], size=%u, crc=0x%08X, board=%s",
-				tracker_id, target_number, OTA_MAX_PARALLEL,
-				image_size, image_crc32, board_target);
-			if (first) {
-				suppress_non_ota_trackers();
-			}
-			if (acquired_radio) {
-				esb_radio_operation_end();
-			}
-			LOG_INF("OTA: Session active with %u target(s)", num_targets);
-			break;
-		}
+	case HID_OTA_BEGIN:
+		begin_target(data, len);
 		break;
-	}
 
 	case HID_OTA_DATA: {
 		k_spinlock_key_t key = k_spin_lock(&ota_relay_lock);
@@ -618,7 +706,7 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 		if (tracker_id == 0xFF) {
 			cancel_all_targets();
 		} else if (tracker_id < MAX_TRACKERS) {
-			cancel_target(tracker_id);
+			cancel_target(tracker_id, true);
 		}
 		break;
 	}
@@ -672,19 +760,20 @@ void esb_ota_relay_fill_ack(uint8_t tracker_id, uint32_t pipe_id,
 
 	/* Priority 1: pending command (BEGIN, VERIFY, ACTIVATE)
 	 * Commands are retried in every ACK until the tracker confirms
-	 * receipt (status change) or a 10-second timeout expires.
-	 * This prevents silent loss when a single ACK is missed.
+	 * receipt (status change) or the command's timeout expires.
 	 *
 	 * Exception: VERIFY/ACTIVATE must NOT block DATA delivery.
 		 * Older RAM engines only process DATA packets (type 0x20) while
 		 * receiving. If VERIFY replaces required DATA, the tracker stalls.
 	 * Defer VERIFY/ACTIVATE when the ring has data for this tracker. */
 	if (t->pending_cmd_type != 0) {
-		/* Timeout: stop retrying after 10 seconds */
 		uint32_t elapsed = now - t->pending_cmd_set_ticks;
-		if (elapsed > k_ms_to_ticks_floor32(10000)) {
+		if (t->pending_cmd_type == ESB_OTA_BEGIN_TYPE) {
+			if (elapsed >= k_ms_to_ticks_floor32(OTA_BEGIN_TIMEOUT_MS)) {
+				goto out; /* Expiry work removes the unconfirmed target. */
+			}
+		} else if (elapsed > k_ms_to_ticks_floor32(10000)) {
 			t->pending_cmd_type = 0;
-			/* Can't LOG from ISR; timeout is diagnosed by send_count */
 			goto out;
 		}
 
@@ -800,6 +889,11 @@ void esb_ota_relay_process_tracker_packet(const uint8_t *data, size_t len)
 		uint8_t num_targets = 0;
 		k_spinlock_key_t key = k_spin_lock(&ota_relay_lock);
 		struct ota_per_tracker *t = &ota_relay.tracker[tracker_id];
+		if (!t->participating) {
+			k_spin_unlock(&ota_relay_lock, key);
+			irq_unlock(irq_key);
+			break;
+		}
 		uint8_t prev_status = t->status;
 		t->status = status;
 
@@ -846,20 +940,7 @@ void esb_ota_relay_process_tracker_packet(const uint8_t *data, size_t len)
 			LOG_DBG("OTA Status: tracker=%u status=0x%02X seq=%u bytes=%u ring=%u",
 				tracker_id, status, next_seq, bytes_written, rc);
 
-			/* Forward to PC via HID IN report */
-			uint8_t hid_report[16] = {0};
-			hid_report[0] = HID_OTA_STATUS;
-			hid_report[1] = tracker_id;
-			hid_report[2] = status;
-			hid_report[3] = (next_seq >> 8) & 0xFF;
-			hid_report[4] = next_seq & 0xFF;
-			hid_report[5] = (bytes_written) & 0xFF;
-			hid_report[6] = (bytes_written >> 8) & 0xFF;
-			hid_report[7] = (bytes_written >> 16) & 0xFF;
-			hid_report[8] = (bytes_written >> 24) & 0xFF;
-			hid_report[9] = (rc > 255) ? 255 : (uint8_t)rc;
-			hid_report[10] = num_targets;
-			hid_write_packet_n(hid_report, 0);
+			report_status(tracker_id, status, next_seq, bytes_written, rc, num_targets, 0);
 		}
 
 		/* Handle terminal status: remove this tracker from session */
@@ -874,15 +955,24 @@ void esb_ota_relay_process_tracker_packet(const uint8_t *data, size_t len)
 	}
 
 	case ESB_OTA_FW_INFO_TYPE: {
-		LOG_INF("OTA: Received firmware info from tracker %u", tracker_id);
-
-		/* Defer to system work queue so we can sleep between chunks.
-		 * This avoids HID FIFO overflow when called from ESB ISR. */
-		memcpy(fw_info_pending.data, data, MIN(len, 66));
-		fw_info_pending.len = MIN(len, 66);
-		fw_info_pending.tracker_id = tracker_id;
-		fw_info_pending.pending = true;
-		k_work_submit(&fw_info_send_work);
+		if (tracker_id >= MAX_TRACKERS) {
+			break;
+		}
+		/* The worker owns its snapshot; retain one waiting response while
+		 * it drains HID. An additional reply can be recovered by a host retry. */
+		unsigned int key = irq_lock();
+		bool queued = !fw_info_pending.pending;
+		if (queued) {
+			size_t copied = MIN(len, sizeof(fw_info_pending.data));
+			memcpy(fw_info_pending.data, data, copied);
+			fw_info_pending.len = copied;
+			fw_info_pending.tracker_id = tracker_id;
+			fw_info_pending.pending = true;
+		}
+		irq_unlock(key);
+		if (queued) {
+			k_work_submit(&fw_info_send_work);
+		}
 		break;
 	}
 
@@ -907,7 +997,7 @@ void esb_ota_relay_console_cmd(uint8_t tracker_id, const char *cmd)
 			cancel_all_targets();
 		} else if (tracker_id < MAX_TRACKERS) {
 			LOG_WRN("OTA: Sending abort to tracker %u", tracker_id);
-			cancel_target(tracker_id);
+			cancel_target(tracker_id, false);
 		}
 	} else if (strcmp(cmd, "status") == 0) {
 		struct {

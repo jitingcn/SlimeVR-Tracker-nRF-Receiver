@@ -18,6 +18,7 @@ This fork continues development alongside our [tracker firmware](https://github.
 - Python tools for data collection, remote commands, and OTA updates
 - Optional per-tracker radio and clock-sync diagnostics
 - Explicit subscriptions for tracker calibration, rest, button, and power events
+- [Peer relay](docs/relay.md) for repairing missed tracker reports
 
 Use matching tracker, receiver, and host-tool versions for fork-specific features.
 

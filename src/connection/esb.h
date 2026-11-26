@@ -25,6 +25,9 @@
 
 #include <esb.h>
 #include <stdint.h>
+#if defined(CONFIG_RELAY)
+#include "relay_coord.h"
+#endif
 
 // Ping/Pong constants (shared protocol)
 #define ESB_PING_TYPE 0xF0
@@ -118,6 +121,7 @@ static inline uint8_t esb_rf_channel_decode(uint8_t stored)
 #define ESB_WOM_TIMEOUT_MAX_MINUTES 35791
 #define ESB_WOM_TIMEOUT_CLEAR 0xffff
 #define ESB_WOM_ENTER 0xfffe
+#define ESB_WOM_COMMAND_TIMEOUT_MS 5000
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON 0x34  // Start batch raw data collection (data[8] = target Hz)
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF 0x35 // Stop batch raw data collection
 #define ESB_PONG_FLAG_METADATA_REQUEST 0x36 // Request selected metadata section/chunk
@@ -183,6 +187,8 @@ struct esb_auto_loss_snapshot {
 	bool cap_pending;
 	uint8_t home;
 	bool eligible;
+	/* Relay can use silence while a member awaits normal eviction. */
+	bool relay_eligible;
 };
 void esb_get_auto_loss_snapshot(struct esb_auto_loss_snapshot *out);
 /* Invalidate evidence at excluded-session admission, including short sessions
@@ -213,6 +219,8 @@ uint32_t esb_send_remote_wom_command(uint8_t target_id, uint16_t minutes, uint16
 /* Exact transaction outcome; positive errno on failure, value=0 on successful clear,
  * value=ESB_WOM_ENTER on accepted entry, otherwise timeout minutes. */
 bool esb_get_remote_wom_result(uint8_t id, uint16_t token, uint16_t *minutes, uint16_t *error);
+/* Whether a matching transaction still has time left, including relay staging. */
+bool esb_remote_wom_waiting(uint8_t id, uint16_t token);
 void esb_cancel_remote_wom_command(uint32_t mask, uint16_t token);
 void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
 /* Clear only a pending OTA abort command; preserves unrelated commands. */
@@ -262,6 +270,10 @@ void esb_set_channel_change_done_cb(esb_channel_change_done_cb_t cb);
 /* Optional: called when a tracker confirms a remote PONG flag (event_handler).
  * token is the receiver-local HID subscriber, or zero if unowned. */
 typedef void (*esb_remote_confirm_cb_t)(uint8_t tracker_id, uint8_t flag, uint16_t token);
+#if defined(CONFIG_RELAY)
+/* Caller holds irq_lock. Remaining NORMAL-only interval for this target mask. */
+uint32_t esb_reserved_pong_ms(uint32_t targets);
+#endif
 void esb_set_remote_confirm_cb(esb_remote_confirm_cb_t cb);
 
 // Local receiver channel management
@@ -272,7 +284,9 @@ int esb_clear_receiver_channel(void);         // Restore default local home
  * after their admission owner releases this gate. */
 bool esb_channel_is_busy(void);
 int esb_radio_operation_begin(void);
-int esb_radio_collection_begin(void); /* Admission for replacing an existing raw session */
+/* Admit raw collection or its replacement only on a native layout. Hold the
+ * radio gate until the collector's active state and PONG flags are published. */
+int esb_radio_collection_begin(void);
 /* USB flash-only recovery may reserve the gate after a safe startup failure. */
 int esb_radio_self_ota_begin(void);
 void esb_radio_operation_end(void);
@@ -296,5 +310,20 @@ static inline void esb_request_all_shutdown(void)
 {
 	esb_send_remote_command_all(ESB_PONG_FLAG_SHUTDOWN);
 }
+
+/* Peer relay coordinator (relay_coord.c). */
+#if defined(CONFIG_RELAY)
+void esb_relay_set_mode(enum relay_mode mode);
+#endif
+/* Test hook: drop percent% of id's direct uplink (pose and PINGs). */
+void esb_relay_block(uint8_t id, uint8_t percent);
+bool esb_relay_block_mask(uint16_t mask, uint8_t seconds);
+/* Blocks OTA during applied or staged relay, or without a recent healthy direct link. */
+bool esb_relay_blocks_ota(uint8_t id);
+void esb_relay_layout_print(void);
+int esb_relay_layout_set(const char *name, uint16_t value);
+void esb_relay_print_status(void);
+void esb_relay_print_diagnostics(void);
+void esb_relay_print_pool(void);
 
 #endif

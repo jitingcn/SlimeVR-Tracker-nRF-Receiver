@@ -108,8 +108,9 @@ bool parse_float_triplet(const char *str, float values[3])
 		parsed[i] = strtof(str, &end);
 		uint32_t bits;
 		memcpy(&bits, &parsed[i], sizeof(bits));
-		/* Bit check remains valid under firmware fast-math. */
-		if (end == str || errno == ERANGE || (bits & 0x7f800000U) == 0x7f800000U ||
+		/* Keep fast-math from folding away the exponent check. */
+		volatile uint32_t raw_bits = bits;
+		if (end == str || errno == ERANGE || (raw_bits & 0x7f800000U) == 0x7f800000U ||
 		    *end != (i < 2 ? ',' : '\0')) {
 			return false;
 		}

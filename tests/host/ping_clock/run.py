@@ -2,8 +2,13 @@
 """Compare receiver ACK and FIFO dispatch with diagnostics undefined and enabled.
 
 Both variants assert protocol behavior and compare their wire/output traces.
-SDK and work scheduling are modeled. --source accepts a baseline esb.c.
+SDK, scheduler and output leaves are modeled. --source requires a relay-capable esb.c.
 """
+
+from pathlib import Path as _RelayPath
+import sys as _relay_sys
+_relay_sys.path.insert(0, str(_RelayPath(__file__).resolve().parents[1] / 'harness'))
+from relay_config import select_relay
 
 import argparse
 import os
@@ -18,17 +23,18 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE.parent / 'harness'))
 from c_extract import extract_block
+from relay_support import relay_section, relay_query_helpers, staging_helpers
 
-CASES = ('wrong-type', 'bad-crc', 'wrong-pipe', 'out-of-range', 'interleaved-pipe',
+CASES = ('maintenance', 'wrong-type', 'bad-crc', 'wrong-pipe', 'out-of-range', 'interleaved-pipe',
          'ota-status', 'ota-info', 'valid', 'valid-dirty', 'reacquire',
          'event-fallback', 'valid-after-invalid', 'duplicate', 'out-of-order', 'drain',
-         'detailed-warning', 'late-metadata', 'pairing-gate', 'status-admission',
-         'ota-unsuppress')
+         'detailed-warning', 'late-metadata', 'pairing-gate', 'pairing-passive-pong', 'status-admission',
+         'ota-unsuppress', 'stale-relay-pose')
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source', type=Path, default=ROOT / 'src/connection/esb.c')
 parser.add_argument('--case', action='append', choices=CASES)
 args = parser.parse_args()
-source = args.source.read_text()
+source = select_relay(args.source.read_text())
 header = (ROOT / 'src/connection/esb.h').read_text()
 auto_source = (ROOT / 'src/connection/auto_channel.c').read_text()
 hid_source = (ROOT / 'src/hid.c').read_text()
@@ -36,7 +42,7 @@ hid_cmd = (ROOT / 'src/rcv_hid_cmd.h').read_text()
 
 
 def function(name):
-    return extract_block(source, rf'^(?:static\s+)?void\s+{name}\s*\([^;{{}}]*\)\s*\{{')
+    return extract_block(source, rf'^(?:static\s+)?(?:void|bool)\s+{name}\s*\([^;{{}}]*\)\s*\{{')
 
 
 constants = '\n'.join(re.findall(
@@ -49,6 +55,7 @@ shape = '\n'.join((
     extract_block(source, r'^struct packet_stats\s*\{', semicolon=True),
     extract_block(source, r'^struct tracker_slot\s*\{', semicolon=True),
     'static struct tracker_slot tracker_slots[MAX_TRACKERS];',
+    '\n'.join(re.findall(r'^static uint32_t tdma_active_mask;', source, re.M)),
     '#if defined(CONFIG_TDMA_DIAGNOSTICS)',
     extract_block(source, r'^struct tdma_stats\s*\{', semicolon=True),
     extract_block(source, r'^struct tracker_diag\s*\{', semicolon=True),
@@ -61,9 +68,20 @@ event = function('event_handler')
 clock = function('account_ping_clock') if re.search(r'^static void account_ping_clock\s*\(', source, re.M) else ''
 clock = '#if defined(CONFIG_TDMA_DIAGNOSTICS)\n' + clock + '\n#endif\n'
 lengths = extract_block(source, r'^static int composite_body_length\s*\([^;{}]*\)\s*\{')
-packet_helpers = '\n'.join(function(name) for name in (
-    'esb_receive_ping', 'esb_forward_tracker_packet', 'esb_receive_composite'
-) if re.search(rf'^static void {name}\s*\(', source, re.M))
+lengths += '\n' + function('relay_early_receipt_valid')
+packet_helpers = (function('esb_forward_tracker_packet') + """
+#undef relay_hid_packet
+/* Drain each deferred record immediately to model ingest without a worker. */
+static void relay_hid_packet(uint8_t data[16], uint8_t rssi)
+{
+    if (!esb_forward_tracker_packet(data, rssi)) hid_note_dropped(data);
+}
+""" + extract_block(source, r'^struct composite_result\s*\{', True) + '\n' +
+    '\n'.join(function(name) for name in (
+        'relay_rx_metadata', 'esb_receive_ping', 'composite_validate', 'esb_execute_composite',
+        'esb_receive_composite', 'esb_receive_normal', 'esb_receive_repair',
+        'esb_receive_peer_report')))
+
 hid_bodies = '\n'.join((
     *re.findall(r'^#define RCV_HID_TYPE_CMD(?:_ACK)?\s+[^\n]+', hid_cmd, re.M),
     hid_source[hid_source.index('#define MAX_REPORTS'):hid_source.index('static bool hid_fifo_is_empty')],
@@ -73,7 +91,8 @@ hid_bodies = '\n'.join((
                 r'total_dropped_reports|tracker_drops|total_tracker_drops)\b[^;\n]*;', hid_source, re.M),
     *(extract_block(hid_source, rf'^[\w \t]+\b{name}\s*\([^;{{}}]*\)\s*\{{') for name in (
         'rssi_smooth_update', 'hid_type_byte1_is_tracker_id', 'hid_type_has_rssi_slot',
-        'hid_enqueue_packet', 'hid_write_packet_n')),
+        'hid_push_packet', 'hid_note_dropped', 'hid_enqueue_packet', 'hid_write_packet_n_internal',
+        'hid_try_write_packet_n', 'hid_write_packet_n')),
 ))
 fixture = (HERE / 'fixture.c').read_text()
 auto_channel = extract_block(auto_source, r'^bool auto_channel_is_beacon\s*\([^;{}]*\)\s*\{')
@@ -85,7 +104,7 @@ fixture = fixture.replace('/* PROTOCOL CONSTANTS */', constants)
 fixture = fixture.replace('/* PRODUCTION STATE */', shape)
 fixture = fixture.replace('/* ACTUAL HID FIFO */', hid_bodies)
 fixture = fixture.replace('/* ACTUAL PRODUCTION FUNCTIONS */',
-                          '\n\n'.join((lengths, clock, ack, packet_helpers, event)))
+                          '\n\n'.join((relay_section(source), relay_query_helpers(source), staging_helpers(source), lengths, clock, ack, packet_helpers, event)))
 
 with tempfile.TemporaryDirectory(prefix='receiver-ping-clock-') as directory:
     directory = Path(directory)
@@ -101,7 +120,7 @@ with tempfile.TemporaryDirectory(prefix='receiver-ping-clock-') as directory:
         subprocess.run(compiler + [
             '-std=c11', '-g', '-O1', '-Wall', '-Wextra',
             '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-            '-fno-pie', '-no-pie', *config, '-I', str(ROOT / 'src'),
+            '-fno-pie', '-no-pie', *config, '-I', str(ROOT / 'src'), '-I', str(ROOT / 'src/connection'),
             str(generated), '-o', str(executable),
         ], check=True)
         for case in args.case or CASES:
