@@ -117,10 +117,11 @@ unsigned relay_stage_maintenance_stride(const struct relay_runtime_settings *app
 uint32_t relay_stage_lead_ticks(const struct relay_runtime_settings *applied, uint8_t direct);
 
 struct rc_peer {
-	uint16_t expected, heard;
+	uint8_t expected, heard;
 	uint16_t rssi_x8;
 	uint32_t evidence_ms;
 };
+_Static_assert(sizeof(struct rc_peer) == 8, "compact directed peer evidence");
 struct rc_choice {
 	uint8_t helper, challenger, streak;
 	bool valid;
@@ -223,8 +224,12 @@ void relay_coord_expire_peer(struct relay_coord *rc, unsigned helper,
 uint16_t relay_coord_peer_ratio(const struct rc_peer *p);
 void relay_coord_learn_tick(struct relay_coord *rc, uint32_t now_ms);
 void relay_coord_capture(struct relay_coord *rc, uint8_t helper, uint8_t child, uint8_t rssi, uint32_t now_ms);
-bool relay_coord_report(struct relay_coord *rc, const struct relay_control *c, unsigned slot,
-	const struct relay_peer_report *report, uint32_t now_ms);
+/* Check the receive-time grant before applying any decoded observations. */
+bool relay_coord_report_granted(const struct relay_control *grant, unsigned slot,
+	const struct relay_peer_report *report);
+/* The helper comes from an authorized report. */
+void relay_coord_observe(struct relay_coord *rc, uint8_t helper, uint8_t child,
+	uint8_t expected, uint8_t heard, uint8_t rssi, uint32_t now_ms);
 void relay_coord_fast_reset(struct relay_coord *rc);
 /* Record validated RF receipt before deferred publication. */
 void relay_coord_receive(struct relay_coord *rc, uint8_t id, uint32_t frame);

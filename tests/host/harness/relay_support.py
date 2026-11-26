@@ -10,9 +10,12 @@ capable trackers it never assigns a head or forwarding slot, so direct-only
 fixtures see stock behaviour.
 """
 import re
+from pathlib import Path
 
 from c_extract import extract_block
 from relay_config import select_relay
+
+SYNC_REPORT_INCLUDE = f'#include "{Path(__file__).resolve().with_name("relay_sync.h").as_posix()}"'
 
 
 def _function(esb, name):
@@ -58,7 +61,8 @@ def relay_declarations(esb, member_diagnostics=True):
                       "static atomic_t channel_change_pending;",
                       "static int64_t channel_change_timeout;",
                       "#if defined(CONFIG_TDMA_DIAGNOSTICS)\nstatic uint32_t tdma_stats_generation[MAX_TRACKERS];\n#endif",
-                      "#define relay_hid_packet hid_write_packet_n\n#define relay_defer_capture relay_coord_capture\n#define relay_defer_report relay_coord_report",
+                      "#define relay_hid_packet hid_write_packet_n\n#define relay_defer_capture relay_coord_capture",
+                      SYNC_REPORT_INCLUDE,
                       "static struct { uint32_t CYCCNT; } fixture_dwt;",
                       "#define DWT (&fixture_dwt)",
                       "static inline void relay_rx_measure(uint32_t start) { (void)start; }",

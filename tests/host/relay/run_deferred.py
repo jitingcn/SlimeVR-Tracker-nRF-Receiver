@@ -135,12 +135,41 @@ int main(void) {
  for(unsigned i=1;i<17;i++)relay_defer_capture(&relay_coord,1,2,50,100+i);
  assert(relay_coord.peer[1][3].evidence_ms==100);
  assert(relay_learning_overflow==1 && relay_coord.peer[1][2].evidence_ms==116);
- struct relay_control c={.session=42,.epoch=3,.members=2,.repair_count=5};
+ const uint32_t frame = 30;
+ struct relay_control c={.session=42,.epoch=3,.frame=frame,.members=BIT(1),.repair_count=1};
  c.grants[0].owner=1;
  struct relay_peer_report p={.session=42,.epoch=3,.helper=1,.count=1};
  p.entries[0]=(struct relay_peer_observation){.child=2,.expected=10,.heard=7,.rssi=50};
- relay_defer_report(&relay_coord,&c,0,&p,200);
- c.session=99;p.entries[0].heard=0;
+
+ /* Rejections must not leave work that a later valid grant could authorize. */
+ assert(!relay_defer_report(&relay_coord,&c,frame+1,0,&p,200));
+ assert(!relay_defer_report(&relay_coord,&c,frame,1,&p,200));
+ c.grants[0].owner=7;
+ assert(!relay_defer_report(&relay_coord,&c,frame,0,&p,200));
+ c.grants[0].owner=1;
+ c.grants[0].children=BIT(2);
+ assert(!relay_defer_report(&relay_coord,&c,frame,0,&p,200));
+ c.grants[0].children=0;
+ c.members=BIT(2);
+ assert(!relay_defer_report(&relay_coord,&c,frame,0,&p,200));
+ c.members=BIT(1);
+ ++p.session;
+ assert(!relay_defer_report(&relay_coord,&c,frame,0,&p,200));
+ ++c.session;
+ assert(!relay_defer_report(&relay_coord,&c,frame,0,&p,200));
+ --c.session;
+ --p.session;
+ ++p.epoch;
+ assert(!relay_defer_report(&relay_coord,&c,frame,0,&p,200));
+ ++c.epoch;
+ assert(!relay_defer_report(&relay_coord,&c,frame,0,&p,200));
+ --c.epoch;
+ --p.epoch;
+ assert(relay_learning_queue.count==0 && relay_coord.peer[1][2].evidence_ms==116);
+
+ /* Subsequent grant and decoder-buffer reuse cannot change accepted observations. */
+ assert(relay_defer_report(&relay_coord,&c,frame,0,&p,200));
+ ++c.frame;c.session=99;c.grants[0].owner=7;p.entries[0].heard=0;
  struct relay_learning_record r;
  assert(!k_msgq_get(&relay_learning_queue,&r,0));relay_learning_apply(&r);
  assert(relay_coord.peer[1][2].heard==7 && relay_coord.peer[1][2].expected==10);
@@ -164,12 +193,12 @@ int main(void) {
  assert(relay_coord.peer[1][5].evidence_ms==306);
 
  /* Mixed report: unrelated reset keeps all; resetting one child drops only that entry. */
- struct relay_control cm={.session=42,.epoch=3,.members=BIT(1)|BIT(6)|BIT(7),.repair_count=5};
+ struct relay_control cm={.session=42,.epoch=3,.frame=frame,.members=BIT(1)|BIT(6)|BIT(7),.repair_count=5};
  cm.grants[0].owner=1;
  struct relay_peer_report pm={.session=42,.epoch=3,.helper=1,.count=2};
  pm.entries[0]=(struct relay_peer_observation){.child=6,.expected=10,.heard=8,.rssi=50};
  pm.entries[1]=(struct relay_peer_observation){.child=7,.expected=10,.heard=6,.rssi=52};
- relay_defer_report(&relay_coord,&cm,0,&pm,400);
+ assert(relay_defer_report(&relay_coord,&cm,frame,0,&pm,400));
  relay_pairing_revision[9]++;
  relay_pairing_revision[7]++;
  assert(!k_msgq_get(&relay_learning_queue,&r,0));relay_learning_apply(&r);
@@ -179,10 +208,34 @@ int main(void) {
  /* Resetting the helper drops the entire queued report. */
  pm.entries[0]=(struct relay_peer_observation){.child=6,.expected=10,.heard=9,.rssi=50};
  pm.count=1;
- relay_defer_report(&relay_coord,&cm,0,&pm,410);
+ assert(relay_defer_report(&relay_coord,&cm,frame,0,&pm,410));
  relay_pairing_revision[1]++;
  assert(!k_msgq_get(&relay_learning_queue,&r,0));relay_learning_apply(&r);
  assert(relay_coord.peer[1][6].heard==8 && relay_coord.peer[1][6].expected==10);
+
+ /* A full report retains all eight observations, including silent links. */
+ struct relay_control full_grant={.session=42,.epoch=3,.frame=frame,.members=BIT(0),.repair_count=1};
+ struct relay_peer_report full={.session=42,.epoch=3,.helper=0,.count=RELAY_PEER_REPORT_ENTRIES};
+ for (unsigned i=0;i<RELAY_PEER_REPORT_ENTRIES;i++) {
+  full.entries[i]=(struct relay_peer_observation){.child=8+i,.expected=20+i,.heard=i,.rssi=50+i};
+ }
+ relay_defer_capture(&relay_coord,0,8,64,420);
+ assert(!k_msgq_get(&relay_learning_queue,&r,0));relay_learning_apply(&r);
+ assert(relay_coord.peer[0][8].rssi_x8==8U*64U);
+
+ assert(relay_defer_report(&relay_coord,&full_grant,frame,0,&full,430));
+ ++relay_session;
+ assert(!k_msgq_get(&relay_learning_queue,&r,0));relay_learning_apply(&r);
+ assert(relay_coord.peer[0][8].evidence_ms==420 && relay_coord.peer[0][15].evidence_ms==0);
+ --relay_session;
+
+ assert(relay_defer_report(&relay_coord,&full_grant,frame,0,&full,440));
+ assert(!k_msgq_get(&relay_learning_queue,&r,0));relay_learning_apply(&r);
+ for (unsigned i=0;i<RELAY_PEER_REPORT_ENTRIES;i++) {
+  const struct rc_peer *peer=&relay_coord.peer[0][8+i];
+  assert(peer->expected==20+i && peer->heard==i && peer->evidence_ms==440);
+  assert(peer->rssi_x8==8U*(i ? 50+i : 64));
+ }
  return 0;
 }
 '''
@@ -190,4 +243,4 @@ with tempfile.TemporaryDirectory() as tmp:
     c=Path(tmp)/'deferred.c';exe=Path(tmp)/'deferred';c.write_text(prefix+code+cases)
     subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I'+str(here.parents[2]/'src/connection'),'-I'+str(here.parents[2]/'src'),str(c),str(here.parents[2]/'src/connection/relay_coord.c'),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
-print('Deferred HID and learning copies, overflow order and epoch fencing passed')
+print('Deferred HID and learning copies, overflow order, grant and pairing fences passed')

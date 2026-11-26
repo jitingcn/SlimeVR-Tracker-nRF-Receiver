@@ -4098,21 +4098,18 @@ static bool esb_forward_tracker_packet(uint8_t pkt[16], uint8_t rssi)
 }
 
 #if defined(CONFIG_RELAY)
-/* Learning does not affect receipt/deduplication evidence at the freeze.
- * Copy the grant with reports: a queued report must use its receive-time grant. */
-struct relay_learning_record {
-	struct relay_control grant;
-	uint32_t now;
-	union {
-		struct relay_peer_report report;
-		struct {
-			uint8_t helper, child, rssi;
-		} capture;
-	};
-	uint8_t child_rev[RELAY_PEER_REPORT_ENTRIES];
-	uint8_t slot, helper_rev;
-	bool is_report;
+struct relay_learning_observation {
+	uint8_t child, expected, heard, rssi, child_rev;
 };
+
+/* Reports are authorized against their receive-time grant before queueing.
+ * Only the first count entries are used; expected == 0 denotes a raw capture. */
+struct relay_learning_record {
+	uint32_t session, now;
+	uint8_t epoch, helper, helper_rev, count;
+	struct relay_learning_observation entries[RELAY_PEER_REPORT_ENTRIES];
+};
+_Static_assert(sizeof(struct relay_learning_record) == 52, "compact relay learning record");
 K_MSGQ_DEFINE(relay_learning_queue, sizeof(struct relay_learning_record), 16, 4);
 static uint32_t relay_learning_overflow;
 
@@ -4123,27 +4120,19 @@ static void esb_receive_composite(const struct esb_payload *payload, uint32_t ev
 {
 #if defined(CONFIG_RELAY)
 	unsigned key = irq_lock();
-	if (r->grant.session == relay_session && r->grant.epoch == relay_epoch) {
-		if (r->is_report) {
-			uint8_t helper = r->report.helper;
-			if (helper < MAX_TRACKERS && r->helper_rev == relay_pairing_revision[helper]) {
-				struct relay_peer_report filtered = r->report;
-				uint8_t kept = 0;
-				for (unsigned i = 0; i < r->report.count && i < RELAY_PEER_REPORT_ENTRIES; i++) {
-					uint8_t c = r->report.entries[i].child;
-					if (c < MAX_TRACKERS && r->child_rev[i] == relay_pairing_revision[c]) {
-						filtered.entries[kept++] = r->report.entries[i];
-					}
-				}
-				filtered.count = kept;
-				if (kept) {
-					(void)relay_coord_report(&relay_coord, &r->grant, r->slot, &filtered, r->now);
-				}
+	uint8_t helper = r->helper;
+	if (r->session == relay_session && r->epoch == relay_epoch &&
+	    r->helper_rev == relay_pairing_revision[helper]) {
+		for (unsigned i = 0; i < r->count; i++) {
+			const struct relay_learning_observation *e = &r->entries[i];
+			if (e->child_rev != relay_pairing_revision[e->child]) {
+				continue;
 			}
-		} else if (r->capture.helper < MAX_TRACKERS && r->capture.child < MAX_TRACKERS
-			   && r->helper_rev == relay_pairing_revision[r->capture.helper]
-			   && r->child_rev[0] == relay_pairing_revision[r->capture.child]) {
-			relay_coord_capture(&relay_coord, r->capture.helper, r->capture.child, r->capture.rssi, r->now);
+			if (e->expected) {
+				relay_coord_observe(&relay_coord, helper, e->child, e->expected, e->heard, e->rssi, r->now);
+			} else {
+				relay_coord_capture(&relay_coord, helper, e->child, e->rssi, r->now);
+			}
 		}
 #else
 	/* Composite packet (type ESB_COMPOSITE_TYPE): variable length.
@@ -4178,32 +4167,47 @@ static void relay_defer_capture(struct relay_coord *rc, uint8_t helper, uint8_t 
 	uint8_t rssi, uint32_t now)
 {
 	ARG_UNUSED(rc);
+	if (helper >= MAX_TRACKERS || child >= MAX_TRACKERS) {
+		return;
+	}
+	struct relay_learning_record r;
+	r.now = now;
+	r.helper = helper;
+	r.count = 1;
 	unsigned key = irq_lock();
-	struct relay_learning_record r = {
-		.grant = {.session = relay_session, .epoch = relay_epoch},
-		.now = now,
-		.capture = {.helper = helper, .child = child, .rssi = rssi},
-		.child_rev = {child < MAX_TRACKERS ? relay_pairing_revision[child] : 0},
-		.helper_rev = helper < MAX_TRACKERS ? relay_pairing_revision[helper] : 0,
+	r.session = relay_session;
+	r.epoch = relay_epoch;
+	r.helper_rev = relay_pairing_revision[helper];
+	r.entries[0] = (struct relay_learning_observation){
+		.child = child, .rssi = rssi, .child_rev = relay_pairing_revision[child],
 	};
 	irq_unlock(key);
 	relay_learning_submit(&r);
 }
 
 static bool relay_defer_report(struct relay_coord *rc, const struct relay_control *grant,
-	unsigned slot, const struct relay_peer_report *report, uint32_t now)
+	uint32_t frame, unsigned slot, const struct relay_peer_report *report, uint32_t now)
 {
 	ARG_UNUSED(rc);
+	struct relay_learning_record r;
 	unsigned key = irq_lock();
-	struct relay_learning_record r = {
-		.grant = *grant, .now = now, .report = *report,
-		.slot = slot,
-		.helper_rev = report->helper < MAX_TRACKERS ? relay_pairing_revision[report->helper] : 0,
-		.is_report = true,
-	};
-	for (unsigned i = 0; i < report->count && i < RELAY_PEER_REPORT_ENTRIES; i++) {
-		uint8_t c = report->entries[i].child;
-		r.child_rev[i] = c < MAX_TRACKERS ? relay_pairing_revision[c] : 0;
+	r.session = relay_session;
+	r.epoch = relay_epoch;
+	if (grant->frame != frame || grant->session != r.session || grant->epoch != r.epoch ||
+	    !relay_coord_report_granted(grant, slot, report)) {
+		irq_unlock(key);
+		return false;
+	}
+	r.now = now;
+	r.helper = report->helper;
+	r.helper_rev = relay_pairing_revision[r.helper];
+	r.count = report->count;
+	for (unsigned i = 0; i < r.count; i++) {
+		const struct relay_peer_observation *e = &report->entries[i];
+		r.entries[i] = (struct relay_learning_observation){
+			.child = e->child, .expected = e->expected, .heard = e->heard,
+			.rssi = e->rssi, .child_rev = relay_pairing_revision[e->child],
+		};
 	}
 	irq_unlock(key);
 	relay_learning_submit(&r);
@@ -4553,11 +4557,11 @@ static void esb_receive_peer_report(const struct esb_payload *payload, uint32_t 
 	uint32_t preamble = event_ticks - RELAY_AIR_TICKS(payload->length);
 	uint32_t frame = relay_frame_near(relay_frame_anchor, relay_start_anchor, preamble);
 	uint32_t phase = relay_frame_phase(relay_origin, frame, preamble);
-	if (frame != relay_grants.frame || phase < RELAY_REPAIR_START) {
+	if (phase < RELAY_REPAIR_START) {
 		return;
 	}
 	unsigned slot = relay_repair_slot(phase);
-	(void)relay_defer_report(&relay_coord, &relay_grants, slot, &report, k_uptime_get_32());
+	(void)relay_defer_report(&relay_coord, &relay_grants, frame, slot, &report, k_uptime_get_32());
 }
 
 static void esb_receive_repair(const struct esb_payload *payload, uint32_t event_ticks)

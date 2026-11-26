@@ -18,6 +18,7 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "harness"))
 from c_extract import extract_block  # noqa: E402
+from relay_support import SYNC_REPORT_INCLUDE
 
 SRC = HERE.parents[2] / "src"
 esb = select_relay((SRC / "connection/esb.c").read_text())
@@ -103,13 +104,12 @@ static bool hid_try_write_packet_n(const uint8_t *data, uint8_t rssi)
 }
 #define relay_hid_packet esb_forward_tracker_packet
 #define relay_defer_capture relay_coord_capture
-#define relay_defer_report relay_coord_report
 static struct relay_coord relay_coord;
 '''
 
 
 def main():
-    parts = [PRELUDE, constants,
+    parts = [PRELUDE, SYNC_REPORT_INCLUDE, constants,
              block(r"^struct packet_stats \{"), block(r"^struct tracker_slot \{"),
              "static struct tracker_slot tracker_slots[MAX_TRACKERS];\n",
              relay_state,

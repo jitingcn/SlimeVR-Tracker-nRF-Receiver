@@ -12,6 +12,8 @@ Validated power-down notices provide bounded intent, not proof that a tracker is
 
 An engaged receiver broadcasts control feedback, assigns helper watch windows, and grants repair transmissions. Helpers cache peer packets and transmit only granted repairs. Static cache ages remain 0 through 2; demand scheduling retains its bounded five-frame cache. Helper qualification remains 950 permille. Control planning may prepare the next known frame while the live RX timeline remains on the current frame.
 
+The receiver admits peer reports against the grant for the received frame and slot. The 16-entry learning queue stores observations and pairing revisions, not copies of grants. A session or epoch change invalidates the queued report, as does replacing its helper. Replacing a child drops only that child's observations.
+
 Each control transmission has a four-RTC-tick arming guard after the preceding direct or repair area. The receipt freeze stays one tick before that area's end; hardware launch moves to the end of the guard. The callback is scheduled seven ticks before launch, and compare admission requires at least twelve ticks before the preamble. Direct capture cutoffs, RX lead, admission reserves and R0+3 remain intact. Native profile 0 does not use these guards.
 
 PONG trailers coordinate layout activation and passive clock presence. Profile 0 means direct TDMA, and profile 1 means engaged relay. Both firmware repositories carry byte-identical [`src/connection/relay_protocol.h`](../src/connection/relay_protocol.h) headers. Keep pre-v5 relay firmware out of a v5 relay fleet because it uses different control timing. V5 trackers derive activation from the delta transmitted in the PONG, so they accept a v5 receiver's updated announcement lead.

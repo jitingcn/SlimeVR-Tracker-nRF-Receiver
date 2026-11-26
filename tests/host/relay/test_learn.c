@@ -10,19 +10,58 @@ static void evidence(struct relay_coord *rc, unsigned h, unsigned child,
 	struct relay_control c = {.members = 0xffff, .session = 42, .epoch = 7, .repair_count = 5};
 	c.grants[2].owner = h;
 	struct relay_peer_report r = {.helper = h, .session = 42, .epoch = 7, .count = 1};
-	r.entries[0] = (struct relay_peer_observation){.child = child, .expected = expected,
-		.heard = heard, .rssi = rssi};
-	assert(relay_coord_report(rc, &c, 2, &r, now));
+	r.entries[0] = (struct relay_peer_observation){.child = child, .window_end = (uint16_t)now,
+		.expected = expected, .heard = heard, .rssi = rssi};
+	uint8_t wire[RELAY_FRAME_MAX];
+	size_t len = relay_peer_report_encode(wire, &r);
+	assert(relay_peer_report_decode(wire, len, &r));
+	assert(relay_coord_report_granted(&c, 2, &r));
+	const struct relay_peer_observation *e = &r.entries[0];
+	relay_coord_observe(rc, r.helper, e->child, e->expected, e->heard, e->rssi, now);
 	c.grants[2].children = 1;
-	assert(!relay_coord_report(rc, &c, 2, &r, now));
+	assert(!relay_coord_report_granted(&c, 2, &r));
 	c.grants[2].children = 0; c.grants[2].owner = h + 1;
-	assert(!relay_coord_report(rc, &c, 2, &r, now));
+	assert(!relay_coord_report_granted(&c, 2, &r));
 	c.grants[2].owner = h; r.session++;
-	assert(!relay_coord_report(rc, &c, 2, &r, now));
+	assert(!relay_coord_report_granted(&c, 2, &r));
 	r.session--; r.epoch++;
-	assert(!relay_coord_report(rc, &c, 2, &r, now));
+	assert(!relay_coord_report_granted(&c, 2, &r));
 	r.epoch--;
-	assert(!relay_coord_report(rc, &c, 5, &r, now));
+	assert(!relay_coord_report_granted(&c, 5, &r));
+	c.members &= ~(1U << h);
+	assert(!relay_coord_report_granted(&c, 2, &r));
+	r.helper = c.grants[2].owner = RC_MAX;
+	assert(!relay_coord_report_granted(&c, 2, &r));
+}
+
+static void peer_count_decay(void)
+{
+	struct relay_coord rc;
+	relay_coord_init(&rc);
+	const unsigned helper = RC_MAX - 1, child = RC_MAX - 3;
+	const struct rc_peer *p = &rc.peer[helper][child];
+	const uint32_t now = 100003;
+
+	evidence(&rc, helper, child, 119, 113, 50, now - 2);
+	evidence(&rc, helper, child, 120, 118, 50, now - 1);
+	assert(p->expected == 239 && p->heard == 231);
+
+	/* Both wide sums exceed a byte and are odd: floor(359/2), floor(349/2). */
+	evidence(&rc, helper, child, 120, 118, 42, now);
+	assert(p->expected == 179 && p->heard == 174);
+	assert(relay_coord_peer_ratio(p) == 972);
+	assert(p->evidence_ms == now && p->rssi_x8 == 392);
+
+	/* A silent report refreshes the pair without contributing RSSI. */
+	evidence(&rc, helper, child, 30, 0, 10, now + 9999);
+	relay_coord_expire_peer(&rc, helper, child, now + 19998);
+	assert(p->expected == 209 && p->heard == 174);
+	assert(p->evidence_ms == now + 9999 && p->rssi_x8 == 392);
+
+	/* At 10 seconds the new report starts fresh rather than accumulating. */
+	evidence(&rc, helper, child, 30, 0, 10, now + 19999);
+	assert(p->expected == 30 && !p->heard);
+	assert(p->evidence_ms == now + 19999 && !p->rssi_x8);
 }
 
 static void learning(void)
@@ -323,4 +362,5 @@ static void allocation_invariants(void)
 }
 
 int main(void) {
+	peer_count_decay();
 	allocation_invariants(); primary_before_backup(); augment_stranded_capacity(); weak_backup_capacity(); silent_helpers(); learning(); pending_reports(); rssi_hold(); coverage(); alternate_fills_static_grant(); surveys_and_grants(); }

@@ -89,7 +89,6 @@ static bool hid_write_packet_n(const uint8_t *packet, uint8_t rssi) {
 #define tracker_events_pairing_cleanup checked_cleanup
 #define relay_hid_packet hid_write_packet_n
 #define relay_defer_capture relay_coord_capture
-#define relay_defer_report relay_coord_report
 #include "esb_event_paths.inc"
 #undef tracker_events_pairing_cleanup
 

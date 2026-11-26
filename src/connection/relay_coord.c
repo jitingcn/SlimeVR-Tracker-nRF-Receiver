@@ -538,12 +538,8 @@ void relay_coord_expire_peer(struct relay_coord *rc, unsigned helper,
 	rc_peer_expire(&rc->peer[helper][child], now);
 }
 
-void relay_coord_capture(struct relay_coord *rc, uint8_t h, uint8_t child, uint8_t rssi, uint32_t now)
+static void rc_peer_capture(struct rc_peer *p, uint8_t rssi, uint32_t now)
 {
-	if ((unsigned)h >= RC_MAX || (unsigned)child >= RC_MAX) {
-		return;
-	}
-	struct rc_peer *p = &rc->peer[h][child];
 	rc_peer_expire(p, now);
 	if (rssi) {
 		p->rssi_x8 = relay_rssi_avg_x8(p->rssi_x8, rssi);
@@ -551,27 +547,40 @@ void relay_coord_capture(struct relay_coord *rc, uint8_t h, uint8_t child, uint8
 	p->evidence_ms = now;
 }
 
-bool relay_coord_report(struct relay_coord *rc, const struct relay_control *c, unsigned slot,
-	const struct relay_peer_report *r, uint32_t now)
+void relay_coord_capture(struct relay_coord *rc, uint8_t h, uint8_t child, uint8_t rssi, uint32_t now)
 {
-	if ((unsigned)r->helper >= RC_MAX || r->session != c->session || r->epoch != c->epoch || slot >= c->repair_count ||
-	    c->grants[slot].owner != r->helper || c->grants[slot].children ||
-	    !(c->members & RC_BIT(r->helper))) {
-		return false;
+	if ((unsigned)h >= RC_MAX || (unsigned)child >= RC_MAX) {
+		return;
 	}
-	for (unsigned i = 0; i < r->count; i++) {
-		const struct relay_peer_observation *e = &r->entries[i];
-		if ((unsigned)e->child >= RC_MAX) continue;
-		relay_coord_capture(rc, r->helper, e->child, e->heard ? e->rssi : 0, now);
-		struct rc_peer *p = &rc->peer[r->helper][e->child];
-		p->expected += e->expected;
-		p->heard += e->heard;
-		if (p->expected >= 240U) {
-			p->expected /= 2U;
-			p->heard /= 2U;
-		}
+	rc_peer_capture(&rc->peer[h][child], rssi, now);
+}
+
+bool relay_coord_report_granted(const struct relay_control *grant, unsigned slot,
+	const struct relay_peer_report *r)
+{
+	return r->helper < RC_MAX && r->session == grant->session && r->epoch == grant->epoch
+		&& slot < grant->repair_count && grant->grants[slot].owner == r->helper
+		&& !grant->grants[slot].children && (grant->members & RC_BIT(r->helper));
+}
+
+void relay_coord_observe(struct relay_coord *rc, uint8_t helper, uint8_t child,
+	uint8_t expected, uint8_t heard, uint8_t rssi, uint32_t now)
+{
+	if (child >= RC_MAX) {
+		return;
 	}
-	return true;
+	struct rc_peer *p = &rc->peer[helper][child];
+	rc_peer_capture(p, heard ? rssi : 0, now);
+	/* A report can bring 239 stored counts up to 359 before halving.
+	 * Heard never exceeds expected; both fit in bytes after decay. */
+	unsigned total_expected = (unsigned)p->expected + expected;
+	unsigned total_heard = (unsigned)p->heard + heard;
+	if (total_expected >= 240U) {
+		total_expected /= 2U;
+		total_heard /= 2U;
+	}
+	p->expected = (uint8_t)total_expected;
+	p->heard = (uint8_t)total_heard;
 }
 
 static bool rc_listener(const struct rc_learn_snapshot *rc, uint8_t child, uint8_t h)
