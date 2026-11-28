@@ -58,7 +58,7 @@ constants = '\n'.join(re.findall(
     r'TPS_CALCULATION_INTERVAL_MS|TDMA_(?:BASE_SLOT_TICKS|SLOT_TICKS_MAX_LEVEL0|'
     r'RECONFIG_MIN_MS|LOSS_RECONFIG_MIN_MS|CAP_LEVEL_MAX))\b[^\n]*', source, re.MULTILINE))
 constants += '\n' + '\n'.join(re.findall(
-    r'^#define ESB_(?:(?:PING|PONG)_\w+|REMOTE_CMD_TOKEN_MAX)\b[^\n]*', header, re.MULTILINE))
+    r'^#define ESB_(?:(?:PING|PONG)_\w+|REMOTE_CMD_TOKEN_MAX|RELAY_OTA_\w+)\b[^\n]*', header, re.MULTILINE))
 variables = '''tdma_cap_ladder tdma_config_epoch
     tdma_dynamic_active_count tdma_dynamic_slot_ticks tdma_active_mask
     tdma_last_reconfig_time tdma_last_reconfig_valid tdma_cap_level tdma_published_cap_level
@@ -87,7 +87,7 @@ declarations.append(relay_declarations(source, member_diagnostics=False))
 declarations.append('static bool relay_auto_ladder_paused(void);')
 declarations.append('static bool esb_initialized = true;')
 functions = [function(name) for name in (
-    'tdma_loss_reset_windows', 'tdma_pack_config', 'relay_layout_stageable', 'relay_roster_eligible',
+    'tdma_loss_reset_windows', 'tdma_pack_config', 'esb_relay_ota_held_locked', 'relay_layout_stageable', 'relay_roster_eligible',
     'relay_query_can_resume',
     'relay_query_update_locked', 'relay_query_begin', 'tdma_shadow_observe',
     'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked', 'tdma_shadow_update',
@@ -96,7 +96,7 @@ functions = [function(name) for name in (
     'tdma_apply_locked', 'tdma_apply_finish', 'tdma_advertised_config', 'esb_loss_operations_idle',
     'relay_force_entry_allowed', 'tdma_recalculate',
     'tracker_store_restore', 'tracker_slot_reset', 'esb_add_pair', 'esb_pop_pair',
-    'relay_auto_ladder_paused', 'esb_relay_set_mode',
+    'relay_auto_ladder_paused', 'esb_relay_set_mode', 'esb_relay_ota_suspend', 'esb_relay_ota_end',
     'relay_control_eligible', 'esb_relay_blocks_ota', 'decision_accept',
     'packet_stats_refresh', 'packet_stats_count', 'check_packet_sequence',
 )]

@@ -277,6 +277,14 @@ static void unsuppress_all_trackers(void)
 	}
 }
 
+static void end_session(void)
+{
+#if defined(CONFIG_RELAY)
+	esb_relay_ota_end();
+#endif
+	unsuppress_all_trackers();
+}
+
 /* ── Session Management ──────────────────────────────────────────── */
 
 static void reset_session_locked(void)
@@ -340,7 +348,7 @@ void esb_ota_forget_tracker(uint8_t tracker_id)
 	}
 	irq_unlock(irq_key);
 	if (ended) {
-		unsuppress_all_trackers();
+		end_session();
 	}
 }
 
@@ -384,7 +392,7 @@ static void cancel_target(uint8_t tracker_id, bool require_participant)
 	esb_send_remote_command(tracker_id, ESB_PONG_FLAG_OTA_ABORT);
 	if (ended) {
 		LOG_INF("OTA: Last target removed, session ended");
-		unsuppress_all_trackers();
+		end_session();
 	}
 }
 
@@ -410,7 +418,7 @@ static void cancel_all_targets(void)
 	}
 	if (ended) {
 		LOG_INF("OTA: Last target removed, session ended");
-		unsuppress_all_trackers();
+		end_session();
 	}
 }
 
@@ -469,7 +477,7 @@ static void begin_expire_work_handler(struct k_work *work)
 		k_work_reschedule(&begin_expire_work, K_TICKS(remaining));
 	}
 	if (ended) {
-		unsuppress_all_trackers();
+		end_session();
 	}
 }
 
@@ -507,11 +515,6 @@ static void begin_target(const uint8_t *data, size_t len)
 	uint8_t detail = 0;
 	for (;;) {
 		unsigned int irq_key = irq_lock();
-#if defined(CONFIG_RELAY)
-		bool blocked = esb_relay_blocks_ota(tracker_id);
-#else
-		bool blocked = false;
-#endif
 		uint32_t now = k_uptime_ticks();
 		k_spinlock_key_t key = k_spin_lock(&ota_relay_lock);
 		struct ota_per_tracker *t = &ota_relay.tracker[tracker_id];
@@ -519,17 +522,14 @@ static void begin_target(const uint8_t *data, size_t len)
 		bool same_image = !first && !memcmp(ota_relay.begin_body, &pkt[2],
 						   sizeof(ota_relay.begin_body));
 		bool expired = !first && (ota_relay.begin_expired_mask & (1U << tracker_id));
-		if (t->participating || blocked || expired || (!first &&
+		if (t->participating || expired || (!first &&
 		    (!same_image || ota_relay.ring_head || ota_relay.num_targets >= OTA_MAX_PARALLEL))) {
-			/* A duplicate can arrive after the direct-link verdict changes or
-			 * DATA/VERIFY starts. Leave the admitted target completely alone. */
+			/* A duplicate can arrive after DATA/VERIFY starts. Leave the
+			 * admitted target completely alone. */
 			if (t->participating) {
 				if (!same_image) {
 					detail = OTA_BEGIN_DETAIL_BUSY;
 				}
-			} else if (blocked) {
-				status = OTA_STATUS_ERROR;
-				detail = OTA_BEGIN_DETAIL_DIRECT_REQUIRED;
 			} else if (expired && same_image) {
 				status = OTA_STATUS_ERROR;
 			} else {
@@ -543,6 +543,9 @@ static void begin_target(const uint8_t *data, size_t len)
 		if (first && !acquired_radio) {
 			k_spin_unlock(&ota_relay_lock, key);
 			irq_unlock(irq_key);
+#if defined(CONFIG_RELAY)
+			esb_relay_ota_wait_control_tx();
+#endif
 			int err = esb_radio_operation_begin();
 			if (err) {
 				if (err == -EBUSY) {
@@ -576,6 +579,9 @@ static void begin_target(const uint8_t *data, size_t len)
 		esb_clear_remote_ota_abort(tracker_id);
 		irq_unlock(irq_key);
 		if (first) {
+#if defined(CONFIG_RELAY)
+			esb_relay_ota_suspend(ESB_RELAY_OTA_BEGIN_HOLD_MS);
+#endif
 			esb_auto_loss_invalidate();
 			suppress_non_ota_trackers();
 		}
@@ -611,6 +617,9 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 			break;
 		}
 		LOG_INF("OTA: Querying firmware info for tracker %u", tracker_id);
+#if defined(CONFIG_RELAY)
+		esb_relay_ota_suspend(ESB_RELAY_OTA_QUERY_HOLD_MS);
+#endif
 		esb_send_remote_command(tracker_id, ESB_PONG_FLAG_OTA_QUERY_INFO);
 		break;
 	}
@@ -948,7 +957,7 @@ void esb_ota_relay_process_tracker_packet(const uint8_t *data, size_t len)
 			LOG_INF("OTA: Tracker %u session ended (status=0x%02X)", tracker_id, status);
 			if (ended) {
 				LOG_INF("OTA: Last target removed, session ended");
-				unsuppress_all_trackers();
+				end_session();
 			}
 		}
 		break;
@@ -989,6 +998,9 @@ void esb_ota_relay_console_cmd(uint8_t tracker_id, const char *cmd)
 	if (strcmp(cmd, "info") == 0 || strcmp(cmd, "query") == 0) {
 		if (tracker_id < MAX_TRACKERS) {
 			LOG_INF("OTA: Requesting firmware info from tracker %u", tracker_id);
+#if defined(CONFIG_RELAY)
+			esb_relay_ota_suspend(ESB_RELAY_OTA_QUERY_HOLD_MS);
+#endif
 			esb_send_remote_command(tracker_id, ESB_PONG_FLAG_OTA_QUERY_INFO);
 		}
 	} else if (strcmp(cmd, "abort") == 0 || strcmp(cmd, "cancel") == 0) {

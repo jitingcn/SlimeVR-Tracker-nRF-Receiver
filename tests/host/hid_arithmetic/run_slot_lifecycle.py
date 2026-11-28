@@ -64,10 +64,11 @@ static void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key) {
     relay_locked=false;
     irq_unlock(key);
 }
-static unsigned int releases;
+static unsigned int releases, relay_ends;
+static void esb_relay_ota_end(void) { assert(depth==0 && !relay_locked); relay_ends++; }
 static void unsuppress_all_trackers(void) { assert(depth==0 && !relay_locked); releases++; }
 ''' + ota_decls + '\n'.join(function(ota, name) for name in (
-    'remove_target_locked', 'esb_ota_forget_tracker')) + r'''
+    'end_session', 'remove_target_locked', 'esb_ota_forget_tracker')) + r'''
 int main(void) {
     ota_relay.active=true;
     ota_relay.num_targets=2;
@@ -99,13 +100,13 @@ int main(void) {
     assert(releases==0 && fw_info_pending.pending);
     esb_ota_forget_tracker(5);
     assert(!ota_relay.active && ota_relay.num_targets==0 && ota_relay.ring_head==0);
-    assert(releases==1 && depth==0);
+    assert(releases==1 && relay_ends==1 && depth==0);
     ota_abort_valid[7]=true;
     ota_abort_expiry_ticks[7]=200;
     esb_ota_forget_tracker(7);
     assert(!ota_abort_valid[7] && !fw_info_pending.pending && releases==1);
     esb_ota_forget_tracker(255);
-    assert(releases==1 && depth==0);
+    assert(releases==1 && relay_ends==1 && depth==0);
     puts("OTA slot forget behavior passed");
 }
 '''

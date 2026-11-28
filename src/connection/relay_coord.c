@@ -237,13 +237,9 @@ static uint16_t rc_auto_sustained(struct relay_coord *rc, uint16_t poor, uint16_
 	return sustained;
 }
 
-/* Fence the last partial relay window at actual activation, including
- * low-rate counts carried over from earlier judgements. */
-void relay_coord_auto_native(struct relay_coord *rc, uint32_t now)
+/* Fence partial/OTA-contended windows and anchor a clean native baseline. */
+void relay_coord_fence_native(struct relay_coord *rc, uint32_t now)
 {
-	if (!rc->auto_exit_pending) {
-		return;
-	}
 	rc->auto_exit_pending = false;
 	rc->auto_native_since = rc_auto_since(now);
 	memset(rc->w, 0, sizeof(rc->w));
@@ -253,8 +249,20 @@ void relay_coord_auto_native(struct relay_coord *rc, uint32_t now)
 		t->acc_expected = 0;
 		t->acc_windows = 0;
 		t->weak_windows = 0;
+		t->direct_window_weak = false;
 	}
 	(void)rc_auto_sustained(rc, 0U, 0U, now);
+	rc_auto_restart(rc);
+}
+
+/* Fence the last partial relay window at actual activation, including
+ * low-rate counts carried over from earlier judgements. */
+void relay_coord_auto_native(struct relay_coord *rc, uint32_t now)
+{
+	if (!rc->auto_exit_pending) {
+		return;
+	}
+	relay_coord_fence_native(rc, now);
 }
 
 /* Called after the 500 ms quality judgement. No delivery statistic can

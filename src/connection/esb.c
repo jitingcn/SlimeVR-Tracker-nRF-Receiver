@@ -294,6 +294,8 @@ static void relay_query_update_locked(void);
 /* Profile 0 is held until this uptime after a tracker confirms QUERY_INFO:
  * the staged exit lead plus time for its reliable 66-byte reply. */
 static int64_t relay_query_until;
+/* Profile 0 is held while OTA is preparing, running, or cooling down. */
+static int64_t relay_ota_hold_until;
 static enum relay_mode relay_user_mode = RELAY_MODE_AUTO;
 #endif
 static void tdma_sync_stats_reset(void);
@@ -955,6 +957,16 @@ static struct {
 	int64_t native_guard_until_ms;
 } tdma_staged;
 
+static inline bool esb_relay_ota_held_locked(int64_t now)
+{
+	return esb_ota_relay_is_active() || now < relay_ota_hold_until;
+}
+
+static inline bool esb_relay_profile_active_locked(void)
+{
+	return relay_profile != 0 || (tdma_staged.valid && tdma_staged.p.profile != 0);
+}
+
 static uint16_t relay_test_capacity_tps(void)
 {
 	return relay_profile ? relay_receiver_geometry.tps : 0;
@@ -1362,7 +1374,7 @@ static void tdma_recalculate(bool forced)
 		uint32_t relay_mask = tdma_admissible_mask(new_mask);
 		/* Value 2 is our own relay control TX; only value 1 (other radio ops / fault) suspends relay. */
 		bool relay_requested = relay_control_ready && atomic_get(&radio_operation_busy) != 1
-			&& !esb_ota_relay_is_active() && !receiver_ota_is_active()
+			&& !esb_relay_ota_held_locked(now) && !receiver_ota_is_active()
 			&& !data_collect_is_active() && !data_collect_batch_is_active()
 			&& now >= relay_query_until && relay_roster_eligible(new_mask)
 			&& relay_coord_requested(&relay_coord, relay_user_mode, (uint16_t)relay_mask);
@@ -2711,16 +2723,26 @@ static void esb_stats_thread(void)
 			unsigned int relay_key = irq_lock();
 			IRQ_PROBE_BEGIN(tick);
 			enum relay_mode mode = relay_user_mode;
-			bool relay_enabled = mode != RELAY_MODE_OFF && !esb_ota_relay_is_active();
+			int64_t relay_now = k_uptime_get();
+			uint32_t relay_now_ms = (uint32_t)relay_now;
+			bool ota_held = esb_relay_ota_held_locked(relay_now);
+			bool relay_enabled = mode != RELAY_MODE_OFF && !ota_held;
 			if (relay_enabled != relay_coord.enabled) {
 				relay_coord_set_enabled(&relay_coord, relay_enabled);
+				if (relay_enabled) {
+					relay_coord_fence_native(&relay_coord, relay_now_ms);
+				}
 			}
-			(void)relay_coord_tick(&relay_coord, (uint16_t)tdma_active_mask, k_uptime_get_32());
-			struct esb_auto_loss_snapshot auto_evidence;
-			esb_get_auto_loss_snapshot(&auto_evidence);
 			bool was_engaged = relay_coord.auto_engaged;
-			relay_auto_policy_update((uint16_t)tdma_active_mask, planned_power_down,
-				k_uptime_get_32(), auto_evidence.relay_eligible);
+			if (ota_held) {
+				relay_coord_fence_native(&relay_coord, relay_now_ms);
+			} else {
+				(void)relay_coord_tick(&relay_coord, (uint16_t)tdma_active_mask, relay_now_ms);
+				struct esb_auto_loss_snapshot auto_evidence;
+				esb_get_auto_loss_snapshot(&auto_evidence);
+				relay_auto_policy_update((uint16_t)tdma_active_mask, planned_power_down,
+					relay_now_ms, auto_evidence.relay_eligible);
+			}
 			if (mode != RELAY_MODE_AUTO) {
 				relay_coord.auto_exit_pending = false;
 			}
@@ -3354,10 +3376,16 @@ static void esb_ack_handler_cb(
 		bool staged_pong = false;
 #if defined(CONFIG_RELAY)
 		bool relay_capable = relay_ping_capable(tracker_id, pipe_id, pdu_data);
+		bool relay_ota_wait = esb_relay_profile_active_locked();
 		staged_pong = relay_capable && (tdma_staged_pong_mask(rx_ticks) & BIT(tracker_id));
 #endif
 		if (!channel_confirm && !staged_pong) {
 			cmd = tracker_slots[tracker_id].tracker_remote_command;
+#if defined(CONFIG_RELAY)
+			if (relay_ota_wait && cmd == ESB_PONG_FLAG_OTA_SUPPRESS) {
+				cmd = ESB_PONG_FLAG_NORMAL;
+			}
+#endif
 			/* Keep an active metadata request on duplicate PINGs until its echo
 			 * arrives; channel probes must leave both pending and active tuples alone. */
 			unsigned int metadata_key = irq_lock();
@@ -3381,7 +3409,11 @@ static void esb_ack_handler_cb(
 				cmd = ESB_PONG_FLAG_SHUTDOWN;
 			}
 			/* Keep rebooted non-participating trackers suppressed during OTA. */
-			if (cmd == ESB_PONG_FLAG_NORMAL && esb_ota_relay_is_active() && !esb_ota_relay_is_target(tracker_id)) {
+			if (cmd == ESB_PONG_FLAG_NORMAL && esb_ota_relay_is_active() && !esb_ota_relay_is_target(tracker_id)
+#if defined(CONFIG_RELAY)
+			    && !relay_ota_wait
+#endif
+			) {
 				cmd = ESB_PONG_FLAG_OTA_SUPPRESS;
 			}
 			ota_aborting = esb_ota_relay_abort_pending(tracker_id);
@@ -3573,8 +3605,12 @@ static void esb_ack_handler_cb(
 
 		/* If OTA session has a pending command for this tracker
 		 * (e.g., BEGIN before tracker enters OTA mode), override the
-		 * standard PONG with the OTA payload. */
-		if (!channel_confirm && !staged_pong && esb_ota_relay_is_active() && esb_ota_relay_is_target(tracker_id)) {
+		 * standard PONG with the OTA payload once native TDMA is active. */
+		if (!channel_confirm && !staged_pong
+#if defined(CONFIG_RELAY)
+		    && !relay_ota_wait
+#endif
+		    && esb_ota_relay_is_active() && esb_ota_relay_is_target(tracker_id)) {
 			bool ota_has_ack = false;
 			esb_ota_relay_fill_ack(tracker_id, pipe_id, ack_payload, &ota_has_ack, NULL, 0);
 			if (ota_has_ack) {
@@ -6865,10 +6901,15 @@ void esb_relay_set_mode(enum relay_mode mode)
 	unsigned int key = irq_lock();
 	bool changed = relay_user_mode != mode;
 	relay_user_mode = mode;
+	if (!esb_ota_relay_is_active() && relay_ota_hold_until != 0) {
+		relay_ota_hold_until = 0;
+		changed = true;
+	}
 	if (mode != RELAY_MODE_AUTO) {
 		relay_coord.auto_exit_pending = false;
 	}
-	relay_coord_set_enabled(&relay_coord, mode != RELAY_MODE_OFF && !esb_ota_relay_is_active());
+	int64_t now = k_uptime_get();
+	relay_coord_set_enabled(&relay_coord, mode != RELAY_MODE_OFF && !esb_relay_ota_held_locked(now));
 	if (!relay_query_can_resume()) {
 		relay_query_protected_mask = 0;
 		relay_query_recovering = false;
@@ -6878,6 +6919,44 @@ void esb_relay_set_mode(enum relay_mode mode)
 	if (changed) {
 		k_sem_give(&tdma_membership_wake);
 	}
+}
+
+void esb_relay_ota_suspend(uint32_t hold_ms)
+{
+	unsigned int key = irq_lock();
+	int64_t now = k_uptime_get();
+	int64_t deadline = now + (int64_t)hold_ms;
+	bool wake = now >= relay_ota_hold_until || esb_relay_profile_active_locked() || relay_coord.enabled;
+	if (deadline > relay_ota_hold_until) {
+		relay_ota_hold_until = deadline;
+	}
+	if (relay_coord.enabled) {
+		relay_coord_set_enabled(&relay_coord, false);
+	}
+	relay_coord_fence_native(&relay_coord, (uint32_t)now);
+	if (!relay_query_can_resume()) {
+		relay_query_protected_mask = 0;
+		relay_query_recovering = false;
+		relay_query_suspending = false;
+	}
+	irq_unlock(key);
+	if (wake) {
+		k_sem_give(&tdma_membership_wake);
+	}
+}
+
+void esb_relay_ota_wait_control_tx(void)
+{
+	/* An ephemeral relay control TX holds value 2 for ~200-400 us; yield
+	 * briefly so OTA admission does not spuriously see -EBUSY. */
+	for (unsigned i = 0; i < 5U && atomic_get(&radio_operation_busy) == 2; i++) {
+		k_msleep(1);
+	}
+}
+
+void esb_relay_ota_end(void)
+{
+	esb_relay_ota_suspend(ESB_RELAY_OTA_COOLDOWN_MS);
 }
 
 void esb_relay_block(uint8_t id, uint8_t percent)
@@ -6911,9 +6990,7 @@ bool esb_relay_blocks_ota(uint8_t id)
 		return false;
 	}
 	unsigned int key = irq_lock();
-	bool relayed = (relay_profile != 0)
-		|| (tdma_staged.valid && tdma_staged.p.profile)
-		|| !relay_coord_direct_ready(&relay_coord, id, k_uptime_get_32());
+	bool relayed = esb_relay_profile_active_locked();
 	irq_unlock(key);
 	return relayed;
 }
@@ -7238,7 +7315,7 @@ void esb_relay_print_diagnostics(void)
 	uint32_t protected = relay_query_protected_mask;
 	bool suspending = relay_query_suspending, recovering = relay_query_recovering;
 	int64_t now = k_uptime_get();
-	int64_t hold_left = MAX(relay_query_until - now, 0);
+	int64_t hold_left = MAX(MAX(relay_query_until, relay_ota_hold_until) - now, 0);
 	int32_t recovery_age = (int32_t)((uint32_t)now - relay_query_recovery_started_ms);
 	int32_t recovery_left = recovering ? MAX(TDMA_SHADOW_LEAVE_GRACE_MS - MAX(recovery_age, 0), 0) : 0;
 	uint16_t members = (uint16_t)tdma_active_mask;

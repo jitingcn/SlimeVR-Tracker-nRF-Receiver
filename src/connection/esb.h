@@ -313,12 +313,22 @@ static inline void esb_request_all_shutdown(void)
 
 /* Peer relay coordinator (relay_coord.c). */
 #if defined(CONFIG_RELAY)
+#define ESB_RELAY_OTA_QUERY_HOLD_MS 15000U
+#define ESB_RELAY_OTA_BEGIN_HOLD_MS 20000U
+#define ESB_RELAY_OTA_COOLDOWN_MS   20000U
+
 void esb_relay_set_mode(enum relay_mode mode);
+/* Suspend peer relay for OTA (ISR-safe); restores user mode once OTA + hold end. */
+void esb_relay_ota_suspend(uint32_t hold_ms);
+/* Yield briefly (thread context) if an ephemeral relay control TX holds the radio. */
+void esb_relay_ota_wait_control_tx(void);
+/* Hold native TDMA across inter-batch gaps and tracker reboots after OTA ends. */
+void esb_relay_ota_end(void);
 #endif
 /* Test hook: drop percent% of id's direct uplink (pose and PINGs). */
 void esb_relay_block(uint8_t id, uint8_t percent);
 bool esb_relay_block_mask(uint16_t mask, uint8_t seconds);
-/* Blocks OTA during applied or staged relay, or without a recent healthy direct link. */
+/* True while relay profile 1 is applied or staged for activation. */
 bool esb_relay_blocks_ota(uint8_t id);
 void esb_relay_layout_print(void);
 int esb_relay_layout_set(const char *name, uint16_t value);

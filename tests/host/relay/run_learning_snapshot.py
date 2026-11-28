@@ -100,41 +100,54 @@ struct esb_auto_loss_snapshot { bool relay_eligible; };
 #define LOG_INF(...) ((void)0)
 static enum relay_mode relay_user_mode = RELAY_MODE_AUTO;
 static bool locked;
-static unsigned tdma_active_mask=0x7ff, proof_updates, choice_updates, policy_updates, intent_reads;
+static unsigned tdma_active_mask=0x7ff, proof_updates, choice_updates, policy_updates, intent_reads, fence_calls;
 static uint32_t event_mask=8;
-static bool esb_ota_relay_is_active(void){return false;}
+static int64_t now_ms=500, relay_ota_hold_until;
+static bool ota_active;
+static bool esb_ota_relay_is_active(void){return ota_active;}
+static bool esb_relay_ota_held_locked(int64_t now){return esb_ota_relay_is_active() || now < relay_ota_hold_until;}
 static unsigned irq_lock(void){assert(!locked);locked=true;return 0;}
 static void irq_unlock(unsigned key){assert(!key && locked);locked=false;}
-static uint32_t k_uptime_get_32(void){return 500;}
+static int64_t k_uptime_get(void){return now_ms;}
+static uint32_t k_uptime_get_32(void){return (uint32_t)now_ms;}
 static uint32_t tracker_events_power_down_mask(uint32_t now, uint32_t tail)
 {
- assert(!locked && now==500 && tail == TDMA_SHADOW_LEAVE_GRACE_MS + 2U * RC_LAYOUT_MAX_ACTIVATION_MS
+ assert(!locked && now==(uint32_t)now_ms && tail == TDMA_SHADOW_LEAVE_GRACE_MS + 2U * RC_LAYOUT_MAX_ACTIVATION_MS
         + TDMA_RECONFIG_MIN_MS + 2U * TPS_MONITOR_INTERVAL_MS);intent_reads++;return event_mask;
 }
 static bool relay_query_can_resume(void){assert(locked);return true;}
 void relay_coord_auto_update(struct relay_coord *c, uint16_t members, uint32_t now, bool profile, bool eligible)
 {
  assert(locked && c==&relay_coord && members==(tdma_active_mask & ~event_mask));
- assert(now==500 && profile && eligible);policy_updates++;
+ assert(now==(uint32_t)now_ms && profile && eligible);policy_updates++;
 }
 #define IRQ_PROBE_BEGIN(name)
 #define IRQ_PROBE_END(name)
 #define relay_coord_set_enabled(c,e) ((c)->enabled=(e))
+#define relay_coord_fence_native(c,t) do { assert(locked && (c)==&relay_coord && (t)==(uint32_t)now_ms); fence_calls++; } while (0)
 #define relay_coord_tick(c,m,t) (proof_updates++)
-static void relay_learn_update(uint32_t now){assert(!locked && now==500);choice_updates=proof_updates;}
+static void relay_learn_update(uint32_t now){assert(!locked && now==(uint32_t)now_ms);choice_updates=proof_updates;}
 ''' + policy + r'''
 static void monitor_pass(void){
 ''' + monitor + r'''
 }
 int main(void){
  monitor_pass();
- assert(proof_updates==1 && choice_updates==1 && policy_updates==1 && intent_reads==1);
+ assert(proof_updates==1 && choice_updates==1 && policy_updates==1 && intent_reads==1 && fence_calls==1);
  assert(relay_member_diag.planned_power_down_mask==8 && relay_query_protected_mask==2);
  assert(relay_query_recovering && relay_query_suspending && tdma_active_mask==0x7ff);
  event_mask=0x7ff;monitor_pass();
- assert(proof_updates==2 && choice_updates==2 && policy_updates==2 && intent_reads==2);
+ assert(proof_updates==2 && choice_updates==2 && policy_updates==2 && intent_reads==2 && fence_calls==1);
  assert(relay_member_diag.planned_power_down_mask==0x7ff && !relay_query_protected_mask);
  assert(!relay_query_recovering && relay_query_suspending && tdma_active_mask==0x7ff);
+ /* Active OTA and post-OTA hold disable relay_coord and fence quality ticks. */
+ ota_active=true;monitor_pass();
+ assert(!relay_coord.enabled && proof_updates==2 && policy_updates==2 && fence_calls==2);
+ ota_active=false;relay_ota_hold_until=now_ms+20000;monitor_pass();
+ assert(!relay_coord.enabled && proof_updates==2 && policy_updates==2 && fence_calls==3);
+ /* Once cooldown expires, relay_coord re-enables with a fresh native fence. */
+ now_ms=relay_ota_hold_until;event_mask=8;monitor_pass();
+ assert(relay_coord.enabled && proof_updates==3 && policy_updates==3 && fence_calls==4);
  return 0;
 }
 '''

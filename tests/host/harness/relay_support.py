@@ -26,9 +26,9 @@ def relay_declarations(esb, member_diagnostics=True):
     """Coordinator, published layout, test-hook state and RX statistics."""
     esb = select_relay(esb)
     state = re.findall(r"^static (?:struct relay_coord relay_coord|enum relay_mode relay_user_mode|"
-                       r"int64_t relay_query_until|(?:int64_t|uint(?:8|16|32)_t) relay_block_(?:id|percent|mask|deadline))\b[^\n]*;",
+                       r"int64_t relay_(?:query|ota_hold)_until|(?:int64_t|uint(?:8|16|32)_t) relay_block_(?:id|percent|mask|deadline))\b[^\n]*;",
                        esb, re.MULTILINE)
-    if len(state) != 7:
+    if len(state) != 8:
         raise ValueError(f"relay state declarations changed: {state}")
     stats = re.search(r"^static struct \{\n\tuint32_t arrivals;.*?\} relay_rx_stats;", esb,
                       re.MULTILINE | re.DOTALL)
@@ -66,6 +66,7 @@ def relay_declarations(esb, member_diagnostics=True):
                       "static struct { uint32_t CYCCNT; } fixture_dwt;",
                       "#define DWT (&fixture_dwt)",
                       "static inline void relay_rx_measure(uint32_t start) { (void)start; }",
+                      _function(esb, "esb_relay_profile_active_locked"),
                       _function(esb, "tdma_staged_due_locked"),
                       _function(esb, "relay_coord_init_once"),
                       "__attribute__((constructor)) static void relay_fixture_init(void)"
@@ -107,7 +108,7 @@ def staging_helpers(esb, recalc=False):
     tdma_membership_wake; with recalc, everything tdma_recalculate uses)."""
     wire_members = _function(esb, "tdma_wire_members") if "tdma_wire_members(" in esb else ""
     if recalc:
-        return "\n\n".join(_function(esb, name) for name in ("tdma_advertised_config",) + STAGING_RECALC) + "\n"
+        return "\n\n".join(_function(esb, name) for name in ("esb_relay_ota_held_locked", "tdma_advertised_config") + STAGING_RECALC) + "\n"
     # ACK-only fixtures have no stats thread: count wakeups instead.
     return "\n".join((wire_members, _function(esb, "tdma_pack_config"), _function(esb, "tdma_staged_pong_mask"),
                       "static unsigned tdma_membership_wake_gives;",
