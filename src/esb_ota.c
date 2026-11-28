@@ -618,7 +618,7 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 		}
 		LOG_INF("OTA: Querying firmware info for tracker %u", tracker_id);
 #if defined(CONFIG_RELAY)
-		esb_relay_ota_suspend(ESB_RELAY_OTA_QUERY_HOLD_MS);
+		esb_relay_ota_query();
 #endif
 		esb_send_remote_command(tracker_id, ESB_PONG_FLAG_OTA_QUERY_INFO);
 		break;
@@ -999,7 +999,7 @@ void esb_ota_relay_console_cmd(uint8_t tracker_id, const char *cmd)
 		if (tracker_id < MAX_TRACKERS) {
 			LOG_INF("OTA: Requesting firmware info from tracker %u", tracker_id);
 #if defined(CONFIG_RELAY)
-			esb_relay_ota_suspend(ESB_RELAY_OTA_QUERY_HOLD_MS);
+			esb_relay_ota_query();
 #endif
 			esb_send_remote_command(tracker_id, ESB_PONG_FLAG_OTA_QUERY_INFO);
 		}

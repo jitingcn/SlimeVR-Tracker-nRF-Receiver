@@ -2243,11 +2243,19 @@ static void ota_auto_disables_and_restores_relay(void)
 	assert(relay_profile == 1 && esb_relay_blocks_ota(0));
 
 	uint32_t wakes_before = wake_signals;
-	esb_relay_ota_suspend(ESB_RELAY_OTA_QUERY_HOLD_MS);
+	/* Query suspension keeps relay_coord enabled and preserves query lease protection. */
+	esb_relay_ota_query();
+	assert(wake_signals == wakes_before + 1);
+	assert(relay_coord.enabled && relay_coord.auto_engaged);
+	assert(relay_query_suspending && relay_query_protected_mask == 0x3U);
+	assert(relay_query_until == (int64_t)(now_ms + 15000));
+
+	wakes_before = wake_signals;
+	esb_relay_ota_suspend(ESB_RELAY_OTA_BEGIN_HOLD_MS);
 	assert(wake_signals == wakes_before + 1);
 	assert(!relay_coord.enabled && !relay_coord.auto_engaged);
 	assert(relay_coord.t[0].weak_windows == 0);
-	assert(relay_ota_hold_until == (int64_t)(now_ms + ESB_RELAY_OTA_QUERY_HOLD_MS));
+	assert(relay_ota_hold_until == (int64_t)(now_ms + ESB_RELAY_OTA_BEGIN_HOLD_MS));
 	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
 	assert(tdma_staged.valid && !tdma_staged.p.profile && esb_relay_blocks_ota(0));
 	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();

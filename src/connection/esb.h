@@ -313,12 +313,13 @@ static inline void esb_request_all_shutdown(void)
 
 /* Peer relay coordinator (relay_coord.c). */
 #if defined(CONFIG_RELAY)
-#define ESB_RELAY_OTA_QUERY_HOLD_MS 15000U
 #define ESB_RELAY_OTA_BEGIN_HOLD_MS 20000U
 #define ESB_RELAY_OTA_COOLDOWN_MS   20000U
 
 void esb_relay_set_mode(enum relay_mode mode);
-/* Suspend peer relay for OTA (ISR-safe); restores user mode once OTA + hold end. */
+/* Suspend peer relay for firmware-info query while preserving query lease protection. */
+void esb_relay_ota_query(void);
+/* Suspend peer relay for active OTA (ISR-safe); restores user mode once OTA + hold end. */
 void esb_relay_ota_suspend(uint32_t hold_ms);
 /* Yield briefly (thread context) if an ephemeral relay control TX holds the radio. */
 void esb_relay_ota_wait_control_tx(void);

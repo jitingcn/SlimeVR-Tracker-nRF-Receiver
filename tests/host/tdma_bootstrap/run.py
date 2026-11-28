@@ -96,7 +96,7 @@ functions = [function(name) for name in (
     'tdma_apply_locked', 'tdma_apply_finish', 'tdma_advertised_config', 'esb_loss_operations_idle',
     'relay_force_entry_allowed', 'tdma_recalculate',
     'tracker_store_restore', 'tracker_slot_reset', 'esb_add_pair', 'esb_pop_pair',
-    'relay_auto_ladder_paused', 'esb_relay_set_mode', 'esb_relay_ota_suspend', 'esb_relay_ota_end',
+    'relay_auto_ladder_paused', 'esb_relay_set_mode', 'esb_relay_ota_query', 'esb_relay_ota_suspend', 'esb_relay_ota_end',
     'relay_control_eligible', 'esb_relay_blocks_ota', 'decision_accept',
     'packet_stats_refresh', 'packet_stats_count', 'check_packet_sequence',
 )]
