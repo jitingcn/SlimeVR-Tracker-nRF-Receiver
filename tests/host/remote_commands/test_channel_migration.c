@@ -1601,6 +1601,53 @@ static void test_blocked_pose_receipt(void)
     assert(esb_relay_block_mask(0, 0));
 }
 
+static void test_ota_relay_exit_gating(void)
+{
+    reset(2);
+    struct esb_payload ack = {0};
+    bool has = false, suppress = false;
+    uint8_t ping0[13] = {ESB_PING_TYPE, 0, 10};
+    ping0[12] = crc8_ccitt(0x07, ping0, 12);
+    uint8_t ping1[13] = {ESB_PING_TYPE, 1, 10};
+    ping1[12] = crc8_ccitt(0x07, ping1, 12);
+
+    /* While profile 1 is active (or staged), withhold both OTA_BEGIN ACK
+     * replacement for targets and OTA_SUPPRESS for non-targets. */
+    ota = ota_target = ota_payload = true;
+    tracker_slots[1].tracker_remote_command = ESB_PONG_FLAG_OTA_SUPPRESS;
+    for (unsigned state = 0; state < 2; state++) {
+        relay_profile = (state == 0);
+        tdma_staged.valid = (state == 1);
+        tdma_staged.p.profile = (state == 1);
+        tdma_staged.activation_ticks = now_ticks + 1000;
+        memset(&ack, 0, sizeof(ack));
+        has = suppress = false;
+        esb_ack_handler_cb(ping0, sizeof(ping0), 1, &ack, &has, &suppress);
+        assert(has && ack.data[0] == ESB_PONG_TYPE && ack.data[7] == ESB_PONG_FLAG_NORMAL);
+        memset(&ack, 0, sizeof(ack));
+        has = suppress = false;
+        ota_target = false;
+        esb_ack_handler_cb(ping1, sizeof(ping1), 2, &ack, &has, &suppress);
+        assert(has && ack.data[0] == ESB_PONG_TYPE && ack.data[7] == ESB_PONG_FLAG_NORMAL);
+        ota_target = true;
+    }
+
+    /* Once native profile 0 is active with no staged profile 1, both deliver. */
+    relay_profile = 0;
+    tdma_staged.valid = false;
+    tdma_staged.p.profile = 0;
+    memset(&ack, 0, sizeof(ack));
+    has = suppress = false;
+    esb_ack_handler_cb(ping0, sizeof(ping0), 1, &ack, &has, &suppress);
+    assert(has && ack.length == 17 && ack.data[0] == 0xAB);
+    memset(&ack, 0, sizeof(ack));
+    has = suppress = false;
+    ota_target = false;
+    esb_ack_handler_cb(ping1, sizeof(ping1), 2, &ack, &has, &suppress);
+    assert(has && ack.data[0] == ESB_PONG_TYPE && ack.data[7] == ESB_PONG_FLAG_OTA_SUPPRESS);
+    ota = ota_target = ota_payload = false;
+}
+
 int main(void) {
     test_blocked_pose_receipt();
     test_consecutive_hid_stages();
@@ -1854,6 +1901,7 @@ int main(void) {
     test_sticky_early_confirmations();
     test_sticky_armed_confirmations();
     test_empty_scan_finish_isolation();
+    test_ota_relay_exit_gating();
     puts("PASS receiver channel migration: offline/partial/all, fixed deadline, pending command isolation, snapshot, repeat/clear/zero, RF/storage rollback and exclusion");
     return 0;
 }

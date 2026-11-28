@@ -217,7 +217,7 @@ def main():
                         '\n#else\n' + layout_declarations(native, False) + '\n#endif\n')
         (path/'esb_membership_declarations.inc').write_text(declarations)
         membership = '\n'.join(function(esb, name) for name in (
-            'tdma_loss_reset_windows', 'tdma_pack_config', 'relay_layout_stageable', 'relay_roster_eligible',
+            'tdma_loss_reset_windows', 'tdma_pack_config', 'esb_relay_ota_held_locked', 'relay_layout_stageable', 'relay_roster_eligible',
             'relay_query_can_resume', 'relay_query_update_locked', 'tdma_shadow_observe',
             'tdma_admissible_mask', 'tdma_shadow_forget_tracker', 'tdma_shadow_merge_locked',
             'tdma_slot_ticks_for', 'tdma_staged_pong_mask', 'tdma_defer_wom_locked',

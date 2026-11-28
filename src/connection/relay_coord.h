@@ -257,6 +257,7 @@ void relay_coord_note_frame(struct relay_coord *rc, uint8_t id, enum rc_path pat
 
 void relay_coord_auto_update(struct relay_coord *rc, uint16_t members, uint32_t now, bool applied, bool eligible);
 void relay_coord_auto_native(struct relay_coord *rc, uint32_t now);
+void relay_coord_fence_native(struct relay_coord *rc, uint32_t now);
 void relay_coord_tick(struct relay_coord *rc, uint16_t members, uint32_t now);
 
 /* Trailer for a capable recipient under the published layout. */

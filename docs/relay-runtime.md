@@ -29,7 +29,7 @@ TDMA keeps its 3.15 s lead.
 
 Start single-target or batch raw collection in native TDMA. A private layout, including one already announced for activation, returns busy without starting collection or shutting down the other trackers. Use `relay off` and wait for `engaged=0` before retrying. An exact-rate test below the private frame rate also requests a return to native; a test at the private cap can stay engaged.
 
-Tracker OTA requires a healthy direct link. A firmware-info query can span entry into relay and the staged return to native. A BEGIN refused for lack of a direct link reports a per-target error; querying does not guarantee that a later BEGIN will be admitted. On an ambiguous BEGIN timeout, do not broadcast ABORT or stream a partial batch. Retry after the target's direct connection recovers.
+Tracker OTA runs on native direct TDMA. Firmware-info queries (`HID_OTA_QUERY_INFO`) and `HID_OTA_BEGIN` automatically suspend peer relay, stage a return to native TDMA if profile 1 is active or staged, and hold on-air `ESB_OTA_BEGIN` / `OTA_SUPPRESS` delivery until native profile 0 activates. Relay quality windows are fenced during OTA and for a 20 s post-OTA cooldown so multi-batch updates and rebooting trackers do not trip false link-quality failures or re-engage relay between batches; once the cooldown expires, relay automatically returns to the configured mode (`auto` by default, or `off`/`force` if set by the user). On an ambiguous BEGIN timeout, do not broadcast ABORT or stream a partial batch. Retry after the target's direct connection recovers.
 
 An explicit lower `repair_floor` opts into experimental on-demand repair.
 Its ceiling is the same per-member derived R, and its floor is clamped to

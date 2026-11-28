@@ -206,7 +206,7 @@ static void reset_fixture(uint8_t count, uint64_t time)
     tdma_cap_level = tdma_published_cap_level = 0;
     tdma_loss_reset_windows(); atomic_set(&test_all_enabled, 0);
     atomic_set(&tdma_shadow_desired_changed_at_ms, 0);
-    relay_query_until = 0; relay_query_protected_mask = 0;
+    relay_query_until = 0; relay_ota_hold_until = 0; relay_query_protected_mask = 0;
     relay_query_recovery_started_ms = 0; relay_query_recovering = relay_query_suspending = false;
     tdma_membership_wake.count = wake_signals = 0;
     sync_hook = NULL; mutex_hook = NULL;
@@ -2227,6 +2227,92 @@ static void migration_then_pairing_change(void)
 	assert(!(tdma_staged.revoked_mask & BIT(3)));
 }
 
+static void ota_auto_disables_and_restores_relay(void)
+{
+	/* Auto mode: engaged profile 1 exits when OTA suspends relay, stays off
+	 * through active OTA + 20 s cooldown, clears polluted weak_windows, and
+	 * restores auto once cooldown expires. */
+	two_member_layout(2, true);
+	now_ms = 6000;
+	service();
+	esb_relay_set_mode(RELAY_MODE_AUTO);
+	relay_coord.auto_engaged = true;
+	relay_coord.t[0].weak_windows = RC_WEAK_WINDOWS;
+	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
+	assert(relay_profile == 1 && esb_relay_blocks_ota(0));
+
+	uint32_t wakes_before = wake_signals;
+	esb_relay_ota_suspend(ESB_RELAY_OTA_QUERY_HOLD_MS);
+	assert(wake_signals == wakes_before + 1);
+	assert(!relay_coord.enabled && !relay_coord.auto_engaged);
+	assert(relay_coord.t[0].weak_windows == 0);
+	assert(relay_ota_hold_until == (int64_t)(now_ms + ESB_RELAY_OTA_QUERY_HOLD_MS));
+	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
+	assert(tdma_staged.valid && !tdma_staged.p.profile && esb_relay_blocks_ota(0));
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
+	assert(!relay_profile && !tdma_staged.valid);
+	/* In native profile 0, stale direct_seen/weak_windows no longer block OTA. */
+	relay_coord.t[0].direct_seen = false;
+	relay_coord.t[0].weak_windows = RC_WEAK_WINDOWS;
+	assert(!esb_relay_blocks_ota(0));
+
+	/* Active OTA keeps relay off past the initial hold; ending arms cooldown. */
+	tracker_ota = true;
+	esb_relay_ota_suspend(ESB_RELAY_OTA_BEGIN_HOLD_MS);
+	now_ms += ESB_RELAY_OTA_BEGIN_HOLD_MS + 5000;
+	live(); service();
+	assert(!relay_profile && !tdma_staged.valid);
+	tracker_ota = false;
+	esb_relay_ota_end();
+	assert(relay_ota_hold_until == (int64_t)(now_ms + ESB_RELAY_OTA_COOLDOWN_MS));
+	assert(relay_user_mode == RELAY_MODE_AUTO);
+	/* Even if auto_engaged were set during cooldown, relay stays in profile 0. */
+	relay_coord.enabled = true;
+	relay_coord.auto_engaged = true;
+	now_ms += ESB_RELAY_OTA_COOLDOWN_MS - 1000;
+	live(); service();
+	assert(!relay_profile && !(tdma_staged.valid && tdma_staged.p.profile));
+	/* Once cooldown expires, auto resumes cleanly. */
+	now_ms += 1000 + TDMA_RECONFIG_MIN_MS;
+	live(); service();
+	assert(tdma_staged.valid && tdma_staged.p.profile == 1);
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
+	assert(relay_profile == 1);
+
+	/* Explicit user mode change during cooldown clears the OTA hold immediately. */
+	esb_relay_ota_end();
+	assert(relay_ota_hold_until > (int64_t)now_ms);
+	esb_relay_set_mode(RELAY_MODE_OFF);
+	assert(relay_ota_hold_until == 0 && relay_user_mode == RELAY_MODE_OFF);
+	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
+	assert(!relay_profile);
+	/* Ending OTA while user mode is OFF must not re-enable relay. */
+	esb_relay_ota_end();
+	now_ms += ESB_RELAY_OTA_COOLDOWN_MS + TDMA_RECONFIG_MIN_MS;
+	live(); service();
+	assert(!relay_profile && relay_user_mode == RELAY_MODE_OFF && !relay_coord.enabled);
+
+	/* Explicit FORCE mode also exits during OTA and returns after cooldown. */
+	esb_relay_set_mode(RELAY_MODE_FORCE);
+	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
+	assert(relay_profile == 1);
+	esb_relay_ota_suspend(ESB_RELAY_OTA_BEGIN_HOLD_MS);
+	now_ms += TDMA_RECONFIG_MIN_MS; live(); service();
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
+	assert(!relay_profile && relay_user_mode == RELAY_MODE_FORCE);
+	now_ms += ESB_RELAY_OTA_BEGIN_HOLD_MS + TDMA_RECONFIG_MIN_MS;
+	relay_coord.enabled = true;
+	live(); service();
+	assert(tdma_staged.valid && tdma_staged.p.profile == 1);
+	now_ms += RELAY_LAYOUT_ACTIVATION_MS + 1; live(); service();
+	assert(relay_profile == 1);
+	esb_relay_set_mode(RELAY_MODE_AUTO);
+	puts("PASS ota relay auto-disable: exits profile 1, holds across cooldown, and restores prior mode");
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2) {
@@ -2264,6 +2350,7 @@ int main(int argc, char **argv)
 	permission_off_keeps_control_through_exit();
 	relay_off_and_pairing_keep_b();
 	query_info_holds_profile0();
+	ota_auto_disables_and_restores_relay();
 	runtime_settings_publication();
 	member_cap_owner_blocks();
 	member_cap_native_auto();
