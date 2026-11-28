@@ -205,8 +205,13 @@ static uint8_t reports[512][16];
 static size_t report_count;
 
 bool esb_ota_relay_is_active(void);
-static unsigned relay_suspends, relay_wait_txs, relay_ends;
+static unsigned relay_queries, relay_suspends, relay_wait_txs, relay_ends;
 static uint32_t last_relay_suspend_ms;
+void esb_relay_ota_query(void)
+{
+    external_call();
+    relay_queries++;
+}
 void esb_relay_ota_suspend(uint32_t hold_ms)
 {
     external_call();
@@ -398,7 +403,7 @@ static const uint8_t abort_at_100[13] = {0xf1, 0, 0, 0, 0, 0, 100, 0x31, 0, 0, 0
 static void reset_world(void)
 {
     assert(!irq_mask && !spin_depth && !pending_irq && !radio_owned);
-    relay_suspends = relay_wait_txs = relay_ends = 0;
+    relay_queries = relay_suspends = relay_wait_txs = relay_ends = 0;
     last_relay_suspend_ms = 0;
     memset(&ota_relay, 0, sizeof(ota_relay));
     memset(ota_abort_valid, 0, sizeof(ota_abort_valid));
@@ -770,12 +775,12 @@ static void begin_two(void) { begin(2, begin_a); }
 
 static void test_reservation(void)
 {
-    /* QUERY_INFO suspends relay immediately on HID and console entry. */
+    /* QUERY_INFO uses the query suspension path without disabling relay_coord. */
     reset_world();
     simple(HID_OTA_QUERY_INFO, 2);
-    assert(relay_suspends == 1 && last_relay_suspend_ms == ESB_RELAY_OTA_QUERY_HOLD_MS);
+    assert(relay_queries == 1 && relay_suspends == 0);
     esb_ota_relay_console_cmd(2, "info");
-    assert(relay_suspends == 2 && last_relay_suspend_ms == ESB_RELAY_OTA_QUERY_HOLD_MS);
+    assert(relay_queries == 2 && relay_suspends == 0);
 
     reset_world();
     radio_operation_busy = 1;

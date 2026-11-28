@@ -1610,9 +1610,11 @@ static void test_ota_relay_exit_gating(void)
     ping0[12] = crc8_ccitt(0x07, ping0, 12);
     uint8_t ping1[13] = {ESB_PING_TYPE, 1, 10};
     ping1[12] = crc8_ccitt(0x07, ping1, 12);
+    uint8_t status0[5] = {ESB_OTA_STATUS_TYPE, 0, 0x02, 0, 0};
 
-    /* While profile 1 is active (or staged), withhold both OTA_BEGIN ACK
-     * replacement for targets and OTA_SUPPRESS for non-targets. */
+    /* While profile 1 is active (or staged), withhold OTA_BEGIN ACK replacement
+     * on PING, OTA_SUPPRESS for non-targets, and OTA status ACK replies (except
+     * abort tombstones so a tracker can still cancel during the wait). */
     ota = ota_target = ota_payload = true;
     tracker_slots[1].tracker_remote_command = ESB_PONG_FLAG_OTA_SUPPRESS;
     for (unsigned state = 0; state < 2; state++) {
@@ -1630,15 +1632,29 @@ static void test_ota_relay_exit_gating(void)
         esb_ack_handler_cb(ping1, sizeof(ping1), 2, &ack, &has, &suppress);
         assert(has && ack.data[0] == ESB_PONG_TYPE && ack.data[7] == ESB_PONG_FLAG_NORMAL);
         ota_target = true;
+        memset(&ack, 0, sizeof(ack));
+        has = suppress = false;
+        esb_ack_handler_cb(status0, sizeof(status0), 1, &ack, &has, &suppress);
+        assert(!has);
+        abort_pending[0] = true;
+        memset(&ack, 0, sizeof(ack));
+        has = suppress = false;
+        esb_ack_handler_cb(status0, sizeof(status0), 1, &ack, &has, &suppress);
+        assert(has && ack.length == 17 && ack.data[0] == 0xAB);
+        abort_pending[0] = false;
     }
 
-    /* Once native profile 0 is active with no staged profile 1, both deliver. */
+    /* Once native profile 0 is active with no staged profile 1, all deliver. */
     relay_profile = 0;
     tdma_staged.valid = false;
     tdma_staged.p.profile = 0;
     memset(&ack, 0, sizeof(ack));
     has = suppress = false;
     esb_ack_handler_cb(ping0, sizeof(ping0), 1, &ack, &has, &suppress);
+    assert(has && ack.length == 17 && ack.data[0] == 0xAB);
+    memset(&ack, 0, sizeof(ack));
+    has = suppress = false;
+    esb_ack_handler_cb(status0, sizeof(status0), 1, &ack, &has, &suppress);
     assert(has && ack.length == 17 && ack.data[0] == 0xAB);
     memset(&ack, 0, sizeof(ack));
     has = suppress = false;

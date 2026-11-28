@@ -3652,7 +3652,12 @@ static void esb_ack_handler_cb(
 	/* ---- OTA status/poll packets from tracker in OTA mode ---- */
 	if (data_length >= 2 && pdu_data[0] == ESB_OTA_STATUS_TYPE) {
 		uint8_t tracker_id = pdu_data[1];
-		esb_ota_relay_fill_ack(tracker_id, pipe_id, ack_payload, has_ack_payload, pdu_data, data_length);
+#if defined(CONFIG_RELAY)
+		if (!esb_relay_profile_active_locked() || esb_ota_relay_abort_pending(tracker_id))
+#endif
+		{
+			esb_ota_relay_fill_ack(tracker_id, pipe_id, ack_payload, has_ack_payload, pdu_data, data_length);
+		}
 		return;
 	}
 
@@ -6919,6 +6924,12 @@ void esb_relay_set_mode(enum relay_mode mode)
 	if (changed) {
 		k_sem_give(&tdma_membership_wake);
 	}
+}
+
+void esb_relay_ota_query(void)
+{
+	relay_query_begin();
+	k_sem_give(&tdma_membership_wake);
 }
 
 void esb_relay_ota_suspend(uint32_t hold_ms)
